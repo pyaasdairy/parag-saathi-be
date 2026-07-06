@@ -48,17 +48,17 @@ type ActorRef struct {
 // strings keep the hash material canonical and human-inspectable).
 type Event struct {
 	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Seq        int64          `bson:"seq"         json:"seq"`
-	Type       string         `bson:"type"        json:"type"`
-	EntityType string         `bson:"entity_type" json:"entity_type"`
-	EntityID   string         `bson:"entity_id"   json:"entity_id"`
-	Refs       []Ref          `bson:"refs,omitempty"    json:"refs,omitempty"`
-	Actor      ActorRef       `bson:"actor"       json:"actor"`
-	OrgUnitID  string         `bson:"org_unit_id,omitempty" json:"org_unit_id,omitempty"`
-	Payload    map[string]any `bson:"payload,omitempty"     json:"payload,omitempty"`
-	TS         time.Time      `bson:"ts"          json:"ts"`
-	PrevHash   string         `bson:"prev_hash"   json:"prev_hash"`
-	Hash       string         `bson:"hash"        json:"hash"`
+	Seq        int64              `bson:"seq"         json:"seq"`
+	Type       string             `bson:"type"        json:"type"`
+	EntityType string             `bson:"entity_type" json:"entity_type"`
+	EntityID   string             `bson:"entity_id"   json:"entity_id"`
+	Refs       []Ref              `bson:"refs,omitempty"    json:"refs,omitempty"`
+	Actor      ActorRef           `bson:"actor"       json:"actor"`
+	OrgUnitID  string             `bson:"org_unit_id,omitempty" json:"org_unit_id,omitempty"`
+	Payload    map[string]any     `bson:"payload,omitempty"     json:"payload,omitempty"`
+	TS         time.Time          `bson:"ts"          json:"ts"`
+	PrevHash   string             `bson:"prev_hash"   json:"prev_hash"`
+	Hash       string             `bson:"hash"        json:"hash"`
 }
 
 // AppendInput describes a new event to chain.

@@ -639,5 +639,72 @@ is_hex24 "$POUR_MAHESH_ID" || fail "pour id not ObjectID hex: '$POUR_MAHESH_ID'"
 
 pass "KYC gate holds: PENDING→403 KYC_TIER_INSUFFICIENT→approve→role select OK; ids are ObjectID hex"
 
+# ── step 22: concurrency proof — two simultaneous approvals, only ONE completes ──
+# This is the "duplicacy" guarantee: MongoDB's atomic status-guarded update
+# (filter includes status:PENDING) lets exactly one writer win; the loser gets
+# 409. No Redis lock — the DB itself is the single source of truth.
+step 22 "concurrency: two simultaneous KYC approvals on the SAME record → exactly one 200, one 409"
+DUP_PHONE="9000000096"
+DUP_SESSION="$(login "$DUP_PHONE")"
+req POST /kyc/aadhaar "$DUP_SESSION" '{"aadhaar_number":"123412341296","consent":true,"requested_tier":"FARMER"}'
+expect_status 201 "fresh party submits KYC for concurrency test"
+DUP_KYC_ID="$(jval "d['data']['record']['id']")"
+is_hex24 "$DUP_KYC_ID" || fail "no KYC id for concurrency test: '$DUP_KYC_ID'"
+
+# Fire two approvals in parallel (SUPER_ADMIN sees all scopes). Capture each
+# HTTP status to its own file so the shared req/BODY globals never collide.
+C1="/tmp/saathi-dup-1.code"; C2="/tmp/saathi-dup-2.code"
+curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST "${BASE}/kyc/${DUP_KYC_ID}/approve" \
+  -H "Authorization: Bearer $DISCOVER_ADMIN" >"$C1" &
+P1=$!
+curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST "${BASE}/kyc/${DUP_KYC_ID}/approve" \
+  -H "Authorization: Bearer $DISCOVER_ADMIN" >"$C2" &
+P2=$!
+# Wait ONLY on the two curls (bare `wait` would also block on the background
+# server process started earlier in this script and never return).
+wait "$P1" "$P2"
+CODE1="$(cat "$C1")"; CODE2="$(cat "$C2")"
+log "      parallel approval results: $CODE1 and $CODE2"
+python3 -c "
+codes = sorted(['$CODE1', '$CODE2'])
+assert codes == ['200','409'], 'expected exactly one 200 and one 409, got '+repr(codes)
+" || fail "concurrency guard failed — got $CODE1 and $CODE2 (expected one 200, one 409)"
+# And the record is VERIFIED exactly once, not double-processed.
+req GET /kyc/pending "$DISCOVER_ADMIN"
+jassert "not any(r['id']=='$DUP_KYC_ID' for r in d['data'])" "approved record left the pending queue"
+pass "duplicacy prevented atomically: two concurrent approvals → exactly one completed ($CODE1/$CODE2)"
+
+# ── step 23: live badge — pending count endpoint + SSE nudge on new submission ──
+step 23 "live badge: GET /kyc/pending/count + SSE /events/stream nudge on submit"
+req GET /kyc/pending/count "$DISCOVER_ADMIN"
+expect_status 200 "pending count endpoint"
+jassert "isinstance(d['data']['count'], int) and d['data']['count']>=0" "count is a non-negative integer"
+BADGE_BEFORE="$(jval "d['data']['count']")"
+
+# Open an SSE stream as an admin dashboard, then trigger a submission and
+# assert the live nudge arrives without any refresh.
+SSE_OUT="/tmp/saathi-sse.txt"; : >"$SSE_OUT"
+curl -N -sS --max-time 8 -H "Authorization: Bearer $DISCOVER_ADMIN" "${BASE}/events/stream" >"$SSE_OUT" 2>/dev/null &
+SSE_PID=$!
+sleep 1
+SSE_PHONE="9000000097"
+SSE_SESSION="$(login "$SSE_PHONE")"
+req POST /kyc/aadhaar "$SSE_SESSION" '{"aadhaar_number":"123412341297","consent":true,"requested_tier":"FARMER"}'
+expect_status 201 "submit KYC to fire the SSE nudge"
+sleep 2
+kill "$SSE_PID" 2>/dev/null || true
+wait "$SSE_PID" 2>/dev/null || true
+LC_ALL=C grep -q 'event: ready' "$SSE_OUT"        || fail "SSE stream did not open with a ready event (see $SSE_OUT)"
+LC_ALL=C grep -q 'kyc.pending.changed' "$SSE_OUT" || fail "SSE did not deliver the kyc.pending.changed nudge (see $SSE_OUT)"
+req GET /kyc/pending/count "$DISCOVER_ADMIN"
+expect_status 200 "pending count endpoint (after submit)"
+BADGE_AFTER="$(jval "d['data']['count']")"
+# Integer compare in bash (avoids fragile python-string interpolation of vars).
+[[ "$BADGE_BEFORE" =~ ^[0-9]+$ && "$BADGE_AFTER" =~ ^[0-9]+$ ]] \
+  || fail "badge values not integers: before='$BADGE_BEFORE' after='$BADGE_AFTER'"
+(( BADGE_AFTER >= BADGE_BEFORE + 1 )) \
+  || fail "pending count did not rise after submission (before=$BADGE_BEFORE after=$BADGE_AFTER)"
+pass "live badge works: count endpoint + SSE nudge on submit (badge ${BADGE_BEFORE} to ${BADGE_AFTER})"
+
 log ""
-log "SMOKE PASSED — all 21 steps green (db=$SMOKE_DB, port=$PORT)"
+log "SMOKE PASSED — all 23 steps green (db=$SMOKE_DB, port=$PORT)"

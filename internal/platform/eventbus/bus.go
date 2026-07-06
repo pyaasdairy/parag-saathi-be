@@ -20,7 +20,19 @@ const (
 	TopicSettlementExecuted = "settlement.executed"
 	TopicPayoutCredited     = "payout.credited"
 	TopicMVUDispatched      = "mvu.dispatched"
+	// KYC review queue changed — a record entered PENDING (submitted) or left
+	// it (approved/rejected). Drives the live "pending KYC" dashboard badge via
+	// the SSE hub. Payload: KYCQueueEvent.
+	TopicKYCQueueChanged = "kyc.queue_changed"
 )
+
+// KYCQueueEvent is the payload for TopicKYCQueueChanged. It is a nudge, not a
+// count — subscribers re-query the authoritative, org-scoped pending count.
+type KYCQueueEvent struct {
+	Reason    string `json:"reason"` // "submitted" | "approved" | "rejected"
+	KYCID     string `json:"kyc_id"`
+	SubjectID string `json:"subject_id"` // party whose KYC it is (hex)
+}
 
 // Handler consumes a published event. Payload types are documented per topic
 // by the publishing module.

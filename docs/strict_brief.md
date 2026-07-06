@@ -70,6 +70,30 @@ State-changing steps in the milk→QR chain append an immutable event to `proven
 ### 1.7 Pagination
 List endpoints accept `?limit=` (default 50, max 200) & `?offset=`, and return `meta.total`.
 
+### 1.8 Concurrency & duplicate prevention (how "only one wins")
+Every "two actors at once → only one completes" case is enforced by a **MongoDB atomic
+status-guarded update** — the state check lives *inside* the update filter
+(`update where _id=X AND status=EXPECTED`), so exactly one writer matches and the rest get a
+`409`. This is used for KYC approve/reject, settlement `execute` (with a resume lease), and the
+BMC-lot→batch claim (`DISPATCHED → POOLED`, so one lot can never feed two batches). **No Redis
+lock is used for this** — a single-document atomic update is strictly safer than an external lock
+(one source of truth, no lock-vs-DB drift, no TTL failure modes). Offline pour ingest dedupes the
+same way via the unique `client_event_id`.
+
+### 1.9 Real-time (live dashboards)
+`GET /api/v1/events/stream` is a **Server-Sent Events** stream (any authenticated party). The
+server pushes typed events down the open connection so an already-open dashboard updates without a
+refresh — e.g. `kyc.pending.changed` nudges reviewer dashboards to re-fetch their scoped
+`/kyc/pending/count` badge. The nudge is never trusted as the value; the client re-queries the
+authoritative scoped count (so it can never drift). Single-instance today; at multi-replica scale
+the cross-node fan-out swaps to Redis pub/sub with no route changes.
+
+### 1.10 Rate limiting (single-instance vs replicas)
+Per-IP token bucket. **In-process by default** (each replica limits what it sees). Set `REDIS_URL`
+and it switches to a **shared Redis token bucket** (atomic Lua) for global fairness across
+replicas — fails *open* on a Redis outage so the limiter can never take down the API. Over-limit →
+`429 RATE_LIMITED`.
+
 ---
 
 ## 2. Layered architecture (how a request flows through the code)
@@ -111,7 +135,8 @@ The heart of "one phone = one Party = many roles" + the KYC approval workflow.
 | POST | `/kyc/bank` | session | Mock penny-drop; attaches masked bank details to a PENDING record. |
 | GET | `/kyc/me` | session | My KYC records (masked; vault ref never serialized). |
 | GET | `/kyc/pending` | role:`ORGANISING_MANAGER, DISTRICT_VERIFIER, PCDF_ADMIN, SUPER_ADMIN` | Pending records **within the reviewer's org scope**, enriched with party `{phone, name, tier}`. Audited. |
-| POST | `/kyc/{id}/approve` | role:(same) | Verifies scope + **not self-review** + `CanApproveKYCTier(role, tier)`; sets `VERIFIED`, **upgrades party tier upward only**, notifies the party. Audited. |
+| GET | `/kyc/pending/count` | role:(same) | Live badge value — scoped count of pending KYC. The dashboard renders this and re-fetches it on each SSE `kyc.pending.changed` nudge. Returns `{count, capped}`. |
+| POST | `/kyc/{id}/approve` | role:(same) | Verifies scope + **not self-review** + `CanApproveKYCTier(role, tier)`; sets `VERIFIED` via an **atomic status-guarded update** (two simultaneous approvals → exactly one wins, the other gets `409 KYC_NOT_PENDING`), **upgrades party tier upward only**, notifies the party. Audited. |
 | POST | `/kyc/{id}/reject` | role:(same) | `{reason}` → `REJECTED` + reason, notifies party. Audited. |
 | POST | `/roles/assignments` | role:`SUPER_ADMIN, PCDF_ADMIN, UNION_PRESIDENT, SAMITI_ADHYAKSH, ORGANISING_MANAGER` | Grants a role at an org unit (this is **"deciding a user's position"**). Scope-checked; grant matrix limits who can grant what. Audited (`role.grant`). |
 | DELETE | `/roles/assignments/{id}` | role:(same) | Revokes (status → `REVOKED`, never deleted). Audited (`role.revoke`). |
@@ -230,6 +255,9 @@ issues the role token whose `role_code` tells the frontend which UI to render.
 | GET | `/notifications` | role:`SUPER_ADMIN` | Outbox view (audited; OTP text redacted). |
 | POST | `/notifications/worker/run` | role:`SUPER_ADMIN` | Drains the SMS outbox (mock provider). |
 | GET | `/support/parties/lookup?phone=` | role:`SUPPORT_AGENT, SUPER_ADMIN` | Limited PII lookup; **every call audited**. |
+
+### Cross-cutting endpoint
+`GET /api/v1/events/stream` — SSE live event stream (any authenticated party); see §1.9.
 
 ### Operational endpoints (no `/api/v1`, no auth)
 `GET /healthz` · `GET /readyz` (Mongo ping) · `GET /metrics` (Prometheus) · `GET /version`.

@@ -269,6 +269,22 @@ func (h *handler) listPendingKYC(w http.ResponseWriter, r *http.Request) {
 	httpx.JSONMeta(w, http.StatusOK, items, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
 }
 
+// pendingKYCCount handles GET /kyc/pending/count — the live badge value the
+// reviewer dashboard renders and re-fetches on each "kyc.pending.changed" SSE
+// nudge. Scoped to the reviewer's area.
+func (h *handler) pendingKYCCount(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	count, capped, err := h.svc.pendingKYCCount(r.Context(), actor)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, pendingKYCCountResponse{Count: count, Capped: capped})
+}
+
 // approveKYC handles POST /kyc/{id}/approve.
 func (h *handler) approveKYC(w http.ResponseWriter, r *http.Request) {
 	actor, ok := actorOr401(w, r)

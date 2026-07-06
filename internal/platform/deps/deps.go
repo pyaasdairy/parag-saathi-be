@@ -15,17 +15,21 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/flags"
 	"github.com/pyaas/saathi-backend/internal/platform/orgscope"
 	"github.com/pyaas/saathi-backend/internal/platform/provenance"
+	"github.com/pyaas/saathi-backend/internal/platform/ratelimit"
+	"github.com/pyaas/saathi-backend/internal/platform/sse"
 )
 
 // Deps carries every shared platform service.
 type Deps struct {
-	Cfg    *config.Config
-	Log    *slog.Logger
-	DB     *mongo.Database
-	JWT    *auth.JWTManager
-	Ledger *provenance.Ledger
-	Audit  *audit.Recorder
-	Flags  *flags.Service
-	Orgs   *orgscope.Resolver
-	Bus    *eventbus.Bus
+	Cfg         *config.Config
+	Log         *slog.Logger
+	DB          *mongo.Database
+	JWT         *auth.JWTManager
+	Ledger      *provenance.Ledger
+	Audit       *audit.Recorder
+	Flags       *flags.Service
+	Orgs        *orgscope.Resolver
+	Bus         *eventbus.Bus
+	SSE         *sse.Hub
+	RateLimiter ratelimit.Limiter
 }

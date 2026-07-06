@@ -24,11 +24,11 @@ const (
 	EventBMCLotCreated    = "bmc_lot.created"
 	EventBMCLotClosed     = "bmc_lot.closed"
 	EventBMCLotDispatched = "bmc_lot.dispatched"
-	EventBatchCreated    = "batch.created"
-	EventBatchCompleted  = "batch.completed"
-	EventProductLotMade  = "product_lot.created"
-	EventProductRecalled = "product_lot.recalled"
-	EventQRIssued        = "qr.issued"
+	EventBatchCreated     = "batch.created"
+	EventBatchCompleted   = "batch.completed"
+	EventProductLotMade   = "product_lot.created"
+	EventProductRecalled  = "product_lot.recalled"
+	EventQRIssued         = "qr.issued"
 
 	// Quality / safety gate
 	EventQCRecorded  = "qc.recorded"
@@ -42,8 +42,8 @@ const (
 	EventPayoutCredited      = "payout.credited"
 
 	// Cattle
-	EventAnimalRegistered   = "animal.registered"
-	EventHealthEventLogged  = "health.event_logged"
+	EventAnimalRegistered  = "animal.registered"
+	EventHealthEventLogged = "health.event_logged"
 )
 
 // Provenance entity types (the nodes of the trace graph).

@@ -14,6 +14,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/audit"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
+	"github.com/pyaas/saathi-backend/internal/platform/eventbus"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 )
 
@@ -547,11 +548,24 @@ func (s *service) verifyAadhaar(ctx context.Context, actor auth.Actor, req aadha
 		slog.String("kyc_id", record.ID.Hex()),
 		slog.String("party_id", party.ID.Hex()),
 		slog.String("requested_tier", req.RequestedTier))
+	// Nudge reviewer dashboards: a new record entered the PENDING queue.
+	s.publishKYCQueueChanged("submitted", record.ID, party.ID)
 	return &aadhaarKYCResponse{
 		Record:  &record,
 		Status:  domain.KYCStatusPending,
 		Message: msgAwaitingVerification,
 	}, true, nil
+}
+
+// publishKYCQueueChanged nudges the live "pending KYC" dashboard badge via the
+// event bus → SSE hub. It is a nudge only; subscribers re-query the scoped
+// pending count. Never blocks the request path (the bus dispatches async).
+func (s *service) publishKYCQueueChanged(reason string, kycID, subjectID primitive.ObjectID) {
+	s.deps.Bus.Publish(eventbus.TopicKYCQueueChanged, eventbus.KYCQueueEvent{
+		Reason:    reason,
+		KYCID:     kycID.Hex(),
+		SubjectID: subjectID.Hex(),
+	})
 }
 
 // verifyBank runs the MOCK penny-drop verification and stores ONLY the
@@ -711,6 +725,41 @@ func (s *service) listPendingKYC(ctx context.Context, actor auth.Actor, page htt
 	return items, total, nil
 }
 
+// pendingKYCScanCap bounds the scoped-count scan. The pending queue is a
+// human-drained work-list (realistically dozens, not millions); beyond the cap
+// the badge shows "cap+" rather than paying for an unbounded scan.
+const pendingKYCScanCap = 1000
+
+// pendingKYCCount returns how many PENDING records fall within the reviewer's
+// org scope — the live badge value. It reuses the exact scope logic of the
+// pending list (so badge and list always agree) and dedupes the per-subject
+// scope lookup. Returns (count, capped).
+func (s *service) pendingKYCCount(ctx context.Context, actor auth.Actor) (int64, bool, error) {
+	records, _, err := s.repo.listPendingKYC(ctx, httpx.Page{Limit: pendingKYCScanCap, Offset: 0})
+	if err != nil {
+		return 0, false, err
+	}
+	scopeCache := make(map[primitive.ObjectID]bool)
+	var count int64
+	for _, rec := range records {
+		inScope, seen := scopeCache[rec.PartyID]
+		if !seen {
+			inScope, err = s.kycSubjectInScope(ctx, actor, rec.PartyID)
+			if err != nil {
+				return 0, false, err
+			}
+			scopeCache[rec.PartyID] = inScope
+		}
+		if inScope {
+			count++
+		}
+	}
+	capped := len(records) >= pendingKYCScanCap
+	s.log.InfoContext(ctx, "kyc pending count",
+		slog.String("actor_party_id", actor.PartyID), slog.Int64("count", count), slog.Bool("capped", capped))
+	return count, capped, nil
+}
+
 // approveKYC verifies a PENDING record, upgrades the party's KYC tier upward
 // only, notifies the party and audits the decision. The reviewer's role must
 // be authorised for the requested tier — even SUPER_ADMIN passes through the
@@ -809,6 +858,8 @@ func (s *service) approveKYC(ctx context.Context, actor auth.Actor, id primitive
 		slog.String("new_tier", newTier),
 		slog.String("reviewer_role", actor.RoleCode),
 		slog.String("actor_party_id", actor.PartyID))
+	// Nudge reviewer dashboards: this record left the PENDING queue.
+	s.publishKYCQueueChanged("approved", id, party.ID)
 	return &kycReviewResponse{Record: updated, KYCTier: newTier}, nil
 }
 
@@ -901,6 +952,8 @@ func (s *service) rejectKYC(ctx context.Context, actor auth.Actor, id primitive.
 		slog.String("reviewer_role", actor.RoleCode),
 		slog.String("actor_party_id", actor.PartyID),
 		slog.String("reason", reason))
+	// Nudge reviewer dashboards: this record left the PENDING queue.
+	s.publishKYCQueueChanged("rejected", id, party.ID)
 	return &kycReviewResponse{Record: updated, KYCTier: party.KYCTier}, nil
 }
 

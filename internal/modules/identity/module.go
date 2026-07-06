@@ -69,6 +69,7 @@ func Register(r chi.Router, d *deps.Deps) {
 				domain.RoleSuperAdmin,
 			))
 			r.Get("/pending", h.listPendingKYC)
+			r.Get("/pending/count", h.pendingKYCCount) // live badge value
 			r.Post("/{id}/approve", h.approveKYC)
 			r.Post("/{id}/reject", h.rejectKYC)
 		})

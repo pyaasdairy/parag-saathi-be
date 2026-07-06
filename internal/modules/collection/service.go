@@ -1220,5 +1220,5 @@ func istDayRange(date string) (start, end time.Time, err error) {
 	if parseErr != nil {
 		return time.Time{}, time.Time{}, httpx.BadRequest("VALIDATION", "date must be YYYY-MM-DD")
 	}
-	return day.UTC(), day.Add(24*time.Hour).UTC(), nil
+	return day.UTC(), day.Add(24 * time.Hour).UTC(), nil
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 	"github.com/pyaas/saathi-backend/internal/platform/middleware"
+	"github.com/pyaas/saathi-backend/internal/platform/sse"
 )
 
 // Version is stamped via -ldflags at release build time.
@@ -29,7 +30,7 @@ func New(d *deps.Deps) http.Handler {
 	r.Use(chimw.RealIP)
 	r.Use(middleware.Metrics)
 	r.Use(middleware.RequestLogger(d.Log))
-	r.Use(middleware.PerIPRateLimit(d.Cfg.RateLimitRPS, d.Cfg.RateLimitBurst))
+	r.Use(middleware.RateLimit(d.RateLimiter))
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))
 
@@ -71,6 +72,13 @@ func New(d *deps.Deps) http.Handler {
 			httpx.Error(w, r, httpx.MethodNotAllowed())
 		})
 		api.Use(middleware.AuditMutations(d.Audit))
+
+		// Live event stream (SSE) for already-open dashboards — any
+		// authenticated party; the hub targets events by role. Mounted here
+		// (cross-cutting, not owned by one domain module).
+		api.With(middleware.Authenticate(d.JWT), middleware.RequireSession).
+			Get("/events/stream", sse.StreamHandler(d.SSE))
+
 		RegisterModules(api, d)
 	})
 
