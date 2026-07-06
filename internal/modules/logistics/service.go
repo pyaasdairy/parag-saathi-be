@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
-	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -42,11 +43,24 @@ type service struct {
 	repo   *repo
 	orgs   *orgscope.Resolver
 	ledger *provenance.Ledger
+	log    *slog.Logger
 }
 
 // newService wires the service to its collaborators.
-func newService(repo *repo, orgs *orgscope.Resolver, ledger *provenance.Ledger) *service {
-	return &service{repo: repo, orgs: orgs, ledger: ledger}
+func newService(repo *repo, orgs *orgscope.Resolver, ledger *provenance.Ledger, log *slog.Logger) *service {
+	return &service{repo: repo, orgs: orgs, ledger: ledger, log: log}
+}
+
+// actorID parses the actor's party ObjectID out of its JWT hex string.
+func (s *service) actorID(actor auth.Actor) (primitive.ObjectID, error) {
+	return httpx.ParseID(actor.PartyID, "actor")
+}
+
+// internal logs an unexpected failure with its operation context and maps it
+// to a 500.
+func (s *service) internal(ctx context.Context, op string, err error) *httpx.AppError {
+	s.log.ErrorContext(ctx, op+" failed", slog.Any("err", err))
+	return httpx.Internal(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +72,7 @@ func newService(repo *repo, orgs *orgscope.Resolver, ledger *provenance.Ledger) 
 // the can count. The unique dcs+date+shift index makes creation idempotent-ish
 // (a replay returns CONSIGNMENT_EXISTS).
 func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req createConsignmentRequest) (*domain.DCSConsignment, error) {
-	if req.DCSID == "" {
+	if req.DCSID.IsZero() {
 		return nil, httpx.BadRequest("MISSING_DCS_ID", "dcs_id is required")
 	}
 	if err := validateShift(req.Shift); err != nil {
@@ -69,7 +83,13 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 	if err != nil {
 		return nil, err
 	}
+	actorID, err := s.actorID(actor)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.orgs.RequireInScope(ctx, actor, req.DCSID); err != nil {
+		s.log.WarnContext(ctx, "consignment creation denied: DCS out of scope",
+			slog.String("dcs_id", req.DCSID.Hex()), slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 	org, err := s.orgs.Get(ctx, req.DCSID)
@@ -77,21 +97,24 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 		return nil, err
 	}
 	if org.Type != domain.OrgTypeDCS {
-		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+req.DCSID+" is not a DCS")
+		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+req.DCSID.Hex()+" is not a DCS")
 	}
 
 	rows, err := s.repo.findRecordedPours(ctx, req.DCSID, date, req.Shift)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "create consignment: find recorded pours", err)
 	}
 	if len(rows) == 0 {
+		s.log.WarnContext(ctx, "consignment creation rejected: no RECORDED pours",
+			slog.String("dcs_id", req.DCSID.Hex()), slog.String("date", date),
+			slog.String("shift", req.Shift), slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Unprocessable("NO_POURS_TO_CONSIGN",
-			fmt.Sprintf("no RECORDED pours for DCS %s on %s %s", req.DCSID, date, req.Shift))
+			fmt.Sprintf("no RECORDED pours for DCS %s on %s %s", req.DCSID.Hex(), date, req.Shift))
 	}
 	pourIDs, totalQty, avgFat, avgSNF := aggregatePours(rows)
 
 	consignment := &domain.DCSConsignment{
-		ID:                  uuid.NewString(),
+		ID:                  primitive.NewObjectID(), // pre-generated: insert + ledger refs stay consistent
 		DCSID:               req.DCSID,
 		Date:                date,
 		Shift:               req.Shift,
@@ -101,15 +124,18 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 		AvgFatPct:           avgFat,
 		AvgSNFPct:           avgSNF,
 		Status:              domain.ConsignmentStatusOpen,
-		CreatedBy:           actor.PartyID,
+		CreatedBy:           actorID,
 		CreatedAt:           now,
 	}
 	if err := s.repo.insertConsignment(ctx, consignment); err != nil {
 		if mongo.IsDuplicateKeyError(err) {
+			s.log.WarnContext(ctx, "consignment creation rejected: duplicate for dcs+date+shift",
+				slog.String("dcs_id", req.DCSID.Hex()), slog.String("date", date),
+				slog.String("shift", req.Shift), slog.String("actor_party_id", actor.PartyID))
 			return nil, httpx.Conflict("CONSIGNMENT_EXISTS",
-				fmt.Sprintf("a consignment for DCS %s on %s %s already exists", req.DCSID, date, req.Shift))
+				fmt.Sprintf("a consignment for DCS %s on %s %s already exists", req.DCSID.Hex(), date, req.Shift))
 		}
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "create consignment: insert", err)
 	}
 
 	// Provenance: the pooling-boundary event. Pour refs are capped so the
@@ -120,15 +146,15 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 		if i >= maxPourRefs {
 			break
 		}
-		refs = append(refs, provenance.Ref{EntityType: domain.EntityMilkPour, EntityID: id, Relation: "aggregates"})
+		refs = append(refs, provenance.Ref{EntityType: domain.EntityMilkPour, EntityID: id.Hex(), Relation: "aggregates"})
 	}
 	event, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventConsignmentCreated,
 		EntityType: domain.EntityConsignment,
-		EntityID:   consignment.ID,
+		EntityID:   consignment.ID.Hex(),
 		Refs:       refs,
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  consignment.DCSID,
+		OrgUnitID:  consignment.DCSID.Hex(),
 		Payload: map[string]any{
 			"pour_count":            len(pourIDs),
 			"total_quantity_litres": totalQty,
@@ -138,12 +164,19 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 		},
 	})
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "create consignment: append provenance", err)
 	}
 	if err := s.repo.setConsignmentProvenanceSeq(ctx, consignment.ID, event.Seq); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "create consignment: set provenance seq", err)
 	}
 	consignment.ProvenanceSeq = event.Seq
+	s.log.InfoContext(ctx, "consignment created",
+		slog.String("consignment_id", consignment.ID.Hex()),
+		slog.String("dcs_id", consignment.DCSID.Hex()),
+		slog.String("date", date), slog.String("shift", req.Shift),
+		slog.Int("pour_count", len(pourIDs)),
+		slog.Float64("total_quantity_litres", totalQty),
+		slog.String("actor_party_id", actor.PartyID))
 	return consignment, nil
 }
 
@@ -152,15 +185,21 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 // shift's RECORDED pours so milk recorded between creation and dispatch (the
 // collection module also rejects such pours, belt-and-braces) is reflected in
 // pour_ids, litres, can count and weighted fat/SNF before the load leaves.
-func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id string) (*domain.DCSConsignment, error) {
+func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*domain.DCSConsignment, error) {
 	consignment, err := s.loadConsignment(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, consignment.DCSID); err != nil {
+		s.log.WarnContext(ctx, "consignment dispatch denied: DCS out of scope",
+			slog.String("consignment_id", id.Hex()), slog.String("dcs_id", consignment.DCSID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 	if consignment.Status != domain.ConsignmentStatusOpen {
+		s.log.WarnContext(ctx, "consignment dispatch rejected: not OPEN",
+			slog.String("consignment_id", id.Hex()), slog.String("status", consignment.Status),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_CONSIGNMENT_STATE",
 			"consignment is "+consignment.Status+"; only OPEN consignments can be dispatched")
 	}
@@ -168,7 +207,7 @@ func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id 
 	// Re-aggregate at the seal boundary.
 	rows, err := s.repo.findRecordedPours(ctx, consignment.DCSID, consignment.Date, consignment.Shift)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "dispatch consignment: find recorded pours", err)
 	}
 	extraSet := bson.D{}
 	if len(rows) > 0 {
@@ -190,18 +229,20 @@ func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id 
 	now := time.Now().UTC()
 	matched, err := s.repo.markConsignmentDispatched(ctx, id, now, extraSet)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "dispatch consignment: mark dispatched", err)
 	}
 	if !matched { // lost a state race since the read above
+		s.log.WarnContext(ctx, "consignment dispatch rejected: lost state race",
+			slog.String("consignment_id", id.Hex()), slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_CONSIGNMENT_STATE",
 			"consignment was modified concurrently; reload and retry")
 	}
 	event, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventConsignmentDispatched,
 		EntityType: domain.EntityConsignment,
-		EntityID:   consignment.ID,
+		EntityID:   consignment.ID.Hex(),
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  consignment.DCSID,
+		OrgUnitID:  consignment.DCSID.Hex(),
 		Payload: map[string]any{
 			"pour_count":            len(consignment.PourIDs),
 			"total_quantity_litres": consignment.TotalQuantityLitres,
@@ -211,14 +252,20 @@ func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id 
 		},
 	})
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "dispatch consignment: append provenance", err)
 	}
 	if err := s.repo.setConsignmentProvenanceSeq(ctx, consignment.ID, event.Seq); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "dispatch consignment: set provenance seq", err)
 	}
 	consignment.Status = domain.ConsignmentStatusDispatch
 	consignment.DispatchedAt = &now
 	consignment.ProvenanceSeq = event.Seq
+	s.log.InfoContext(ctx, "consignment dispatched",
+		slog.String("consignment_id", consignment.ID.Hex()),
+		slog.String("dcs_id", consignment.DCSID.Hex()),
+		slog.Int("pour_count", len(consignment.PourIDs)),
+		slog.Float64("total_quantity_litres", consignment.TotalQuantityLitres),
+		slog.String("actor_party_id", actor.PartyID))
 	return consignment, nil
 }
 
@@ -227,18 +274,24 @@ func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id 
 // may list unfiltered; everyone else must name a dcs_id inside their scope.
 func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q consignmentListQuery, page httpx.Page) ([]domain.DCSConsignment, int64, error) {
 	dcsID := q.DCSID
-	if dcsID == "" {
+	if dcsID.IsZero() {
 		switch {
 		case actor.OrgType == domain.OrgTypeDCS && actor.OrgUnitID != "":
-			dcsID = actor.OrgUnitID
+			id, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+			if err != nil {
+				return nil, 0, err
+			}
+			dcsID = id
 		case actor.RoleCode == domain.RoleSuperAdmin || actor.RoleCode == domain.RoleStateAuditor:
 			// federation-wide read roles may scan unfiltered (still paged)
 		default:
 			return nil, 0, httpx.BadRequest("DCS_ID_REQUIRED", "dcs_id query parameter is required for your role")
 		}
 	}
-	if dcsID != "" {
+	if !dcsID.IsZero() {
 		if err := s.orgs.RequireInScope(ctx, actor, dcsID); err != nil {
+			s.log.WarnContext(ctx, "consignment list denied: DCS out of scope",
+				slog.String("dcs_id", dcsID.Hex()), slog.String("actor_party_id", actor.PartyID))
 			return nil, 0, err
 		}
 	}
@@ -252,7 +305,7 @@ func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q cons
 	}
 	items, total, err := s.repo.listConsignments(ctx, dcsID, q.Date, q.Status, page)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, s.internal(ctx, "list consignments", err)
 	}
 	return items, total, nil
 }
@@ -268,7 +321,7 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 	if req.RouteName == "" {
 		return nil, httpx.BadRequest("MISSING_ROUTE_NAME", "route_name is required")
 	}
-	if req.UnionID == "" {
+	if req.UnionID.IsZero() {
 		return nil, httpx.BadRequest("MISSING_UNION_ID", "union_id is required")
 	}
 	if err := validateShift(req.Shift); err != nil {
@@ -286,6 +339,8 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 		return nil, err
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, req.UnionID); err != nil {
+		s.log.WarnContext(ctx, "trip creation denied: union out of scope",
+			slog.String("union_id", req.UnionID.Hex()), slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 	union, err := s.orgs.Get(ctx, req.UnionID)
@@ -293,25 +348,31 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 		return nil, err
 	}
 	if union.Type != domain.OrgTypeMilkUnion {
-		return nil, httpx.BadRequest("NOT_A_UNION", "org unit "+req.UnionID+" is not a MILK_UNION")
+		return nil, httpx.BadRequest("NOT_A_UNION", "org unit "+req.UnionID.Hex()+" is not a MILK_UNION")
 	}
 
-	riderPartyID := req.VanRiderPartyID
-	if riderPartyID == "" {
+	var riderPartyID primitive.ObjectID
+	if req.VanRiderPartyID != nil && !req.VanRiderPartyID.IsZero() {
+		riderPartyID = *req.VanRiderPartyID
+	} else {
 		if actor.RoleCode != domain.RoleVanRider {
 			return nil, httpx.BadRequest("RIDER_REQUIRED", "van_rider_party_id is required unless a VAN_RIDER plans their own trip")
 		}
-		riderPartyID = actor.PartyID
+		actorID, err := s.actorID(actor)
+		if err != nil {
+			return nil, err
+		}
+		riderPartyID = actorID
 	}
 
-	seen := make(map[string]struct{}, len(req.Stops))
+	seen := make(map[primitive.ObjectID]struct{}, len(req.Stops))
 	stops := make([]domain.RouteStop, 0, len(req.Stops))
 	for _, stop := range req.Stops {
-		if stop.DCSID == "" || stop.ConsignmentID == "" {
+		if stop.DCSID.IsZero() || stop.ConsignmentID.IsZero() {
 			return nil, httpx.BadRequest("INVALID_STOP", "every stop needs dcs_id and consignment_id")
 		}
 		if _, dup := seen[stop.ConsignmentID]; dup {
-			return nil, httpx.BadRequest("DUPLICATE_STOP", "consignment "+stop.ConsignmentID+" appears in more than one stop")
+			return nil, httpx.BadRequest("DUPLICATE_STOP", "consignment "+stop.ConsignmentID.Hex()+" appears in more than one stop")
 		}
 		seen[stop.ConsignmentID] = struct{}{}
 
@@ -320,13 +381,19 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 			return nil, err
 		}
 		if aerr := validateStopConsignment(consignment, stop.DCSID); aerr != nil {
+			s.log.WarnContext(ctx, "trip creation rejected: invalid stop consignment",
+				slog.String("consignment_id", stop.ConsignmentID.Hex()),
+				slog.String("stop_dcs_id", stop.DCSID.Hex()),
+				slog.String("consignment_status", consignment.Status),
+				slog.String("code", aerr.Code),
+				slog.String("actor_party_id", actor.PartyID))
 			return nil, aerr
 		}
 		stops = append(stops, domain.RouteStop{DCSID: stop.DCSID, ConsignmentID: stop.ConsignmentID})
 	}
 
 	trip := &domain.RouteTrip{
-		ID:              uuid.NewString(),
+		ID:              primitive.NewObjectID(), // pre-generated so provenance can reference it later
 		RouteName:       req.RouteName,
 		UnionID:         req.UnionID,
 		VanRiderPartyID: riderPartyID,
@@ -337,23 +404,38 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 		CreatedAt:       now,
 	}
 	if err := s.repo.insertTrip(ctx, trip); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "create trip: insert", err)
 	}
+	s.log.InfoContext(ctx, "trip created",
+		slog.String("trip_id", trip.ID.Hex()),
+		slog.String("union_id", trip.UnionID.Hex()),
+		slog.String("van_rider_party_id", trip.VanRiderPartyID.Hex()),
+		slog.String("route_name", trip.RouteName),
+		slog.String("date", date), slog.String("shift", req.Shift),
+		slog.Int("stop_count", len(stops)),
+		slog.String("actor_party_id", actor.PartyID))
 	return trip, nil
 }
 
 // pickupStop records the trip's rider collecting one consignment: the stop is
 // stamped with time+temperature, the consignment moves DISPATCHED→PICKED_UP,
 // and the trip moves to IN_PROGRESS on its first pickup.
-func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, consignmentID string, req pickupRequest) (*domain.RouteTrip, error) {
+func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, consignmentID primitive.ObjectID, req pickupRequest) (*domain.RouteTrip, error) {
 	if err := validateTemp(req.TempC); err != nil {
+		return nil, err
+	}
+	actorID, err := s.actorID(actor)
+	if err != nil {
 		return nil, err
 	}
 	trip, err := s.loadTrip(ctx, tripID)
 	if err != nil {
 		return nil, err
 	}
-	if aerr := validatePickup(trip, actor.PartyID, consignmentID); aerr != nil {
+	if aerr := validatePickup(trip, actorID, consignmentID); aerr != nil {
+		s.log.WarnContext(ctx, "stop pickup rejected",
+			slog.String("trip_id", tripID.Hex()), slog.String("consignment_id", consignmentID.Hex()),
+			slog.String("code", aerr.Code), slog.String("actor_party_id", actor.PartyID))
 		return nil, aerr
 	}
 
@@ -361,38 +443,42 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 	// consignment can board the van.
 	matched, err := s.repo.markConsignmentPickedUp(ctx, consignmentID, trip.ID)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "pickup stop: mark consignment picked up", err)
 	}
 	if !matched {
 		consignment, err := s.loadConsignment(ctx, consignmentID)
 		if err != nil {
 			return nil, err
 		}
+		s.log.WarnContext(ctx, "stop pickup rejected: consignment not DISPATCHED",
+			slog.String("trip_id", tripID.Hex()), slog.String("consignment_id", consignmentID.Hex()),
+			slog.String("consignment_status", consignment.Status),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("CONSIGNMENT_NOT_DISPATCHED",
 			"consignment is "+consignment.Status+"; only DISPATCHED consignments can be picked up")
 	}
 
 	now := time.Now().UTC()
 	if err := s.repo.markStopPickedUp(ctx, trip.ID, consignmentID, now, *req.TempC, req.Notes); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "pickup stop: mark stop picked up", err)
 	}
 
 	event, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventConsignmentPickedUp,
 		EntityType: domain.EntityConsignment,
-		EntityID:   consignmentID,
+		EntityID:   consignmentID.Hex(),
 		Refs: []provenance.Ref{
-			{EntityType: domain.EntityRouteTrip, EntityID: trip.ID, Relation: "carried_by"},
+			{EntityType: domain.EntityRouteTrip, EntityID: trip.ID.Hex(), Relation: "carried_by"},
 		},
 		Actor:     provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID: trip.UnionID,
+		OrgUnitID: trip.UnionID.Hex(),
 		Payload:   map[string]any{"temp_c": *req.TempC},
 	})
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "pickup stop: append provenance", err)
 	}
 	if err := s.repo.setConsignmentProvenanceSeq(ctx, consignmentID, event.Seq); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "pickup stop: set provenance seq", err)
 	}
 
 	trip.Status = domain.TripStatusInProgress
@@ -401,20 +487,32 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 		trip.Stops[i].TempC = *req.TempC
 		trip.Stops[i].Notes = req.Notes
 	}
+	s.log.InfoContext(ctx, "stop picked up",
+		slog.String("trip_id", trip.ID.Hex()),
+		slog.String("consignment_id", consignmentID.Hex()),
+		slog.Float64("temp_c", *req.TempC),
+		slog.String("actor_party_id", actor.PartyID))
 	return trip, nil
 }
 
 // logColdChain appends one in-transit temperature sample to the trip —
 // tamper-evidence for the perishable load between village and BMC.
-func (s *service) logColdChain(ctx context.Context, actor auth.Actor, tripID string, req coldChainRequest) (*domain.RouteTrip, error) {
+func (s *service) logColdChain(ctx context.Context, actor auth.Actor, tripID primitive.ObjectID, req coldChainRequest) (*domain.RouteTrip, error) {
 	if err := validateTemp(req.TempC); err != nil {
+		return nil, err
+	}
+	actorID, err := s.actorID(actor)
+	if err != nil {
 		return nil, err
 	}
 	trip, err := s.loadTrip(ctx, tripID)
 	if err != nil {
 		return nil, err
 	}
-	if aerr := validateColdChain(trip, actor.PartyID); aerr != nil {
+	if aerr := validateColdChain(trip, actorID); aerr != nil {
+		s.log.WarnContext(ctx, "cold-chain log rejected",
+			slog.String("trip_id", tripID.Hex()), slog.String("code", aerr.Code),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, aerr
 	}
 	entry := domain.ColdChainEntry{
@@ -424,38 +522,49 @@ func (s *service) logColdChain(ctx context.Context, actor auth.Actor, tripID str
 		GeoLng: req.GeoLng,
 	}
 	if err := s.repo.pushColdChain(ctx, trip.ID, entry); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "log cold chain: push entry", err)
 	}
 	event, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventColdChainLogged,
 		EntityType: domain.EntityRouteTrip,
-		EntityID:   trip.ID,
+		EntityID:   trip.ID.Hex(),
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  trip.UnionID,
+		OrgUnitID:  trip.UnionID.Hex(),
 		Payload:    map[string]any{"temp_c": *req.TempC},
 	})
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "log cold chain: append provenance", err)
 	}
 	if err := s.repo.setTripProvenanceSeq(ctx, trip.ID, event.Seq); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "log cold chain: set provenance seq", err)
 	}
 	trip.ColdChain = append(trip.ColdChain, entry)
 	trip.ProvenanceSeq = event.Seq
+	s.log.InfoContext(ctx, "cold chain logged",
+		slog.String("trip_id", trip.ID.Hex()),
+		slog.Float64("temp_c", *req.TempC),
+		slog.String("actor_party_id", actor.PartyID))
 	return trip, nil
 }
 
 // deliverTrip hands the whole load to a BMC: every stop must be picked up,
 // the trip moves IN_PROGRESS→DELIVERED and its consignments PICKED_UP→DELIVERED.
-func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID string, req deliverRequest) (*domain.RouteTrip, error) {
-	if req.BMCID == "" {
+func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID primitive.ObjectID, req deliverRequest) (*domain.RouteTrip, error) {
+	if req.BMCID.IsZero() {
 		return nil, httpx.BadRequest("MISSING_BMC_ID", "bmc_id is required")
+	}
+	actorID, err := s.actorID(actor)
+	if err != nil {
+		return nil, err
 	}
 	trip, err := s.loadTrip(ctx, tripID)
 	if err != nil {
 		return nil, err
 	}
-	if aerr := validateDeliver(trip, actor.PartyID); aerr != nil {
+	if aerr := validateDeliver(trip, actorID); aerr != nil {
+		s.log.WarnContext(ctx, "trip delivery rejected",
+			slog.String("trip_id", tripID.Hex()), slog.String("code", aerr.Code),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, aerr
 	}
 	bmc, err := s.orgs.Get(ctx, req.BMCID)
@@ -463,50 +572,57 @@ func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID stri
 		return nil, err
 	}
 	if bmc.Type != domain.OrgTypeBMC {
-		return nil, httpx.BadRequest("NOT_A_BMC", "org unit "+req.BMCID+" is not a BMC")
+		return nil, httpx.BadRequest("NOT_A_BMC", "org unit "+req.BMCID.Hex()+" is not a BMC")
 	}
 
 	now := time.Now().UTC()
 	matched, err := s.repo.markTripDelivered(ctx, trip.ID, req.BMCID, now)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "deliver trip: mark delivered", err)
 	}
 	if !matched { // lost a state race since the read above
+		s.log.WarnContext(ctx, "trip delivery rejected: lost state race",
+			slog.String("trip_id", tripID.Hex()), slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_TRIP_STATE", "trip was modified concurrently; reload and retry")
 	}
 
-	consignmentIDs := make([]string, 0, len(trip.Stops))
+	consignmentIDs := make([]primitive.ObjectID, 0, len(trip.Stops))
 	refs := make([]provenance.Ref, 0, len(trip.Stops))
 	for _, stop := range trip.Stops {
 		consignmentIDs = append(consignmentIDs, stop.ConsignmentID)
 		refs = append(refs, provenance.Ref{
-			EntityType: domain.EntityConsignment, EntityID: stop.ConsignmentID, Relation: "delivered",
+			EntityType: domain.EntityConsignment, EntityID: stop.ConsignmentID.Hex(), Relation: "delivered",
 		})
 	}
 	if err := s.repo.markConsignmentsDelivered(ctx, consignmentIDs); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "deliver trip: mark consignments delivered", err)
 	}
 
 	event, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventTripDelivered,
 		EntityType: domain.EntityRouteTrip,
-		EntityID:   trip.ID,
+		EntityID:   trip.ID.Hex(),
 		Refs:       refs,
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  trip.UnionID,
-		Payload:    map[string]any{"bmc_id": req.BMCID},
+		OrgUnitID:  trip.UnionID.Hex(),
+		Payload:    map[string]any{"bmc_id": req.BMCID.Hex()},
 	})
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "deliver trip: append provenance", err)
 	}
 	if err := s.repo.setTripProvenanceSeq(ctx, trip.ID, event.Seq); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "deliver trip: set provenance seq", err)
 	}
 
 	trip.Status = domain.TripStatusDelivered
-	trip.DeliveredToBMCID = req.BMCID
+	trip.DeliveredToBMCID = &req.BMCID
 	trip.DeliveredAt = &now
 	trip.ProvenanceSeq = event.Seq
+	s.log.InfoContext(ctx, "trip delivered",
+		slog.String("trip_id", trip.ID.Hex()),
+		slog.String("bmc_id", req.BMCID.Hex()),
+		slog.Int("consignment_count", len(consignmentIDs)),
+		slog.String("actor_party_id", actor.PartyID))
 	return trip, nil
 }
 
@@ -517,14 +633,25 @@ func (s *service) listTrips(ctx context.Context, actor auth.Actor, q tripListQue
 	unionID := q.UnionID
 	riderPartyID := q.VanRiderPartyID
 	if actor.RoleCode == domain.RoleVanRider {
-		riderPartyID = actor.PartyID // riders only ever see their own trips
-	} else {
-		if unionID == "" &&
-			actor.RoleCode != domain.RoleSuperAdmin && actor.RoleCode != domain.RoleStateAuditor {
-			unionID = actor.OrgUnitID // supervisors/presidents default to their union
+		actorID, err := s.actorID(actor)
+		if err != nil {
+			return nil, 0, err
 		}
-		if unionID != "" {
+		riderPartyID = actorID // riders only ever see their own trips
+	} else {
+		if unionID.IsZero() &&
+			actor.RoleCode != domain.RoleSuperAdmin && actor.RoleCode != domain.RoleStateAuditor &&
+			actor.OrgUnitID != "" {
+			id, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+			if err != nil {
+				return nil, 0, err
+			}
+			unionID = id // supervisors/presidents default to their union
+		}
+		if !unionID.IsZero() {
 			if err := s.orgs.RequireInScope(ctx, actor, unionID); err != nil {
+				s.log.WarnContext(ctx, "trip list denied: union out of scope",
+					slog.String("union_id", unionID.Hex()), slog.String("actor_party_id", actor.PartyID))
 				return nil, 0, err
 			}
 		}
@@ -536,25 +663,34 @@ func (s *service) listTrips(ctx context.Context, actor auth.Actor, q tripListQue
 	}
 	items, total, err := s.repo.listTrips(ctx, unionID, q.Date, riderPartyID, page)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, s.internal(ctx, "list trips", err)
 	}
 	return items, total, nil
 }
 
 // getTrip returns one trip: a rider only their own, everyone else within
 // union scope.
-func (s *service) getTrip(ctx context.Context, actor auth.Actor, tripID string) (*domain.RouteTrip, error) {
+func (s *service) getTrip(ctx context.Context, actor auth.Actor, tripID primitive.ObjectID) (*domain.RouteTrip, error) {
 	trip, err := s.loadTrip(ctx, tripID)
 	if err != nil {
 		return nil, err
 	}
 	if actor.RoleCode == domain.RoleVanRider {
-		if trip.VanRiderPartyID != actor.PartyID {
+		actorID, err := s.actorID(actor)
+		if err != nil {
+			return nil, err
+		}
+		if trip.VanRiderPartyID != actorID {
+			s.log.WarnContext(ctx, "trip read denied: assigned to another rider",
+				slog.String("trip_id", tripID.Hex()), slog.String("actor_party_id", actor.PartyID))
 			return nil, httpx.Forbidden("this trip is assigned to another van rider")
 		}
 		return trip, nil
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, trip.UnionID); err != nil {
+		s.log.WarnContext(ctx, "trip read denied: union out of scope",
+			slog.String("trip_id", tripID.Hex()), slog.String("union_id", trip.UnionID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 	return trip, nil
@@ -565,25 +701,25 @@ func (s *service) getTrip(ctx context.Context, actor auth.Actor, tripID string) 
 // ---------------------------------------------------------------------------
 
 // loadConsignment fetches a consignment, mapping a miss to 404.
-func (s *service) loadConsignment(ctx context.Context, id string) (*domain.DCSConsignment, error) {
+func (s *service) loadConsignment(ctx context.Context, id primitive.ObjectID) (*domain.DCSConsignment, error) {
 	c, err := s.repo.findConsignmentByID(ctx, id)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("consignment " + id)
+		return nil, httpx.NotFound("consignment " + id.Hex())
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "load consignment", err)
 	}
 	return c, nil
 }
 
 // loadTrip fetches a trip, mapping a miss to 404.
-func (s *service) loadTrip(ctx context.Context, id string) (*domain.RouteTrip, error) {
+func (s *service) loadTrip(ctx context.Context, id primitive.ObjectID) (*domain.RouteTrip, error) {
 	t, err := s.repo.findTripByID(ctx, id)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("trip " + id)
+		return nil, httpx.NotFound("trip " + id.Hex())
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internal(ctx, "load trip", err)
 	}
 	return t, nil
 }
@@ -594,9 +730,9 @@ func (s *service) loadTrip(ctx context.Context, id string) (*domain.RouteTrip, e
 
 // aggregatePours reduces pour rows to (ids, total litres, quantity-weighted
 // average fat %, quantity-weighted average SNF %), rounded to 2 decimals.
-func aggregatePours(rows []pourRow) (pourIDs []string, totalQty, avgFat, avgSNF float64) {
+func aggregatePours(rows []pourRow) (pourIDs []primitive.ObjectID, totalQty, avgFat, avgSNF float64) {
 	var fatWeighted, snfWeighted float64
-	pourIDs = make([]string, 0, len(rows))
+	pourIDs = make([]primitive.ObjectID, 0, len(rows))
 	for _, row := range rows {
 		pourIDs = append(pourIDs, row.ID)
 		totalQty += row.QuantityLitres
@@ -657,7 +793,7 @@ func isConsignmentStatus(s string) bool {
 }
 
 // findStop returns the index of the stop carrying consignmentID, or -1.
-func findStop(trip *domain.RouteTrip, consignmentID string) int {
+func findStop(trip *domain.RouteTrip, consignmentID primitive.ObjectID) int {
 	for i := range trip.Stops {
 		if trip.Stops[i].ConsignmentID == consignmentID {
 			return i
@@ -667,7 +803,7 @@ func findStop(trip *domain.RouteTrip, consignmentID string) int {
 }
 
 // requireTripRider enforces that only the trip's assigned van rider acts on it.
-func requireTripRider(trip *domain.RouteTrip, riderPartyID string) *httpx.AppError {
+func requireTripRider(trip *domain.RouteTrip, riderPartyID primitive.ObjectID) *httpx.AppError {
 	if trip.VanRiderPartyID != riderPartyID {
 		return httpx.Forbidden("this trip is assigned to another van rider")
 	}
@@ -676,21 +812,21 @@ func requireTripRider(trip *domain.RouteTrip, riderPartyID string) *httpx.AppErr
 
 // validateStopConsignment guards trip planning: the stop's consignment must
 // be DISPATCHED (state machine) and must belong to the stop's DCS.
-func validateStopConsignment(consignment *domain.DCSConsignment, stopDCSID string) *httpx.AppError {
+func validateStopConsignment(consignment *domain.DCSConsignment, stopDCSID primitive.ObjectID) *httpx.AppError {
 	if consignment.Status != domain.ConsignmentStatusDispatch {
 		return httpx.Conflict("CONSIGNMENT_NOT_DISPATCHED",
-			"consignment "+consignment.ID+" is "+consignment.Status+"; only DISPATCHED consignments can be planned onto a trip")
+			"consignment "+consignment.ID.Hex()+" is "+consignment.Status+"; only DISPATCHED consignments can be planned onto a trip")
 	}
 	if consignment.DCSID != stopDCSID {
 		return httpx.Unprocessable("CONSIGNMENT_DCS_MISMATCH",
-			"consignment "+consignment.ID+" belongs to DCS "+consignment.DCSID+", not the stop's DCS "+stopDCSID)
+			"consignment "+consignment.ID.Hex()+" belongs to DCS "+consignment.DCSID.Hex()+", not the stop's DCS "+stopDCSID.Hex())
 	}
 	return nil
 }
 
 // validatePickup guards the pickup transition: right rider, trip not yet
 // delivered, stop exists, stop not already picked.
-func validatePickup(trip *domain.RouteTrip, riderPartyID, consignmentID string) *httpx.AppError {
+func validatePickup(trip *domain.RouteTrip, riderPartyID, consignmentID primitive.ObjectID) *httpx.AppError {
 	if err := requireTripRider(trip, riderPartyID); err != nil {
 		return err
 	}
@@ -699,16 +835,16 @@ func validatePickup(trip *domain.RouteTrip, riderPartyID, consignmentID string) 
 	}
 	i := findStop(trip, consignmentID)
 	if i < 0 {
-		return httpx.NotFound("stop for consignment " + consignmentID)
+		return httpx.NotFound("stop for consignment " + consignmentID.Hex())
 	}
 	if trip.Stops[i].PickedUpAt != nil {
-		return httpx.Conflict("STOP_ALREADY_PICKED", "consignment "+consignmentID+" was already picked up on this trip")
+		return httpx.Conflict("STOP_ALREADY_PICKED", "consignment "+consignmentID.Hex()+" was already picked up on this trip")
 	}
 	return nil
 }
 
 // validateColdChain guards cold-chain logging: right rider, trip still moving.
-func validateColdChain(trip *domain.RouteTrip, riderPartyID string) *httpx.AppError {
+func validateColdChain(trip *domain.RouteTrip, riderPartyID primitive.ObjectID) *httpx.AppError {
 	if err := requireTripRider(trip, riderPartyID); err != nil {
 		return err
 	}
@@ -720,7 +856,7 @@ func validateColdChain(trip *domain.RouteTrip, riderPartyID string) *httpx.AppEr
 
 // validateDeliver guards delivery: right rider, not already delivered, and
 // every stop picked up (partial loads cannot be handed to a BMC).
-func validateDeliver(trip *domain.RouteTrip, riderPartyID string) *httpx.AppError {
+func validateDeliver(trip *domain.RouteTrip, riderPartyID primitive.ObjectID) *httpx.AppError {
 	if err := requireTripRider(trip, riderPartyID); err != nil {
 		return err
 	}
@@ -730,7 +866,7 @@ func validateDeliver(trip *domain.RouteTrip, riderPartyID string) *httpx.AppErro
 	var unpicked []string
 	for _, stop := range trip.Stops {
 		if stop.PickedUpAt == nil {
-			unpicked = append(unpicked, stop.ConsignmentID)
+			unpicked = append(unpicked, stop.ConsignmentID.Hex())
 		}
 	}
 	if len(unpicked) > 0 {

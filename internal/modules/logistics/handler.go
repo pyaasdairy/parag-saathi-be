@@ -3,7 +3,7 @@ package logistics
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -13,6 +13,16 @@ import (
 // service, respond. No business logic, no MongoDB.
 type handler struct {
 	svc *service
+}
+
+// optionalQueryID parses an optional ObjectID query parameter; absence yields
+// the zero ObjectID (meaning "not filtered").
+func optionalQueryID(r *http.Request, param string) (primitive.ObjectID, error) {
+	v := r.URL.Query().Get(param)
+	if v == "" {
+		return primitive.NilObjectID, nil
+	}
+	return httpx.ParseID(v, param)
 }
 
 // createConsignment handles POST /logistics/consignments.
@@ -34,7 +44,12 @@ func (h *handler) createConsignment(w http.ResponseWriter, r *http.Request) {
 // dispatchConsignment handles POST /logistics/consignments/{consignmentID}/dispatch.
 func (h *handler) dispatchConsignment(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	consignment, err := h.svc.dispatchConsignment(r.Context(), actor, chi.URLParam(r, "consignmentID"))
+	id, err := httpx.PathID(r, "consignmentID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	consignment, err := h.svc.dispatchConsignment(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -45,8 +60,13 @@ func (h *handler) dispatchConsignment(w http.ResponseWriter, r *http.Request) {
 // listConsignments handles GET /logistics/consignments.
 func (h *handler) listConsignments(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	dcsID, err := optionalQueryID(r, "dcs_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	query := consignmentListQuery{
-		DCSID:  r.URL.Query().Get("dcs_id"),
+		DCSID:  dcsID,
 		Date:   r.URL.Query().Get("date"),
 		Status: r.URL.Query().Get("status"),
 	}
@@ -78,13 +98,22 @@ func (h *handler) createTrip(w http.ResponseWriter, r *http.Request) {
 // pickupStop handles POST /logistics/trips/{tripID}/stops/{consignmentID}/pickup.
 func (h *handler) pickupStop(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	tripID, err := httpx.PathID(r, "tripID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	consignmentID, err := httpx.PathID(r, "consignmentID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req pickupRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	trip, err := h.svc.pickupStop(r.Context(), actor,
-		chi.URLParam(r, "tripID"), chi.URLParam(r, "consignmentID"), req)
+	trip, err := h.svc.pickupStop(r.Context(), actor, tripID, consignmentID, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -95,12 +124,17 @@ func (h *handler) pickupStop(w http.ResponseWriter, r *http.Request) {
 // logColdChain handles POST /logistics/trips/{tripID}/cold-chain.
 func (h *handler) logColdChain(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	tripID, err := httpx.PathID(r, "tripID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req coldChainRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	trip, err := h.svc.logColdChain(r.Context(), actor, chi.URLParam(r, "tripID"), req)
+	trip, err := h.svc.logColdChain(r.Context(), actor, tripID, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -111,12 +145,17 @@ func (h *handler) logColdChain(w http.ResponseWriter, r *http.Request) {
 // deliverTrip handles POST /logistics/trips/{tripID}/deliver.
 func (h *handler) deliverTrip(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	tripID, err := httpx.PathID(r, "tripID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req deliverRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	trip, err := h.svc.deliverTrip(r.Context(), actor, chi.URLParam(r, "tripID"), req)
+	trip, err := h.svc.deliverTrip(r.Context(), actor, tripID, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -127,10 +166,20 @@ func (h *handler) deliverTrip(w http.ResponseWriter, r *http.Request) {
 // listTrips handles GET /logistics/trips.
 func (h *handler) listTrips(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	unionID, err := optionalQueryID(r, "union_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	riderID, err := optionalQueryID(r, "van_rider_party_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	query := tripListQuery{
-		UnionID:         r.URL.Query().Get("union_id"),
+		UnionID:         unionID,
 		Date:            r.URL.Query().Get("date"),
-		VanRiderPartyID: r.URL.Query().Get("van_rider_party_id"),
+		VanRiderPartyID: riderID,
 	}
 	page := httpx.ParsePage(r)
 	items, total, err := h.svc.listTrips(r.Context(), actor, query, page)
@@ -144,7 +193,12 @@ func (h *handler) listTrips(w http.ResponseWriter, r *http.Request) {
 // getTrip handles GET /logistics/trips/{tripID}.
 func (h *handler) getTrip(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	trip, err := h.svc.getTrip(r.Context(), actor, chi.URLParam(r, "tripID"))
+	tripID, err := httpx.PathID(r, "tripID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	trip, err := h.svc.getTrip(r.Context(), actor, tripID)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -17,9 +17,10 @@ import (
 
 const collection = "audit_logs"
 
-// Entry is one audit record.
+// Entry is one audit record. `_id` is a generated ObjectID; actor identifiers
+// arrive from JWT claims as ObjectID hex strings.
 type Entry struct {
-	ID           string         `bson:"_id"            json:"id"`
+	ID           primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	ActorPartyID string         `bson:"actor_party_id" json:"actor_party_id"`
 	ActorRole    string         `bson:"actor_role,omitempty" json:"actor_role,omitempty"`
 	Action       string         `bson:"action"         json:"action"` // e.g. "http.POST /api/v1/collection/pours" or "support.pii_lookup"
@@ -55,7 +56,7 @@ func (r *Recorder) Record(ctx context.Context, e Entry) {
 			e.ActorRole = a.RoleCode
 		}
 	}
-	e.ID = uuid.NewString()
+	e.ID = primitive.NewObjectID()
 	e.TS = time.Now().UTC()
 
 	go func() {

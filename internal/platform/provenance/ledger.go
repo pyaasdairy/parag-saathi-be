@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -42,9 +42,12 @@ type ActorRef struct {
 	RoleCode string `bson:"role_code" json:"role_code"`
 }
 
-// Event is one immutable link in the ledger.
+// Event is one immutable link in the ledger. `_id` is a generated ObjectID;
+// EntityID and Refs carry the referenced documents' ObjectIDs as hex strings
+// (the ledger is a generic event log spanning every entity type, and hex
+// strings keep the hash material canonical and human-inspectable).
 type Event struct {
-	ID         string         `bson:"_id"         json:"id"`
+	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	Seq        int64          `bson:"seq"         json:"seq"`
 	Type       string         `bson:"type"        json:"type"`
 	EntityType string         `bson:"entity_type" json:"entity_type"`
@@ -107,7 +110,7 @@ func (l *Ledger) Append(ctx context.Context, in AppendInput) (*Event, error) {
 			return nil, err
 		}
 		ev := &Event{
-			ID:         uuid.NewString(),
+			ID:         primitive.NewObjectID(),
 			Seq:        seq + 1,
 			Type:       in.Type,
 			EntityType: in.EntityType,

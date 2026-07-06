@@ -8,6 +8,8 @@
 package plant
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -17,8 +19,9 @@ import (
 
 // Register wires the plant module under /api/v1/plant.
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "plant"))
 	repo := NewRepo(d.DB)
-	svc := NewService(repo, d)
+	svc := NewService(repo, d, log)
 	h := NewHandler(svc)
 
 	r.Route("/plant", func(pr chi.Router) {

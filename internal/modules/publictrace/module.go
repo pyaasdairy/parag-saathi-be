@@ -16,6 +16,8 @@
 package publictrace
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -25,7 +27,8 @@ import (
 
 // Register mounts the public QR/ledger routes and the authed trace tools.
 func Register(r chi.Router, d *deps.Deps) {
-	service := NewService(d)
+	log := d.Log.With(slog.String("module", "publictrace"))
+	service := NewService(d, log)
 	handler := &Handler{service: service}
 
 	// PUBLIC subtree — no Authenticate middleware by design (see package doc).

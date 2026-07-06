@@ -3,13 +3,13 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-
-	"github.com/google/uuid"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -17,7 +17,8 @@ import (
 )
 
 // otpChallenge is the persisted OTP challenge. Only the HMAC digest of the
-// code is stored — a DB leak alone reveals no usable credential.
+// code is stored — a DB leak alone reveals no usable credential. Challenges
+// are keyed by phone (string) — the party may not exist yet at login time.
 type otpChallenge struct {
 	ID        string    `bson:"_id"`
 	Phone     string    `bson:"phone"`
@@ -27,13 +28,13 @@ type otpChallenge struct {
 }
 
 // refreshTokenDoc is the persisted refresh-token digest. The opaque token
-// itself is only ever held by the client.
+// itself is only ever held by the client. party_id is an ObjectID reference.
 type refreshTokenDoc struct {
-	ID        string    `bson:"_id"`
-	TokenHash string    `bson:"token_hash"`
-	PartyID   string    `bson:"party_id"`
-	ExpiresAt time.Time `bson:"expires_at"`
-	CreatedAt time.Time `bson:"created_at"`
+	ID        primitive.ObjectID `bson:"_id,omitempty"`
+	TokenHash string             `bson:"token_hash"`
+	PartyID   primitive.ObjectID `bson:"party_id"`
+	ExpiresAt time.Time          `bson:"expires_at"`
+	CreatedAt time.Time          `bson:"created_at"`
 }
 
 // repository is the MongoDB gateway for the identity module. Pure data
@@ -66,7 +67,7 @@ func newRepository(db *mongo.Database) *repository {
 // insertOTPChallenge stores a fresh challenge.
 func (r *repository) insertOTPChallenge(ctx context.Context, ch otpChallenge) error {
 	if _, err := r.challenges.InsertOne(ctx, ch); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert otp challenge: %w", err))
 	}
 	return nil
 }
@@ -84,7 +85,7 @@ func (r *repository) latestOTPChallenge(ctx context.Context, phone string, now t
 		return nil, httpx.NotFound("otp challenge")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find otp challenge: %w", err))
 	}
 	return &ch, nil
 }
@@ -95,7 +96,7 @@ func (r *repository) incrementOTPAttempts(ctx context.Context, id string) error 
 		{Key: "$inc", Value: bson.D{{Key: "attempts", Value: 1}}},
 	})
 	if err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("increment otp attempts: %w", err))
 	}
 	return nil
 }
@@ -103,7 +104,7 @@ func (r *repository) incrementOTPAttempts(ctx context.Context, id string) error 
 // deleteOTPChallenges removes every challenge for a phone (post-login burn).
 func (r *repository) deleteOTPChallenges(ctx context.Context, phone string) error {
 	if _, err := r.challenges.DeleteMany(ctx, bson.D{{Key: "phone", Value: phone}}); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("delete otp challenges: %w", err))
 	}
 	return nil
 }
@@ -113,14 +114,15 @@ func (r *repository) deleteOTPChallenges(ctx context.Context, phone string) erro
 // insertNotification queues an outbox message for the platformops sender.
 func (r *repository) insertNotification(ctx context.Context, n domain.Notification) error {
 	if _, err := r.notifications.InsertOne(ctx, n); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert notification: %w", err))
 	}
 	return nil
 }
 
 // --- Parties ---
 
-// findPartyByPhone loads a party by its unique phone number.
+// findPartyByPhone loads a party by its unique phone number (business key —
+// display/login lookups only, never joins).
 func (r *repository) findPartyByPhone(ctx context.Context, phone string) (*domain.Party, error) {
 	var p domain.Party
 	err := r.parties.FindOne(ctx, bson.D{{Key: "phone", Value: phone}}).Decode(&p)
@@ -128,29 +130,50 @@ func (r *repository) findPartyByPhone(ctx context.Context, phone string) (*domai
 		return nil, httpx.NotFound("party")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find party by phone: %w", err))
 	}
 	return &p, nil
 }
 
-// findPartyByID loads a party by ID.
-func (r *repository) findPartyByID(ctx context.Context, id string) (*domain.Party, error) {
+// findPartyByID loads a party by ObjectID.
+func (r *repository) findPartyByID(ctx context.Context, id primitive.ObjectID) (*domain.Party, error) {
 	var p domain.Party
 	err := r.parties.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&p)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, httpx.NotFound("party")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find party by id: %w", err))
 	}
 	return &p, nil
+}
+
+// findPartiesByIDs loads a batch of parties keyed by ObjectID (list
+// enrichment; missing parties are simply absent from the map).
+func (r *repository) findPartiesByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]domain.Party, error) {
+	out := make(map[primitive.ObjectID]domain.Party, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	cur, err := r.parties.Find(ctx, bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}}})
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find parties by ids: %w", err))
+	}
+	var parties []domain.Party
+	if err := cur.All(ctx, &parties); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode parties by ids: %w", err))
+	}
+	for _, p := range parties {
+		out[p.ID] = p
+	}
+	return out, nil
 }
 
 // upsertPartyByPhone atomically finds or creates the party for a phone —
 // race-safe under the unique phone index (one phone = one Party, §4.1).
 func (r *repository) upsertPartyByPhone(ctx context.Context, phone string, now time.Time) (*domain.Party, error) {
 	update := bson.D{{Key: "$setOnInsert", Value: bson.D{
-		{Key: "_id", Value: uuid.NewString()},
+		{Key: "_id", Value: primitive.NewObjectID()},
 		{Key: "phone", Value: phone},
 		{Key: "kyc_tier", Value: domain.KYCTierMinimal},
 		{Key: "status", Value: domain.PartyStatusActive},
@@ -160,14 +183,14 @@ func (r *repository) upsertPartyByPhone(ctx context.Context, phone string, now t
 	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
 	var p domain.Party
 	if err := r.parties.FindOneAndUpdate(ctx, bson.D{{Key: "phone", Value: phone}}, update, opts).Decode(&p); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("upsert party by phone: %w", err))
 	}
 	return &p, nil
 }
 
 // updatePartyProfile sets the provided profile fields and returns the
 // updated party.
-func (r *repository) updatePartyProfile(ctx context.Context, id string, fullName, preferredLanguage *string, now time.Time) (*domain.Party, error) {
+func (r *repository) updatePartyProfile(ctx context.Context, id primitive.ObjectID, fullName, preferredLanguage *string, now time.Time) (*domain.Party, error) {
 	set := bson.D{{Key: "updated_at", Value: now}}
 	if fullName != nil {
 		set = append(set, bson.E{Key: "full_name", Value: *fullName})
@@ -182,19 +205,19 @@ func (r *repository) updatePartyProfile(ctx context.Context, id string, fullName
 		return nil, httpx.NotFound("party")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("update party profile: %w", err))
 	}
 	return &p, nil
 }
 
 // updatePartyKYCTier sets the party's KYC tier.
-func (r *repository) updatePartyKYCTier(ctx context.Context, id, tier string, now time.Time) error {
+func (r *repository) updatePartyKYCTier(ctx context.Context, id primitive.ObjectID, tier string, now time.Time) error {
 	_, err := r.parties.UpdateByID(ctx, id, bson.D{{Key: "$set", Value: bson.D{
 		{Key: "kyc_tier", Value: tier},
 		{Key: "updated_at", Value: now},
 	}}})
 	if err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("update party kyc tier: %w", err))
 	}
 	return nil
 }
@@ -204,7 +227,7 @@ func (r *repository) updatePartyKYCTier(ctx context.Context, id, tier string, no
 // insertRefreshToken stores a refresh-token digest.
 func (r *repository) insertRefreshToken(ctx context.Context, doc refreshTokenDoc) error {
 	if _, err := r.tokens.InsertOne(ctx, doc); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert refresh token: %w", err))
 	}
 	return nil
 }
@@ -217,7 +240,7 @@ func (r *repository) findRefreshToken(ctx context.Context, tokenHash string) (*r
 		return nil, httpx.NotFound("refresh token")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find refresh token: %w", err))
 	}
 	return &doc, nil
 }
@@ -227,20 +250,20 @@ func (r *repository) findRefreshToken(ctx context.Context, tokenHash string) (*r
 func (r *repository) deleteRefreshToken(ctx context.Context, tokenHash string) (int64, error) {
 	res, err := r.tokens.DeleteOne(ctx, bson.D{{Key: "token_hash", Value: tokenHash}})
 	if err != nil {
-		return 0, httpx.Internal(err)
+		return 0, httpx.Internal(fmt.Errorf("delete refresh token: %w", err))
 	}
 	return res.DeletedCount, nil
 }
 
 // deleteRefreshTokenForParty removes a token only if it belongs to partyID
 // (logout can never revoke someone else's session).
-func (r *repository) deleteRefreshTokenForParty(ctx context.Context, tokenHash, partyID string) error {
+func (r *repository) deleteRefreshTokenForParty(ctx context.Context, tokenHash string, partyID primitive.ObjectID) error {
 	_, err := r.tokens.DeleteOne(ctx, bson.D{
 		{Key: "token_hash", Value: tokenHash},
 		{Key: "party_id", Value: partyID},
 	})
 	if err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("delete refresh token for party: %w", err))
 	}
 	return nil
 }
@@ -249,38 +272,38 @@ func (r *repository) deleteRefreshTokenForParty(ctx context.Context, tokenHash, 
 
 // listActiveAssignments returns a party's ACTIVE assignments (validity-window
 // filtering happens in the service via UsableAt).
-func (r *repository) listActiveAssignments(ctx context.Context, partyID string) ([]domain.RoleAssignment, error) {
+func (r *repository) listActiveAssignments(ctx context.Context, partyID primitive.ObjectID) ([]domain.RoleAssignment, error) {
 	filter := bson.D{
 		{Key: "party_id", Value: partyID},
 		{Key: "status", Value: domain.RoleAssignmentActive},
 	}
 	cur, err := r.assignments.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("list active assignments: %w", err))
 	}
 	out := make([]domain.RoleAssignment, 0)
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("decode active assignments: %w", err))
 	}
 	return out, nil
 }
 
 // findAssignmentByID loads one role assignment.
-func (r *repository) findAssignmentByID(ctx context.Context, id string) (*domain.RoleAssignment, error) {
+func (r *repository) findAssignmentByID(ctx context.Context, id primitive.ObjectID) (*domain.RoleAssignment, error) {
 	var ra domain.RoleAssignment
 	err := r.assignments.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&ra)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, httpx.NotFound("role assignment")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find assignment by id: %w", err))
 	}
 	return &ra, nil
 }
 
 // activeAssignmentExists reports whether the party already holds an ACTIVE
 // assignment of roleCode in orgUnitID (grant idempotency guard).
-func (r *repository) activeAssignmentExists(ctx context.Context, partyID, roleCode, orgUnitID string) (bool, error) {
+func (r *repository) activeAssignmentExists(ctx context.Context, partyID primitive.ObjectID, roleCode string, orgUnitID primitive.ObjectID) (bool, error) {
 	filter := bson.D{
 		{Key: "party_id", Value: partyID},
 		{Key: "role_code", Value: roleCode},
@@ -289,7 +312,7 @@ func (r *repository) activeAssignmentExists(ctx context.Context, partyID, roleCo
 	}
 	n, err := r.assignments.CountDocuments(ctx, filter, options.Count().SetLimit(1))
 	if err != nil {
-		return false, httpx.Internal(err)
+		return false, httpx.Internal(fmt.Errorf("count active assignments: %w", err))
 	}
 	return n > 0, nil
 }
@@ -297,7 +320,7 @@ func (r *repository) activeAssignmentExists(ctx context.Context, partyID, roleCo
 // insertAssignment stores a new role assignment.
 func (r *repository) insertAssignment(ctx context.Context, ra domain.RoleAssignment) error {
 	if _, err := r.assignments.InsertOne(ctx, ra); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert assignment: %w", err))
 	}
 	return nil
 }
@@ -305,7 +328,7 @@ func (r *repository) insertAssignment(ctx context.Context, ra domain.RoleAssignm
 // revokeAssignment flips an ACTIVE assignment to REVOKED (the doc is never
 // deleted — §4.1) and returns the updated record. Matching on status makes
 // concurrent revokes lose cleanly.
-func (r *repository) revokeAssignment(ctx context.Context, id, revokedBy string, at time.Time) (*domain.RoleAssignment, error) {
+func (r *repository) revokeAssignment(ctx context.Context, id, revokedBy primitive.ObjectID, at time.Time) (*domain.RoleAssignment, error) {
 	filter := bson.D{
 		{Key: "_id", Value: id},
 		{Key: "status", Value: domain.RoleAssignmentActive},
@@ -322,21 +345,21 @@ func (r *repository) revokeAssignment(ctx context.Context, id, revokedBy string,
 		return nil, httpx.NotFound("active role assignment")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("revoke assignment: %w", err))
 	}
 	return &ra, nil
 }
 
 // listAssignments pages assignments inside one org unit, optionally filtered
 // by role code.
-func (r *repository) listAssignments(ctx context.Context, orgUnitID, roleCode string, page httpx.Page) ([]domain.RoleAssignment, int64, error) {
+func (r *repository) listAssignments(ctx context.Context, orgUnitID primitive.ObjectID, roleCode string, page httpx.Page) ([]domain.RoleAssignment, int64, error) {
 	filter := bson.D{{Key: "org_unit_id", Value: orgUnitID}}
 	if roleCode != "" {
 		filter = append(filter, bson.E{Key: "role_code", Value: roleCode})
 	}
 	total, err := r.assignments.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count assignments: %w", err))
 	}
 	opts := options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: -1}}).
@@ -344,11 +367,11 @@ func (r *repository) listAssignments(ctx context.Context, orgUnitID, roleCode st
 		SetLimit(page.Limit)
 	cur, err := r.assignments.Find(ctx, filter, opts)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("list assignments: %w", err))
 	}
 	out := make([]domain.RoleAssignment, 0)
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode assignments: %w", err))
 	}
 	return out, total, nil
 }
@@ -358,13 +381,26 @@ func (r *repository) listAssignments(ctx context.Context, orgUnitID, roleCode st
 // insertKYCRecord stores a new KYC record.
 func (r *repository) insertKYCRecord(ctx context.Context, rec domain.KYCRecord) error {
 	if _, err := r.kycRecords.InsertOne(ctx, rec); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert kyc record: %w", err))
 	}
 	return nil
 }
 
-// latestKYCRecord returns the party's most recent KYC record.
-func (r *repository) latestKYCRecord(ctx context.Context, partyID string) (*domain.KYCRecord, error) {
+// findKYCRecordByID loads one KYC record.
+func (r *repository) findKYCRecordByID(ctx context.Context, id primitive.ObjectID) (*domain.KYCRecord, error) {
+	var rec domain.KYCRecord
+	err := r.kycRecords.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&rec)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("kyc record")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find kyc record by id: %w", err))
+	}
+	return &rec, nil
+}
+
+// latestKYCRecord returns the party's most recent KYC record (any status).
+func (r *repository) latestKYCRecord(ctx context.Context, partyID primitive.ObjectID) (*domain.KYCRecord, error) {
 	opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})
 	var rec domain.KYCRecord
 	err := r.kycRecords.FindOne(ctx, bson.D{{Key: "party_id", Value: partyID}}, opts).Decode(&rec)
@@ -372,14 +408,112 @@ func (r *repository) latestKYCRecord(ctx context.Context, partyID string) (*doma
 		return nil, httpx.NotFound("kyc record")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find latest kyc record: %w", err))
+	}
+	return &rec, nil
+}
+
+// findPendingKYCRecord returns the party's most recent PENDING record for one
+// requested tier (submit idempotency guard).
+func (r *repository) findPendingKYCRecord(ctx context.Context, partyID primitive.ObjectID, requestedTier string) (*domain.KYCRecord, error) {
+	filter := bson.D{
+		{Key: "party_id", Value: partyID},
+		{Key: "requested_tier", Value: requestedTier},
+		{Key: "status", Value: domain.KYCStatusPending},
+	}
+	opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})
+	var rec domain.KYCRecord
+	err := r.kycRecords.FindOne(ctx, filter, opts).Decode(&rec)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("pending kyc record")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find pending kyc record: %w", err))
+	}
+	return &rec, nil
+}
+
+// listPendingKYC pages all PENDING KYC records, newest first, for the review
+// console.
+func (r *repository) listPendingKYC(ctx context.Context, page httpx.Page) ([]domain.KYCRecord, int64, error) {
+	filter := bson.D{{Key: "status", Value: domain.KYCStatusPending}}
+	total, err := r.kycRecords.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("count pending kyc records: %w", err))
+	}
+	opts := options.Find().
+		SetSort(bson.D{{Key: "created_at", Value: -1}}).
+		SetSkip(page.Offset).
+		SetLimit(page.Limit)
+	cur, err := r.kycRecords.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("list pending kyc records: %w", err))
+	}
+	out := make([]domain.KYCRecord, 0)
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("decode pending kyc records: %w", err))
+	}
+	return out, total, nil
+}
+
+// approveKYCRecord flips a PENDING record to VERIFIED with the reviewer
+// stamp. Matching on status makes concurrent reviews lose cleanly (the loser
+// sees NotFound and the service translates it to a 409).
+func (r *repository) approveKYCRecord(ctx context.Context, id, reviewedBy primitive.ObjectID, reviewerRole string, now time.Time) (*domain.KYCRecord, error) {
+	filter := bson.D{
+		{Key: "_id", Value: id},
+		{Key: "status", Value: domain.KYCStatusPending},
+	}
+	update := bson.D{{Key: "$set", Value: bson.D{
+		{Key: "status", Value: domain.KYCStatusVerified},
+		{Key: "reviewed_by", Value: reviewedBy},
+		{Key: "reviewed_by_role", Value: reviewerRole},
+		{Key: "reviewed_at", Value: now},
+		{Key: "verified_at", Value: now},
+		{Key: "updated_at", Value: now},
+	}}}
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var rec domain.KYCRecord
+	err := r.kycRecords.FindOneAndUpdate(ctx, filter, update, opts).Decode(&rec)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("pending kyc record")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("approve kyc record: %w", err))
+	}
+	return &rec, nil
+}
+
+// rejectKYCRecord flips a PENDING record to REJECTED with the reviewer stamp
+// and reason. Same concurrency semantics as approveKYCRecord.
+func (r *repository) rejectKYCRecord(ctx context.Context, id, reviewedBy primitive.ObjectID, reviewerRole, reason string, now time.Time) (*domain.KYCRecord, error) {
+	filter := bson.D{
+		{Key: "_id", Value: id},
+		{Key: "status", Value: domain.KYCStatusPending},
+	}
+	update := bson.D{{Key: "$set", Value: bson.D{
+		{Key: "status", Value: domain.KYCStatusRejected},
+		{Key: "rejection_reason", Value: reason},
+		{Key: "reviewed_by", Value: reviewedBy},
+		{Key: "reviewed_by_role", Value: reviewerRole},
+		{Key: "reviewed_at", Value: now},
+		{Key: "updated_at", Value: now},
+	}}}
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var rec domain.KYCRecord
+	err := r.kycRecords.FindOneAndUpdate(ctx, filter, update, opts).Decode(&rec)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("pending kyc record")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("reject kyc record: %w", err))
 	}
 	return &rec, nil
 }
 
 // updateKYCRecordBank sets the (masked) bank verification fields on an
 // existing KYC record and returns the updated record.
-func (r *repository) updateKYCRecordBank(ctx context.Context, id, accountMasked, ifsc string, nameMatch float64, now time.Time) (*domain.KYCRecord, error) {
+func (r *repository) updateKYCRecordBank(ctx context.Context, id primitive.ObjectID, accountMasked, ifsc string, nameMatch float64, now time.Time) (*domain.KYCRecord, error) {
 	update := bson.D{{Key: "$set", Value: bson.D{
 		{Key: "bank_account_masked", Value: accountMasked},
 		{Key: "bank_ifsc", Value: ifsc},
@@ -394,17 +528,17 @@ func (r *repository) updateKYCRecordBank(ctx context.Context, id, accountMasked,
 		return nil, httpx.NotFound("kyc record")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("update kyc record bank: %w", err))
 	}
 	return &rec, nil
 }
 
 // listKYCRecords pages the party's KYC records, newest first.
-func (r *repository) listKYCRecords(ctx context.Context, partyID string, page httpx.Page) ([]domain.KYCRecord, int64, error) {
+func (r *repository) listKYCRecords(ctx context.Context, partyID primitive.ObjectID, page httpx.Page) ([]domain.KYCRecord, int64, error) {
 	filter := bson.D{{Key: "party_id", Value: partyID}}
 	total, err := r.kycRecords.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count kyc records: %w", err))
 	}
 	opts := options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: -1}}).
@@ -412,11 +546,11 @@ func (r *repository) listKYCRecords(ctx context.Context, partyID string, page ht
 		SetLimit(page.Limit)
 	cur, err := r.kycRecords.Find(ctx, filter, opts)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("list kyc records: %w", err))
 	}
 	out := make([]domain.KYCRecord, 0)
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode kyc records: %w", err))
 	}
 	return out, total, nil
 }
@@ -424,7 +558,7 @@ func (r *repository) listKYCRecords(ctx context.Context, partyID string, page ht
 // insertConsent stores a DPDP consent artefact.
 func (r *repository) insertConsent(ctx context.Context, c domain.Consent) error {
 	if _, err := r.consents.InsertOne(ctx, c); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert consent: %w", err))
 	}
 	return nil
 }

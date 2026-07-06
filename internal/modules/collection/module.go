@@ -9,6 +9,8 @@
 package collection
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -19,8 +21,9 @@ import (
 // Register mounts the collection module under /collection and wires the
 // handler → service → repo stack onto the shared platform dependencies.
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "collection"))
 	repo := newRepo(d)
-	svc := newService(d, repo)
+	svc := newService(d, repo, log)
 	h := &handler{svc: svc}
 
 	r.Route("/collection", func(r chi.Router) {

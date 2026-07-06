@@ -67,6 +67,12 @@ a Sacheev sees only their samiti; Super Admin and State Auditor see everything (
 | **LRP** | NDDB village extension worker | Assists onboarding, registers animals | `POST /cattle/animals` |
 | **AI_TECH** | Artificial-insemination tech | Logs AI/breeding events against Pashu Aadhaar → syncs to Bharat Pashudhan | `POST /cattle/animals/{id}/health-events` |
 
+### 🧑‍🏫 Field / organisation tier
+
+| Role | Real person | What they do in Saathi | Key APIs |
+|---|---|---|---|
+| **ORGANISING_MANAGER** | Ground-level field worker (Dairy Development Dept pattern — "promotes and organises new samitis") | **Does doorstep KYC and approves it**, then **decides the user's position** by granting a role. This is the human gate between "someone signed up" and "someone can log in as a Farmer/Sacheev/etc." | `GET /kyc/pending` `POST /kyc/{id}/approve` `POST /kyc/{id}/reject` `POST /roles/assignments` |
+
 ### 🚐 Logistics tier
 
 | Role | What they do | Key APIs |
@@ -112,6 +118,7 @@ a Sacheev sees only their samiti; Super Admin and State Auditor see everything (
 sequenceDiagram
     autonumber
     participant U as Any user (phone)
+    participant OM as 🧑‍🏫 Organising Manager / admin
     participant API as Saathi API
     participant DB as MongoDB
 
@@ -119,15 +126,30 @@ sequenceDiagram
     API->>DB: store HMAC-hashed OTP (5-min TTL)
     API-->>U: SMS with OTP (dev mode: in response)
     U->>API: POST /auth/otp/verify {phone, otp}
-    API->>DB: find-or-create Party (one per human)
+    API->>DB: find-or-create Party (tier MINIMAL, no roles yet)
     API-->>U: session token + refresh token
+    Note over U,API: at this point the user has NO role →<br/>frontend shows a "pending / submit KYC" screen
+
+    U->>API: POST /kyc/aadhaar {aadhaar, consent, requested_tier}
+    API->>DB: KYCRecord status PENDING (stores last-4 + vault ref only)
+    OM->>API: GET /kyc/pending  (within my org scope)
+    OM->>API: POST /kyc/{id}/approve
+    Note over API: not self-review · CanApproveKYCTier(role, tier)<br/>→ VERIFIED, party tier upgraded (upward only)
+    OM->>API: POST /roles/assignments {party_id, role_code, org_unit_id}
+    Note over API: THIS is "deciding the position" —<br/>Farmer / Sacheev / Sangh staff / etc.
+
     U->>API: GET /auth/roles
-    API-->>U: all my role assignments (Farmer @ DCS-01842, Sacheev @ DCS-01842, ...)
+    API-->>U: my assignments, each with org {id, code, name, type}
     U->>API: POST /auth/role/select {role_assignment_id}
-    Note over API: checks validity window + KYC tier<br/>(a Sacheev needs HIGH tier; a Farmer needs FARMER tier)
-    API-->>U: ROLE token pinned to role + org scope
-    Note over U: switching hats = call role/select again.<br/>Losing an election = one revoked assignment,<br/>never a deleted account.
+    Note over API: validity window + KYC tier satisfies role<br/>(before approval this returns 403 KYC_TIER_INSUFFICIENT)
+    API-->>U: ROLE token carrying role_code + org scope
+    Note over U: frontend renders THAT dashboard from role_code.<br/>Switching hats = role/select again.<br/>Losing an election = one revoked assignment, never a deleted account.
 ```
+
+**The position is stored as the `RoleAssignment`** (`role_code` + `org_unit_id`), not a field on the
+user — because one human can hold several (a Sacheev *is also* a Farmer). The role token's
+`role_code` is the single value the frontend switches on to pick the dashboard; the assignment's
+ObjectID is the lookup/revocation handle.
 
 ---
 
@@ -336,7 +358,8 @@ flowchart LR
 | Approve settlement | Adhyaksh, Union President (never the initiator) |
 | Rate charts | PCDF Admin, Union President |
 | Org tree | Super Admin, PCDF Admin |
-| Role grants | Super Admin, PCDF Admin, Union President (their tiers), Adhyaksh (farmers in own DCS) |
+| Review / approve KYC | Organising Manager, District Verifier, PCDF Admin, Super Admin (each within their scope + tier) |
+| Role grants ("assign position") | Super Admin, PCDF Admin, Union President (their tiers), Adhyaksh (farmers in own DCS), Organising Manager (Farmer/Consumer in scope) |
 | DBT subsidy | Mission Official, PCDF Admin |
 | Feature flags | Super Admin |
 | Audit logs / export | State Auditor, Super Admin |

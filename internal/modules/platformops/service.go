@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/audit"
@@ -39,11 +40,12 @@ var settableFlagKeys = map[string]struct{}{
 type service struct {
 	deps *deps.Deps
 	repo *repository
+	log  *slog.Logger
 }
 
-// newService wires the service.
-func newService(d *deps.Deps, repo *repository) *service {
-	return &service{deps: d, repo: repo}
+// newService wires the service with its module-scoped logger.
+func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
+	return &service{deps: d, repo: repo, log: log}
 }
 
 // ---- Admin: feature flags (§12) ----
@@ -64,9 +66,13 @@ func (s *service) listFlags(ctx context.Context) ([]flags.Flag, error) {
 // "admin.flag_set" audit entry.
 func (s *service) setFlag(ctx context.Context, actor auth.Actor, key string, enabled bool) (*SetFlagResponse, error) {
 	if _, ok := settableFlagKeys[key]; !ok {
+		s.log.WarnContext(ctx, "feature flag set rejected: unknown key",
+			slog.String("key", key), slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.NotFound("feature flag " + key)
 	}
 	if err := s.deps.Flags.Set(ctx, key, enabled, actor.PartyID); err != nil {
+		s.log.ErrorContext(ctx, "set feature flag failed",
+			slog.String("key", key), slog.Any("err", err))
 		return nil, httpx.Internal(fmt.Errorf("set feature flag: %w", err))
 	}
 	s.deps.Audit.Record(ctx, audit.Entry{
@@ -75,6 +81,9 @@ func (s *service) setFlag(ctx context.Context, actor auth.Actor, key string, ena
 		TargetID:   key,
 		Meta:       map[string]any{"key": key, "enabled": enabled},
 	})
+	s.log.InfoContext(ctx, "feature flag set",
+		slog.String("key", key), slog.Bool("enabled", enabled),
+		slog.String("actor_party_id", actor.PartyID))
 	return &SetFlagResponse{Key: key, Enabled: enabled}, nil
 }
 
@@ -115,6 +124,18 @@ func (s *service) listNotifications(ctx context.Context, phone, status string, p
 	for i := range items {
 		redactNotificationSecrets(&items[i])
 	}
+	// Bulk-PII read (every party's phone + template params): audited for DPDP
+	// forensics, mirroring support.pii_lookup and kyc.pending_list.
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "admin.notifications_read",
+		TargetType: "NOTIFICATION",
+		Meta: map[string]any{
+			"phone_filter":  phone,
+			"status_filter": status,
+			"count":         len(items),
+			"total":         total,
+		},
+	})
 	return items, total, nil
 }
 
@@ -161,6 +182,7 @@ func (s *service) runWorker(ctx context.Context) (*WorkerRunResponse, error) {
 		providerRef := "SMS-MOCK-" + uuid.NewString()[0:8]
 		claimed, err := s.repo.claimQueuedNotification(ctx, providerRef, time.Now().UTC())
 		if err != nil {
+			s.log.ErrorContext(ctx, "claim queued notification failed", slog.Any("err", err))
 			return nil, err
 		}
 		if claimed == nil {
@@ -181,10 +203,16 @@ func (s *service) runWorker(ctx context.Context) (*WorkerRunResponse, error) {
 		}
 		if err := s.repo.setNotificationMeta(ctx, claimed.ID, meta); err != nil {
 			// The claim already succeeded — meta is cosmetic, log and move on.
-			s.deps.Log.Error("platformops: stamp notification meta failed",
-				slog.String("notification_id", claimed.ID), slog.Any("err", err))
+			s.log.ErrorContext(ctx, "stamp notification meta failed",
+				slog.String("notification_id", claimed.ID.Hex()), slog.Any("err", err))
 		}
+		s.log.InfoContext(ctx, "notification dispatched",
+			slog.String("notification_id", claimed.ID.Hex()),
+			slog.String("template_key", claimed.TemplateKey),
+			slog.String("provider_ref", providerRef),
+			slog.String("status", domain.NotificationSent))
 	}
+	s.log.InfoContext(ctx, "notification worker run complete", slog.Int("sent", sent))
 	return &WorkerRunResponse{Sent: sent}, nil
 }
 
@@ -212,6 +240,12 @@ func renderSMS(templateKey string, params map[string]string) (english, hindi str
 	case domain.TemplateInvoiceIssued:
 		return fmt.Sprintf("Invoice %s for Rs %s issued. - Saathi", p("invoice_number"), p("amount")),
 			fmt.Sprintf("₹%s का बिल %s जारी हुआ। - साथी", p("amount"), p("invoice_number"))
+	case domain.TemplateKYCApproved:
+		return fmt.Sprintf("KYC approved — tier %s unlocked. - Saathi", p("tier")),
+			fmt.Sprintf("KYC स्वीकृत — टियर %s अनलॉक हुआ। - साथी", p("tier"))
+	case domain.TemplateKYCRejected:
+		return fmt.Sprintf("KYC rejected: %s. - Saathi", p("reason")),
+			fmt.Sprintf("KYC अस्वीकृत: %s। - साथी", p("reason"))
 	case domain.TemplateOTP:
 		return fmt.Sprintf("Your Saathi OTP is %s. Do not share it with anyone.", p("otp")),
 			fmt.Sprintf("आपका साथी OTP %s है। इसे किसी से साझा न करें।", p("otp"))
@@ -234,7 +268,7 @@ func (s *service) lookupParty(ctx context.Context, phone string) (*PartyLookupRe
 		Meta:       map[string]any{"phone": phone, "found": findErr == nil},
 	}
 	if findErr == nil {
-		entry.TargetID = party.ID
+		entry.TargetID = party.ID.Hex()
 	}
 	s.deps.Audit.Record(ctx, entry)
 
@@ -258,14 +292,17 @@ func (s *service) lookupParty(ctx context.Context, phone string) (*PartyLookupRe
 		}
 		roles = append(roles, PartyRoleView{
 			RoleCode:  assignment.RoleCode,
-			OrgUnitID: assignment.OrgUnitID,
+			OrgUnitID: assignment.OrgUnitID.Hex(),
 			OrgName:   orgName,
 		})
 	}
 
+	s.log.InfoContext(ctx, "support party lookup",
+		slog.String("party_id", party.ID.Hex()), slog.Int("roles", len(roles)))
+
 	// Limited PII by construction: no KYC document numbers, no bank details.
 	return &PartyLookupResponse{
-		PartyID:  party.ID,
+		PartyID:  party.ID.Hex(),
 		FullName: party.FullName,
 		KYCTier:  party.KYCTier,
 		Status:   party.Status,
@@ -293,14 +330,15 @@ func decodeBusPayload(payload any, dst any) error {
 func (s *service) onPayoutCredited(ctx context.Context, payload any) {
 	var event payoutCreditedEvent
 	if err := decodeBusPayload(payload, &event); err != nil {
-		s.deps.Log.Error("platformops: bad payout.credited payload", slog.Any("err", err))
+		s.log.ErrorContext(ctx, "bad payout.credited payload", slog.Any("err", err))
 		return
 	}
 	if event.FarmerPartyID == "" && event.Phone == "" {
-		s.deps.Log.Error("platformops: payout.credited payload has no addressee")
+		s.log.WarnContext(ctx, "payout.credited payload has no addressee")
 		return
 	}
-	s.queueNotification(ctx, event.FarmerPartyID, event.Phone, domain.TemplatePayoutCredited, map[string]string{
+	partyID := s.parseAddresseeID(ctx, event.FarmerPartyID, "payout.credited")
+	s.queueNotification(ctx, partyID, event.Phone, domain.TemplatePayoutCredited, map[string]string{
 		"amount": strconv.FormatFloat(event.Amount, 'f', 2, 64),
 		"utr":    event.UTR,
 	})
@@ -312,30 +350,39 @@ func (s *service) onPayoutCredited(ctx context.Context, payload any) {
 func (s *service) onGateBlocked(ctx context.Context, payload any) {
 	var event gateBlockedEvent
 	if err := decodeBusPayload(payload, &event); err != nil {
-		s.deps.Log.Error("platformops: bad qc.gate_blocked payload", slog.Any("err", err))
+		s.log.ErrorContext(ctx, "bad qc.gate_blocked payload", slog.Any("err", err))
 		return
 	}
 
-	orgUnitID, err := s.repo.subjectOrgUnit(ctx, event.SubjectType, event.SubjectID)
+	subjectID, err := primitive.ObjectIDFromHex(event.SubjectID)
 	if err != nil {
-		s.deps.Log.Error("platformops: gate_blocked org resolution failed", slog.Any("err", err))
+		s.log.WarnContext(ctx, "qc.gate_blocked subject id is not an object id",
+			slog.String("subject_type", event.SubjectType), slog.String("subject_id", event.SubjectID))
+		return
+	}
+	orgUnitID, err := s.repo.subjectOrgUnit(ctx, event.SubjectType, subjectID)
+	if err != nil {
+		s.log.ErrorContext(ctx, "gate_blocked org resolution failed",
+			slog.String("subject_type", event.SubjectType),
+			slog.String("subject_id", subjectID.Hex()), slog.Any("err", err))
 		return
 	}
 	union, err := s.unionAncestor(ctx, orgUnitID)
 	if err != nil {
-		s.deps.Log.Error("platformops: gate_blocked union walk failed",
-			slog.String("org_unit_id", orgUnitID), slog.Any("err", err))
+		s.log.ErrorContext(ctx, "gate_blocked union walk failed",
+			slog.String("org_unit_id", orgUnitID.Hex()), slog.Any("err", err))
 		return
 	}
 	if union == nil {
-		s.deps.Log.Error("platformops: gate_blocked org has no union ancestor",
-			slog.String("org_unit_id", orgUnitID))
+		s.log.WarnContext(ctx, "gate_blocked org has no union ancestor",
+			slog.String("org_unit_id", orgUnitID.Hex()))
 		return
 	}
 
 	supervisors, err := s.repo.listActiveRoleHolders(ctx, union.ID, domain.RoleUnionFieldSupervisor)
 	if err != nil {
-		s.deps.Log.Error("platformops: gate_blocked supervisor lookup failed", slog.Any("err", err))
+		s.log.ErrorContext(ctx, "gate_blocked supervisor lookup failed",
+			slog.String("union_id", union.ID.Hex()), slog.Any("err", err))
 		return
 	}
 
@@ -346,13 +393,14 @@ func (s *service) onGateBlocked(ctx context.Context, payload any) {
 		"reasons":      strings.Join(event.FailureReasons, ", "),
 	}
 	now := time.Now().UTC()
-	notified := map[string]bool{}
+	notified := map[primitive.ObjectID]bool{}
 	for _, assignment := range supervisors {
 		if !assignment.UsableAt(now) || notified[assignment.PartyID] {
 			continue
 		}
 		notified[assignment.PartyID] = true
-		s.queueNotification(ctx, assignment.PartyID, "", domain.TemplateSafetyBlock, params)
+		partyID := assignment.PartyID
+		s.queueNotification(ctx, &partyID, "", domain.TemplateSafetyBlock, params)
 	}
 }
 
@@ -360,11 +408,11 @@ func (s *service) onGateBlocked(ctx context.Context, payload any) {
 func (s *service) onMVUDispatched(ctx context.Context, payload any) {
 	var event mvuDispatchedEvent
 	if err := decodeBusPayload(payload, &event); err != nil {
-		s.deps.Log.Error("platformops: bad mvu.dispatched payload", slog.Any("err", err))
+		s.log.ErrorContext(ctx, "bad mvu.dispatched payload", slog.Any("err", err))
 		return
 	}
 	if event.FarmerPartyID == "" && event.Phone == "" {
-		s.deps.Log.Error("platformops: mvu.dispatched payload has no addressee")
+		s.log.WarnContext(ctx, "mvu.dispatched payload has no addressee")
 		return
 	}
 	caseID := event.CaseID
@@ -378,16 +426,44 @@ func (s *service) onMVUDispatched(ctx context.Context, payload any) {
 	if event.ETA != "" {
 		params["eta"] = event.ETA
 	}
-	s.queueNotification(ctx, event.FarmerPartyID, event.Phone, domain.TemplateMVUDispatched, params)
+	partyID := s.parseAddresseeID(ctx, event.FarmerPartyID, "mvu.dispatched")
+	s.queueNotification(ctx, partyID, event.Phone, domain.TemplateMVUDispatched, params)
+}
+
+// parseAddresseeID turns an optional addressee party ObjectID hex string
+// (carried as a hex string on bus payloads) into a *primitive.ObjectID.
+// An empty value is a legitimate phone-only addressing (returns nil); a
+// non-empty but malformed value is a business/contract violation (WARN + nil).
+func (s *service) parseAddresseeID(ctx context.Context, hex, event string) *primitive.ObjectID {
+	if hex == "" {
+		return nil
+	}
+	id, err := primitive.ObjectIDFromHex(hex)
+	if err != nil {
+		s.log.WarnContext(ctx, "bus payload party id is not an object id",
+			slog.String("event", event), slog.String("party_id", hex))
+		return nil
+	}
+	return &id
+}
+
+// hexOrEmpty renders an optional ObjectID for logs.
+func hexOrEmpty(id *primitive.ObjectID) string {
+	if id == nil {
+		return ""
+	}
+	return id.Hex()
 }
 
 // queueNotification inserts one QUEUED outbox document, resolving phone and
-// preferred language from the party record when available. Failures are
-// logged, never propagated — a lost SMS must not fail the publishing flow.
-func (s *service) queueNotification(ctx context.Context, partyID, phone, templateKey string, params map[string]string) {
+// preferred language from the party record when available. The _id is
+// pre-generated so the queued entry can be named in the structured log.
+// Failures are logged, never propagated — a lost SMS must not fail the
+// publishing flow.
+func (s *service) queueNotification(ctx context.Context, partyID *primitive.ObjectID, phone, templateKey string, params map[string]string) {
 	language := "hi" // vernacular default (blueprint §13)
-	if partyID != "" {
-		if party, err := s.repo.findPartyByID(ctx, partyID); err == nil {
+	if partyID != nil {
+		if party, err := s.repo.findPartyByID(ctx, *partyID); err == nil {
 			if phone == "" {
 				phone = party.Phone
 			}
@@ -397,13 +473,14 @@ func (s *service) queueNotification(ctx context.Context, partyID, phone, templat
 		}
 	}
 	if phone == "" {
-		s.deps.Log.Error("platformops: dropping notification with no phone",
-			slog.String("template_key", templateKey), slog.String("party_id", partyID))
+		s.log.WarnContext(ctx, "dropping notification with no phone",
+			slog.String("template_key", templateKey), slog.String("party_id", hexOrEmpty(partyID)))
 		return
 	}
 
+	id := primitive.NewObjectID()
 	notification := &StoredNotification{Notification: domain.Notification{
-		ID:          uuid.NewString(),
+		ID:          id,
 		PartyID:     partyID,
 		Phone:       phone,
 		Channel:     domain.ChannelSMS,
@@ -414,15 +491,21 @@ func (s *service) queueNotification(ctx context.Context, partyID, phone, templat
 		QueuedAt:    time.Now().UTC(),
 	}}
 	if err := s.repo.insertNotification(ctx, notification); err != nil {
-		s.deps.Log.Error("platformops: queue notification failed",
+		s.log.ErrorContext(ctx, "queue notification failed",
 			slog.String("template_key", templateKey), slog.Any("err", err))
+		return
 	}
+	s.log.InfoContext(ctx, "notification queued",
+		slog.String("notification_id", id.Hex()),
+		slog.String("template_key", templateKey),
+		slog.String("party_id", hexOrEmpty(partyID)),
+		slog.String("status", domain.NotificationQueued))
 }
 
 // unionAncestor returns the MILK_UNION org unit at or above orgUnitID, walking
 // the denormalised ancestor Path nearest-first via d.Orgs.Get. Returns nil
 // when no union sits on the chain (e.g. a plant directly under the federation).
-func (s *service) unionAncestor(ctx context.Context, orgUnitID string) (*domain.OrgUnit, error) {
+func (s *service) unionAncestor(ctx context.Context, orgUnitID primitive.ObjectID) (*domain.OrgUnit, error) {
 	org, err := s.deps.Orgs.Get(ctx, orgUnitID)
 	if err != nil {
 		return nil, err

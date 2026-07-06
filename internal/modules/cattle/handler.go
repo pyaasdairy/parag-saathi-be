@@ -3,14 +3,15 @@ package cattle
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 )
 
 // handler adapts HTTP to the service: decode, call, respond — no business
-// logic and no MongoDB in this file.
+// logic and no MongoDB in this file. Path and query ObjectIDs are parsed
+// here (httpx.PathID / httpx.ParseID) so the service sees typed IDs only.
 type handler struct {
 	svc *service
 }
@@ -18,6 +19,15 @@ type handler struct {
 // newHandler binds the handler to the service.
 func newHandler(svc *service) *handler {
 	return &handler{svc: svc}
+}
+
+// queryID parses an optional ObjectID query parameter: absent → NilObjectID.
+func queryID(r *http.Request, param string) (primitive.ObjectID, error) {
+	v := r.URL.Query().Get(param)
+	if v == "" {
+		return primitive.NilObjectID, nil
+	}
+	return httpx.ParseID(v, param)
 }
 
 // registerAnimal handles POST /cattle/animals.
@@ -40,8 +50,17 @@ func (h *handler) registerAnimal(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listAnimals(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
 	page := httpx.ParsePage(r)
-	q := r.URL.Query()
-	animals, total, err := h.svc.ListAnimals(r.Context(), actor, q.Get("owner_party_id"), q.Get("dcs_id"), page)
+	ownerPartyID, err := queryID(r, "owner_party_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	dcsID, err := queryID(r, "dcs_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	animals, total, err := h.svc.ListAnimals(r.Context(), actor, ownerPartyID, dcsID, page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -52,7 +71,12 @@ func (h *handler) listAnimals(w http.ResponseWriter, r *http.Request) {
 // getAnimal handles GET /cattle/animals/{animalID}.
 func (h *handler) getAnimal(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	animal, err := h.svc.GetAnimal(r.Context(), actor, chi.URLParam(r, "animalID"))
+	animalID, err := httpx.PathID(r, "animalID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	animal, err := h.svc.GetAnimal(r.Context(), actor, animalID)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -64,7 +88,12 @@ func (h *handler) getAnimal(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listHealthEvents(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
 	page := httpx.ParsePage(r)
-	events, total, err := h.svc.ListHealthEvents(r.Context(), actor, chi.URLParam(r, "animalID"), page)
+	animalID, err := httpx.PathID(r, "animalID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	events, total, err := h.svc.ListHealthEvents(r.Context(), actor, animalID, page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -75,12 +104,17 @@ func (h *handler) listHealthEvents(w http.ResponseWriter, r *http.Request) {
 // logHealthEvent handles POST /cattle/animals/{animalID}/health-events.
 func (h *handler) logHealthEvent(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	animalID, err := httpx.PathID(r, "animalID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req LogHealthEventRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	event, err := h.svc.LogHealthEvent(r.Context(), actor, chi.URLParam(r, "animalID"), req)
+	event, err := h.svc.LogHealthEvent(r.Context(), actor, animalID, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -91,7 +125,12 @@ func (h *handler) logHealthEvent(w http.ResponseWriter, r *http.Request) {
 // syncBharatPashudhan handles POST /cattle/animals/{animalID}/bp-sync.
 func (h *handler) syncBharatPashudhan(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	result, err := h.svc.SyncBharatPashudhan(r.Context(), actor, chi.URLParam(r, "animalID"))
+	animalID, err := httpx.PathID(r, "animalID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	result, err := h.svc.SyncBharatPashudhan(r.Context(), actor, animalID)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -118,7 +157,12 @@ func (h *handler) createMVUCase(w http.ResponseWriter, r *http.Request) {
 // dispatchMVUCase handles POST /cattle/mvu-cases/{caseID}/dispatch.
 func (h *handler) dispatchMVUCase(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	mvuCase, err := h.svc.DispatchMVUCase(r.Context(), actor, chi.URLParam(r, "caseID"))
+	caseID, err := httpx.PathID(r, "caseID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	mvuCase, err := h.svc.DispatchMVUCase(r.Context(), actor, caseID)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -129,12 +173,17 @@ func (h *handler) dispatchMVUCase(w http.ResponseWriter, r *http.Request) {
 // closeMVUCase handles POST /cattle/mvu-cases/{caseID}/close.
 func (h *handler) closeMVUCase(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	caseID, err := httpx.PathID(r, "caseID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req CloseMVUCaseRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	mvuCase, err := h.svc.CloseMVUCase(r.Context(), actor, chi.URLParam(r, "caseID"), req)
+	mvuCase, err := h.svc.CloseMVUCase(r.Context(), actor, caseID, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -146,8 +195,12 @@ func (h *handler) closeMVUCase(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listMVUCases(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
 	page := httpx.ParsePage(r)
-	q := r.URL.Query()
-	cases, total, err := h.svc.ListMVUCases(r.Context(), actor, q.Get("dcs_id"), q.Get("status"), page)
+	dcsID, err := queryID(r, "dcs_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	cases, total, err := h.svc.ListMVUCases(r.Context(), actor, dcsID, r.URL.Query().Get("status"), page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

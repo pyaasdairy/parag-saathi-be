@@ -3,6 +3,7 @@ package publictrace
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -70,10 +73,11 @@ type Service struct {
 	brokenAtSeq  int64
 }
 
-// NewService wires the service from the shared dependency container.
-func NewService(d *deps.Deps) *Service {
+// NewService wires the service from the shared dependency container. The
+// logger is the module-scoped logger derived in Register.
+func NewService(d *deps.Deps, log *slog.Logger) *Service {
 	return &Service{
-		log:      d.Log,
+		log:      log,
 		repo:     newRepo(d.DB),
 		ledger:   d.Ledger,
 		orgs:     d.Orgs,
@@ -81,12 +85,26 @@ func NewService(d *deps.Deps) *Service {
 	}
 }
 
+// internalErr converts an unexpected failure into the opaque 500, logging it
+// at ERROR with operation context first. Typed AppErrors (404s, 400s, org
+// resolver errors) pass through untouched so client-facing semantics never
+// change.
+func (s *Service) internalErr(ctx context.Context, op string, err error, attrs ...any) error {
+	var appErr *httpx.AppError
+	if errors.As(err, &appErr) {
+		return appErr
+	}
+	args := append([]any{slog.Any("err", err)}, attrs...)
+	s.log.ErrorContext(ctx, op, args...)
+	return httpx.Internal(err)
+}
+
 // VerifyQRToken checks a stored signed token in the format QR issuance
-// (plant module signQRToken) mints: "base64url(qr_code|product_lot_id|
-// issued_unix)" + "." + hex(HMAC-SHA256(secret, decoded payload)). The HMAC
-// is computed over the DECODED payload bytes — exactly what issuance signed.
-// The comparison is constant-time so a forger learns nothing from response
-// timing.
+// (plant module signQRToken) mints: "base64url(qr_code|product_lot_id_hex|
+// issued_unix)" + "." + hex(HMAC-SHA256(secret, decoded payload)), where
+// product_lot_id_hex is productLotID.Hex(). The HMAC is computed over the
+// DECODED payload bytes — exactly what issuance signed. The comparison is
+// constant-time so a forger learns nothing from response timing.
 func VerifyQRToken(secret, token string) bool {
 	payloadB64, signature, found := strings.Cut(token, ".")
 	if !found || payloadB64 == "" || signature == "" {
@@ -106,48 +124,53 @@ func VerifyQRToken(secret, token string) bool {
 func (s *Service) ScanQR(ctx context.Context, qrCode string) (*QRScanResponse, error) {
 	qr, err := s.repo.qrByCode(ctx, qrCode)
 	if err != nil {
-		return nil, err
+		return nil, s.internalErr(ctx, "qr scan: load qr", err, slog.String("qr_code", qrCode))
 	}
 
 	// Integrity gate: the stored token must carry a valid HMAC. A mismatch
 	// means the QR record was tampered with or forged — surface it loudly.
 	if !VerifyQRToken(s.qrSecret, qr.SignedToken) {
-		s.log.Warn("QR signed-token integrity check failed — possible forgery",
-			slog.String("qr_code", qrCode), slog.String("qr_id", qr.ID))
+		s.log.WarnContext(ctx, "QR signed-token integrity check failed — possible forgery",
+			slog.String("qr_code", qrCode), slog.String("qr_id", qr.ID.Hex()))
 		return nil, httpx.Conflict("QR_INTEGRITY_FAILED",
 			"this QR code failed integrity verification and may be counterfeit")
 	}
 
 	// Count the scan without ever blocking it: fire-and-forget increment.
-	go func(qrID string) {
+	go func(qrID primitive.ObjectID) {
 		bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.repo.incrementScanCount(bg, qrID); err != nil {
-			s.log.Warn("scan_count increment failed", slog.String("qr_id", qrID), slog.Any("err", err))
+			s.log.WarnContext(bg, "scan_count increment failed",
+				slog.String("qr_id", qrID.Hex()), slog.Any("err", err))
 		}
 	}(qr.ID)
 
 	lot, err := s.repo.productLotByID(ctx, qr.ProductLotID)
 	if err != nil {
-		return nil, err
+		return nil, s.internalErr(ctx, "qr scan: load product lot", err,
+			slog.String("qr_id", qr.ID.Hex()), slog.String("product_lot_id", qr.ProductLotID.Hex()))
 	}
 	batch, err := s.repo.batchByID(ctx, lot.BatchID)
 	if err != nil {
-		return nil, err
+		return nil, s.internalErr(ctx, "qr scan: load processing batch", err,
+			slog.String("product_lot_id", lot.ID.Hex()), slog.String("batch_id", lot.BatchID.Hex()))
 	}
 	plant, err := s.orgs.Get(ctx, batch.PlantID)
 	if err != nil {
-		return nil, err
+		return nil, s.internalErr(ctx, "qr scan: resolve plant org", err,
+			slog.String("batch_id", batch.ID.Hex()), slog.String("plant_id", batch.PlantID.Hex()))
 	}
 
 	// Walk the provenance graph upstream from the product lot and STOP at the
 	// pooling boundary: batch → BMC lots → consignments (§7.4). Consignment
 	// refs (hundreds of per-pour nodes, cross-route trip fan-out) are never
 	// expanded — the consumer view only needs the samiti set.
-	events, err := s.ledger.TraceStopAt(ctx, domain.EntityProductLot, lot.ID, traceDepth,
+	events, err := s.ledger.TraceStopAt(ctx, domain.EntityProductLot, lot.ID.Hex(), traceDepth,
 		map[string]bool{domain.EntityConsignment: true})
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internalErr(ctx, "qr scan: trace product lot", err,
+			slog.String("product_lot_id", lot.ID.Hex()))
 	}
 
 	sourcing, err := s.buildSourcing(ctx, events)
@@ -178,7 +201,8 @@ func (s *Service) ScanQR(ctx context.Context, qrCode string) (*QRScanResponse, e
 	// PLANT_LAB pass certificate — omitted (not an error) when absent.
 	qc, err := s.repo.latestPlantLabPass(ctx, batch.ID)
 	if err != nil {
-		return nil, err
+		return nil, s.internalErr(ctx, "qr scan: load plant lab certificate", err,
+			slog.String("batch_id", batch.ID.Hex()))
 	}
 	if qc != nil {
 		resp.Quality = &QualityInfo{
@@ -199,13 +223,24 @@ func (s *Service) ScanQR(ctx context.Context, qrCode string) (*QRScanResponse, e
 		}
 		resp.RecallNotice = notice
 	}
+
+	s.log.InfoContext(ctx, "qr scan resolved",
+		slog.String("qr_code", qrCode),
+		slog.String("qr_id", qr.ID.Hex()),
+		slog.String("product_lot_id", lot.ID.Hex()),
+		slog.String("batch_id", batch.ID.Hex()),
+		slog.String("batch_number", batch.BatchNumber),
+		slog.Int("samitis", len(sourcing.Samitis)),
+		slog.Bool("ledger_intact", ledgerInfo.Intact),
+		slog.Bool("recalled", resp.Recalled))
 	return resp, nil
 }
 
 // buildSourcing derives the samiti-set view from traced consignment events:
 // contributing DCS org ids from each event's org_unit_id/payload, collection
 // dates from payloads, with the consignment documents as fallback when the
-// events did not carry those fields.
+// events did not carry those fields. Ledger events carry ObjectIDs as hex
+// strings, so the sets are hex-keyed and parsed at the DB/orgscope boundary.
 func (s *Service) buildSourcing(ctx context.Context, events []provenance.Event) (*SourcingInfo, error) {
 	dcsIDs := map[string]struct{}{}
 	dates := map[string]struct{}{}
@@ -235,13 +270,24 @@ func (s *Service) buildSourcing(ctx context.Context, events []provenance.Event) 
 	// Fallback: if the events lacked DCS ids or dates, read the consignment
 	// docs themselves (still samiti-level — pour ids are never surfaced).
 	if len(consignmentIDs) > 0 && (len(dcsIDs) == 0 || len(dates) == 0) {
-		docs, err := s.repo.consignmentsByIDs(ctx, sortedKeys(consignmentIDs))
+		ids := make([]primitive.ObjectID, 0, len(consignmentIDs))
+		for _, hexID := range sortedKeys(consignmentIDs) {
+			cid, err := primitive.ObjectIDFromHex(hexID)
+			if err != nil {
+				// Ledger event ids should always be ObjectID hex — flag and skip.
+				s.log.WarnContext(ctx, "QR scan: traced consignment id is not a valid object id",
+					slog.String("consignment_id", hexID))
+				continue
+			}
+			ids = append(ids, cid)
+		}
+		docs, err := s.repo.consignmentsByIDs(ctx, ids)
 		if err != nil {
-			return nil, err
+			return nil, s.internalErr(ctx, "qr scan: load consignments for sourcing", err)
 		}
 		for _, c := range docs {
-			if c.DCSID != "" {
-				dcsIDs[c.DCSID] = struct{}{}
+			if !c.DCSID.IsZero() {
+				dcsIDs[c.DCSID.Hex()] = struct{}{}
 			}
 			if c.Date != "" {
 				dates[c.Date] = struct{}{}
@@ -251,18 +297,25 @@ func (s *Service) buildSourcing(ctx context.Context, events []provenance.Event) 
 
 	samitis := make([]SamitiInfo, 0, len(dcsIDs))
 	districts := map[string]struct{}{}
-	for _, id := range sortedKeys(dcsIDs) {
-		org, err := s.orgs.Get(ctx, id)
+	for _, hexID := range sortedKeys(dcsIDs) {
+		orgID, err := primitive.ObjectIDFromHex(hexID)
+		if err != nil {
+			// A malformed id must not break a consumer scan — log and skip.
+			s.log.WarnContext(ctx, "QR scan: contributing DCS id is not a valid object id",
+				slog.String("dcs_org_id", hexID))
+			continue
+		}
+		org, err := s.orgs.Get(ctx, orgID)
 		if err != nil {
 			// A missing org unit must not break a consumer scan — log and skip.
-			s.log.Warn("QR scan: contributing DCS org not resolvable",
-				slog.String("dcs_org_id", id), slog.Any("err", err))
+			s.log.WarnContext(ctx, "QR scan: contributing DCS org not resolvable",
+				slog.String("dcs_org_id", hexID), slog.Any("err", err))
 			continue
 		}
 		// Defence in depth: the §7.4 samiti set may only contain DCS units.
 		if org.Type != domain.OrgTypeDCS {
-			s.log.Warn("QR scan: non-DCS org unit skipped from samiti set",
-				slog.String("org_id", id), slog.String("org_type", org.Type))
+			s.log.WarnContext(ctx, "QR scan: non-DCS org unit skipped from samiti set",
+				slog.String("org_id", hexID), slog.String("org_type", org.Type))
 			continue
 		}
 		samitis = append(samitis, SamitiInfo{Name: org.Name, Code: org.Code, District: org.District})
@@ -342,12 +395,16 @@ func (s *Service) verifyTracedRange(ctx context.Context, events []provenance.Eve
 	}
 	intact, brokenAt, err := s.ledger.VerifyChain(ctx, from, maxSeq)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internalErr(ctx, "qr scan: verify ledger chain", err,
+			slog.Int64("from", from), slog.Int64("to", maxSeq))
 	}
 	if intact {
 		s.verifiedUpTo = maxSeq
 	} else {
 		s.chainBroken, s.brokenAtSeq = true, brokenAt
+		s.log.WarnContext(ctx, "provenance chain break detected during scan verification",
+			slog.Int64("broken_at_seq", brokenAt),
+			slog.Int64("from", from), slog.Int64("to", maxSeq))
 	}
 	return &LedgerInfo{
 		Events:        len(events),
@@ -363,7 +420,7 @@ func (s *Service) verifyTracedRange(ctx context.Context, events []provenance.Eve
 func (s *Service) VerifyLedger(ctx context.Context, fromRaw, toRaw string) (*LedgerVerifyResponse, error) {
 	latest, err := s.ledger.LatestSeq(ctx)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internalErr(ctx, "ledger verify: read chain head", err)
 	}
 	if latest == 0 {
 		return &LedgerVerifyResponse{Intact: true, From: 0, To: 0}, nil // empty chain is trivially intact
@@ -395,32 +452,39 @@ func (s *Service) VerifyLedger(ctx context.Context, fromRaw, toRaw string) (*Led
 
 	intact, brokenAt, err := s.ledger.VerifyChain(ctx, from, to)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internalErr(ctx, "ledger verify: verify chain", err,
+			slog.Int64("from", from), slog.Int64("to", to))
 	}
 	resp := &LedgerVerifyResponse{Intact: intact, From: from, To: to}
 	if !intact {
 		resp.BrokenAtSeq = &brokenAt
+		s.log.WarnContext(ctx, "public ledger verification found a broken chain",
+			slog.Int64("broken_at_seq", brokenAt),
+			slog.Int64("from", from), slog.Int64("to", to))
 	}
 	return resp, nil
 }
 
 // TraceGraph returns the full event graph around one entity: upstream via
 // the recursive ref walk, downstream via reverse-ref lookup — the recall /
-// root-cause tool (§8.3).
+// root-cause tool (§8.3). entityID is the entity's ObjectID as a hex string
+// (already validated by the handler; the ledger stores ids as hex).
 func (s *Service) TraceGraph(ctx context.Context, entityType, entityID string) (*TraceGraphResponse, error) {
 	if err := validateEntityType(entityType); err != nil {
 		return nil, err
 	}
 	upstream, err := s.ledger.Trace(ctx, entityType, entityID, traceDepth)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internalErr(ctx, "trace graph: upstream walk", err,
+			slog.String("entity_type", entityType), slog.String("entity_id", entityID))
 	}
 	// The cap is pushed into the query: only the LAST downstreamEventCap
 	// referencing events are fetched, instead of decoding an unbounded set
 	// into memory and truncating afterwards.
 	downstream, err := s.ledger.DownstreamRefs(ctx, entityID, downstreamEventCap)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, s.internalErr(ctx, "trace graph: downstream refs", err,
+			slog.String("entity_type", entityType), slog.String("entity_id", entityID))
 	}
 	if len(upstream) == 0 && len(downstream) == 0 {
 		return nil, httpx.NotFound("provenance for entity")
@@ -437,20 +501,23 @@ func (s *Service) TraceGraph(ctx context.Context, entityType, entityID string) (
 // Timeline returns one entity's own events in chain order, paginated. The
 // skip/limit is pushed into the Mongo query so a page read never loads the
 // entity's full history. The second return value is the total event count.
+// entityID is the entity's ObjectID as a hex string (handler-validated).
 func (s *Service) Timeline(ctx context.Context, entityType, entityID string, page httpx.Page) ([]provenance.Event, int, error) {
 	if err := validateEntityType(entityType); err != nil {
 		return nil, 0, err
 	}
 	total, err := s.ledger.CountEventsForEntity(ctx, entityType, entityID)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, s.internalErr(ctx, "timeline: count entity events", err,
+			slog.String("entity_type", entityType), slog.String("entity_id", entityID))
 	}
 	if total == 0 {
 		return nil, 0, httpx.NotFound("provenance for entity")
 	}
 	events, err := s.ledger.EventsForEntityPage(ctx, entityType, entityID, page.Offset, page.Limit)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, s.internalErr(ctx, "timeline: load entity events page", err,
+			slog.String("entity_type", entityType), slog.String("entity_id", entityID))
 	}
 	return events, int(total), nil
 }

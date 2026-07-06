@@ -7,6 +7,8 @@
 package cattle
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -17,8 +19,9 @@ import (
 // Register wires the cattle module under /cattle. The router mounts this
 // subtree at /api/v1, so routes land at /api/v1/cattle/...
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "cattle"))
 	repo := newRepository(d.DB)
-	svc := newService(d, repo)
+	svc := newService(d, repo, log)
 	h := newHandler(svc)
 
 	r.Route("/cattle", func(r chi.Router) {

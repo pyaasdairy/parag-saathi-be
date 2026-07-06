@@ -1,22 +1,30 @@
 package orgs
 
-import "time"
+import (
+	"time"
 
-// CreateOrgRequest is the body of POST /orgs.
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+// CreateOrgRequest is the body of POST /orgs. ParentID arrives as a plain
+// ObjectID hex string in JSON and unmarshals natively; nil means "no parent"
+// (hierarchy root).
 type CreateOrgRequest struct {
-	Type     string   `json:"type"`
-	Name     string   `json:"name"`
-	Code     string   `json:"code"`
-	ParentID string   `json:"parent_id,omitempty"`
-	District string   `json:"district,omitempty"`
-	State    string   `json:"state,omitempty"`
-	GeoLat   *float64 `json:"geo_lat,omitempty"`
-	GeoLng   *float64 `json:"geo_lng,omitempty"`
+	Type     string              `json:"type"`
+	Name     string              `json:"name"`
+	Code     string              `json:"code"`
+	ParentID *primitive.ObjectID `json:"parent_id,omitempty"`
+	District string              `json:"district,omitempty"`
+	State    string              `json:"state,omitempty"`
+	GeoLat   *float64            `json:"geo_lat,omitempty"`
+	GeoLng   *float64            `json:"geo_lng,omitempty"`
 }
 
 // UpdateOrgRequest is the body of PATCH /orgs/{id}. Pointer fields
 // distinguish "absent" from "set to zero value". Type and ParentID are
-// decoded solely to reject hierarchy moves, which are unsupported in v1.
+// decoded solely to reject hierarchy moves, which are unsupported in v1 —
+// they stay *string so any supplied value (even a malformed id) maps to the
+// ORG_MOVE_UNSUPPORTED rejection rather than a decode error.
 type UpdateOrgRequest struct {
 	Name     *string  `json:"name"`
 	District *string  `json:"district"`
@@ -28,16 +36,17 @@ type UpdateOrgRequest struct {
 }
 
 // Member is one row of GET /orgs/{id}/members: an ACTIVE role assignment at
-// the org joined in memory with its party's identity fields.
+// the org joined in memory with its party's identity fields. ObjectIDs
+// marshal to plain hex strings on the wire.
 type Member struct {
-	PartyID          string     `json:"party_id"`
-	Phone            string     `json:"phone,omitempty"`
-	FullName         string     `json:"full_name,omitempty"`
-	KYCTier          string     `json:"kyc_tier,omitempty"`
-	RoleCode         string     `json:"role_code"`
-	RoleAssignmentID string     `json:"role_assignment_id"`
-	ValidFrom        time.Time  `json:"valid_from"`
-	ValidTo          *time.Time `json:"valid_to,omitempty"`
+	PartyID          primitive.ObjectID `json:"party_id"`
+	Phone            string             `json:"phone,omitempty"`
+	FullName         string             `json:"full_name,omitempty"`
+	KYCTier          string             `json:"kyc_tier,omitempty"`
+	RoleCode         string             `json:"role_code"`
+	RoleAssignmentID primitive.ObjectID `json:"role_assignment_id"`
+	ValidFrom        time.Time          `json:"valid_from"`
+	ValidTo          *time.Time         `json:"valid_to,omitempty"`
 }
 
 // ListMeta echoes pagination inputs plus the platform-wide Total (full

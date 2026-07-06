@@ -195,6 +195,10 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			idx(bson.D{{Key: "actor_party_id", Value: asc}, {Key: "ts", Value: desc}}, nil),
 			idx(bson.D{{Key: "target_type", Value: asc}, {Key: "target_id", Value: asc}}, nil),
 		},
+		CollFeatureFlags: {
+			// `_id` is a generated ObjectID; `key` is the unique business key.
+			idx(bson.D{{Key: "key", Value: asc}}, options.Index().SetUnique(true)),
+		},
 	}
 
 	for coll, models := range specs {

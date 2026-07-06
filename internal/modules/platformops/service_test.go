@@ -30,6 +30,27 @@ func TestRenderSMSPourReceiptIncludesQuantity(t *testing.T) {
 	}
 }
 
+// TestRenderSMSKYCLines locks the KYC outcome templates: an approval must
+// surface the unlocked tier, a rejection the reason — the two facts the party
+// needs to act (retry role login, or fix and resubmit).
+func TestRenderSMSKYCLines(t *testing.T) {
+	en, hi := renderSMS(domain.TemplateKYCApproved, map[string]string{"tier": "FARMER"})
+	if !strings.Contains(en, "FARMER") {
+		t.Fatalf("english KYC approval %q missing tier FARMER", en)
+	}
+	if !strings.Contains(hi, "FARMER") {
+		t.Fatalf("hindi KYC approval %q missing tier FARMER", hi)
+	}
+
+	en, hi = renderSMS(domain.TemplateKYCRejected, map[string]string{"reason": "penny-drop name mismatch"})
+	if !strings.Contains(en, "penny-drop name mismatch") {
+		t.Fatalf("english KYC rejection %q missing reason", en)
+	}
+	if !strings.Contains(hi, "penny-drop name mismatch") {
+		t.Fatalf("hindi KYC rejection %q missing reason", hi)
+	}
+}
+
 // TestMVUDispatchedPayloadContract round-trips the exact payload cattle
 // publishes on eventbus.TopicMVUDispatched through the structural decode and
 // asserts the case ID lands — the farmer SMS must never render "(case )".

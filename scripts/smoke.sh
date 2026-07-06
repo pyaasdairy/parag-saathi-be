@@ -134,16 +134,20 @@ role_token() {
 }
 
 # ── fixture constants (cmd/seed) ────────────────────────────────────────────
+#
+# IDs are Mongo ObjectID hex strings minted at seed time — nothing is a stable
+# slug any more. The org ids, farmer party ids and animal id are DISCOVERED
+# dynamically (see "id discovery" below) by their natural business keys:
+# org `code`, party `phone`, animal owner. Only the natural keys are constant.
 
-DCS="org-dcs-kasmandi-kalan"
-BMC="org-bmc-malihabad"
-PLANT="org-plant-lucknow-01"
-UNION="org-union-lucknow"
-FARMER_MAHESH="party-farmer-mahesh"
-FARMER_GEETA="party-farmer-geeta"
-ANIMAL="animal-gomti"
+SEED_ADMIN_PHONE="9999999999"
 TODAY="$(TZ=Asia/Kolkata date +%F)"
 EXPIRY="$(TZ=Asia/Kolkata date -v+3d +%F 2>/dev/null || TZ=Asia/Kolkata date -d '+3 days' +%F)"
+
+# is_hex24 STR → 0 if STR is a 24-char lowercase ObjectID hex, else 1.
+is_hex24() {
+  printf '%s' "$1" | python3 -c "import sys,re; sys.exit(0 if re.fullmatch(r'[0-9a-f]{24}', sys.stdin.read().strip()) else 1)"
+}
 
 # ── environment bring-up ────────────────────────────────────────────────────
 
@@ -170,6 +174,50 @@ done
 
 log "smoke: seeding $SMOKE_DB"
 MONGO_DB="$SMOKE_DB" go run ./cmd/seed >/dev/null
+
+# ── id discovery (ObjectID-hex contract) ────────────────────────────────────
+# Everything downstream references real ObjectIDs, resolved here from the
+# stable natural keys. We drive discovery as SUPER_ADMIN: org lookups by
+# `?code=`, farmer party ids by `/support/parties/lookup?phone=`, the animal
+# by owner within the DCS.
+log "smoke: discovering seeded ObjectIDs as super admin"
+DISCOVER_SESSION="$(login "$SEED_ADMIN_PHONE")"
+DISCOVER_ADMIN="$(role_token "$DISCOVER_SESSION" SUPER_ADMIN)"
+[[ -n "$DISCOVER_ADMIN" ]] || fail "empty super admin role token during discovery"
+
+# org_id_by_code CODE → prints the org's ObjectID hex
+org_id_by_code() {
+  req GET "/orgs?code=$1" "$DISCOVER_ADMIN"
+  expect_status 200 "orgs lookup code=$1"
+  jassert "len(d['data'])==1 and d['data'][0]['code']=='$1'" "exactly one org for code=$1"
+  jval "d['data'][0]['id']"
+}
+DCS="$(org_id_by_code DCS-01842)"
+BMC="$(org_id_by_code BMC-LKO-007)"
+PLANT="$(org_id_by_code PLANT-LKO-01)"
+UNION="$(org_id_by_code UNION-LKO)"
+
+# party_id_by_phone PHONE → prints the party's ObjectID hex (support lookup)
+party_id_by_phone() {
+  req GET "/support/parties/lookup?phone=$1" "$DISCOVER_ADMIN"
+  expect_status 200 "party lookup phone=$1"
+  jval "d['data']['party_id']"
+}
+FARMER_MAHESH="$(party_id_by_phone 9000000011)"
+FARMER_GEETA="$(party_id_by_phone 9000000012)"
+
+# animal owned by Mahesh within the DCS
+req GET "/cattle/animals?dcs_id=$DCS" "$DISCOVER_ADMIN"
+expect_status 200 "list animals in DCS"
+ANIMAL="$(jval "[a['id'] for a in d['data'] if a['owner_party_id']=='$FARMER_MAHESH'][0]")"
+
+for pair in "DCS=$DCS" "BMC=$BMC" "PLANT=$PLANT" "UNION=$UNION" \
+            "FARMER_MAHESH=$FARMER_MAHESH" "FARMER_GEETA=$FARMER_GEETA" "ANIMAL=$ANIMAL"; do
+  name="${pair%%=*}"; val="${pair#*=}"
+  is_hex24 "$val" || fail "discovered $name is not an ObjectID hex: '$val'"
+done
+log "smoke: discovered DCS=$DCS BMC=$BMC PLANT=$PLANT UNION=$UNION"
+log "smoke:            mahesh=$FARMER_MAHESH geeta=$FARMER_GEETA animal=$ANIMAL"
 
 # ═══ 1. operational endpoints ═══════════════════════════════════════════════
 step 1 "healthz / readyz / version"
@@ -518,5 +566,78 @@ expect_status 403 "telemetry while flag off"
 [[ "$(err_code)" == "FEATURE_DISABLED" ]] || fail "expected FEATURE_DISABLED, got $(err_code)"
 pass "worker sent=$WORKER_SENT; audit trail live; collar flag off; telemetry 403 FEATURE_DISABLED"
 
+# ═══ 21. KYC approval gate (the new onboarding flow) ════════════════════════
+step 21 "kyc gate: fresh party submits KYC → granted FARMER but role select 403 → org-manager approves → role select succeeds"
+
+# fresh phone: verify auto-creates a MINIMAL-tier party.
+NEWPHONE="9000000099"
+NEW_SESSION="$(login "$NEWPHONE")"
+req GET /parties/me "$NEW_SESSION"
+expect_status 200 "new party /parties/me"
+NEW_PARTY_ID="$(jval "d['data']['party']['id']")"
+is_hex24 "$NEW_PARTY_ID" || fail "new party id is not an ObjectID hex: '$NEW_PARTY_ID'"
+jassert "d['data']['party']['kyc_tier']=='MINIMAL'" "fresh party auto-created at MINIMAL tier"
+
+# submit Aadhaar KYC at the FARMER tier → PENDING (no auto-verify).
+req POST /kyc/aadhaar "$NEW_SESSION" '{"aadhaar_number":"123412341234","consent":true,"requested_tier":"FARMER"}'
+expect_status 201 "submit aadhaar KYC"
+KYC_ID="$(jval "d['data']['record']['id']")"
+is_hex24 "$KYC_ID" || fail "kyc record id is not an ObjectID hex: '$KYC_ID'"
+jassert "d['data']['status']=='PENDING'" "KYC status PENDING"
+jassert "d['data']['record']['requested_tier']=='FARMER'" "KYC requested_tier FARMER"
+
+# adhyaksh grants the FARMER role at the DCS to this fresh party.
+KYC_ADHYAKSH_SESSION="$(login 9000000002)"
+KYC_ADHYAKSH="$(role_token "$KYC_ADHYAKSH_SESSION" SAMITI_ADHYAKSH)"
+req POST /roles/assignments "$KYC_ADHYAKSH" "{\"party_id\": \"$NEW_PARTY_ID\", \"role_code\": \"FARMER\", \"org_unit_id\": \"$DCS\"}"
+expect_status 201 "adhyaksh grants FARMER at DCS"
+NEW_FARMER_RA_ID="$(jval "d['data']['id']")"
+is_hex24 "$NEW_FARMER_RA_ID" || fail "role assignment id is not an ObjectID hex: '$NEW_FARMER_RA_ID'"
+
+# role select MUST be refused: KYC still PENDING, party only MINIMAL tier.
+req POST /auth/role/select "$NEW_SESSION" "{\"role_assignment_id\": \"$NEW_FARMER_RA_ID\"}"
+expect_status 403 "role select before KYC approval"
+[[ "$(err_code)" == "KYC_TIER_INSUFFICIENT" ]] || fail "expected KYC_TIER_INSUFFICIENT, got $(err_code)"
+
+# organising manager sees it in the review queue and approves it.
+OM_SESSION="$(login 9000000071)"
+OM="$(role_token "$OM_SESSION" ORGANISING_MANAGER)"
+req GET /kyc/pending "$OM"
+expect_status 200 "org-manager lists pending KYC"
+jassert "any(r['id']=='$KYC_ID' and r.get('party',{}).get('id')=='$NEW_PARTY_ID' for r in d['data'])" "pending queue shows our record"
+req POST "/kyc/$KYC_ID/approve" "$OM"
+expect_status 200 "org-manager approves KYC"
+jassert "d['data']['kyc_tier']=='FARMER'" "party upgraded to FARMER tier on approval"
+jassert "d['data']['record']['status']=='VERIFIED'" "KYC record now VERIFIED"
+
+# with the tier unlocked, the SAME role select now succeeds.
+req POST /auth/role/select "$NEW_SESSION" "{\"role_assignment_id\": \"$NEW_FARMER_RA_ID\"}"
+expect_status 200 "role select after KYC approval"
+jassert "d['data']['role_code']=='FARMER'" "FARMER role token issued"
+NEW_FARMER_TOKEN="$(jval "d['data']['access_token']")"
+[[ -n "$NEW_FARMER_TOKEN" ]] || fail "empty FARMER role token after approval"
+
+# ObjectID-hex contract: dump a couple of response bodies to /tmp and confirm
+# the ids they carry are 24-hex ObjectIDs (one org id + one pour id).
+ORG_DUMP="/tmp/saathi-smoke-org.json"
+POUR_DUMP="/tmp/saathi-smoke-pour.json"
+req GET "/orgs?code=DCS-01842" "$DISCOVER_ADMIN"; printf '%s' "$BODY" >"$ORG_DUMP"
+req GET "/collection/pours?dcs_id=$DCS&farmer_party_id=$FARMER_MAHESH" "$SACHEEV"
+expect_status 200 "list Mahesh pours for hex dump"
+printf '%s' "$BODY" >"$POUR_DUMP"
+python3 -c "
+import json,re
+org=json.load(open('$ORG_DUMP'))
+oid=org['data'][0]['id']
+assert re.fullmatch(r'[0-9a-f]{24}', oid), 'org id not hex24: '+repr(oid)
+pours=json.load(open('$POUR_DUMP'))['data']
+pid=pours[0]['id']
+assert re.fullmatch(r'[0-9a-f]{24}', pid), 'pour id not hex24: '+repr(pid)
+assert any(p['id']=='$POUR_MAHESH_ID' for p in pours), 'seeded pour id missing from dump'
+" >/dev/null 2>&1 || fail "ObjectID-hex regex check failed (org=$ORG_DUMP pours=$POUR_DUMP)"
+is_hex24 "$POUR_MAHESH_ID" || fail "pour id not ObjectID hex: '$POUR_MAHESH_ID'"
+
+pass "KYC gate holds: PENDING→403 KYC_TIER_INSUFFICIENT→approve→role select OK; ids are ObjectID hex"
+
 log ""
-log "SMOKE PASSED — all 20 steps green (db=$SMOKE_DB, port=$PORT)"
+log "SMOKE PASSED — all 21 steps green (db=$SMOKE_DB, port=$PORT)"

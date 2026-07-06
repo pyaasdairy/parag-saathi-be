@@ -3,7 +3,7 @@ package collection
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -20,6 +20,16 @@ type handler struct {
 func requestActor(r *http.Request) auth.Actor {
 	actor, _ := auth.ActorFrom(r.Context())
 	return actor
+}
+
+// optionalQueryID parses an optional ObjectID query parameter: absent means
+// the zero ObjectID (no filter), present-but-malformed is a 400.
+func optionalQueryID(r *http.Request, param string) (primitive.ObjectID, error) {
+	raw := r.URL.Query().Get(param)
+	if raw == "" {
+		return primitive.NilObjectID, nil
+	}
+	return httpx.ParseID(raw, param)
 }
 
 // createRateChart handles POST /collection/rate-charts.
@@ -39,9 +49,13 @@ func (h *handler) createRateChart(w http.ResponseWriter, r *http.Request) {
 
 // getActiveRateChart handles GET /collection/rate-charts/active?dcs_id=.
 func (h *handler) getActiveRateChart(w http.ResponseWriter, r *http.Request) {
-	dcsID := r.URL.Query().Get("dcs_id")
-	if dcsID == "" {
+	if r.URL.Query().Get("dcs_id") == "" {
 		httpx.Error(w, r, httpx.BadRequest("VALIDATION", "dcs_id query parameter is required"))
+		return
+	}
+	dcsID, err := httpx.ParseID(r.URL.Query().Get("dcs_id"), "dcs_id")
+	if err != nil {
+		httpx.Error(w, r, err)
 		return
 	}
 	chart, err := h.svc.ResolveActiveChart(r.Context(), requestActor(r), dcsID)
@@ -70,8 +84,13 @@ func (h *handler) createReading(w http.ResponseWriter, r *http.Request) {
 // listReadings handles GET /collection/readings?dcs_id=&date=.
 func (h *handler) listReadings(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ParsePage(r)
+	dcsID, err := optionalQueryID(r, "dcs_id") // absent → service's "required" validation
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	readings, total, err := h.svc.ListReadings(r.Context(), requestActor(r),
-		r.URL.Query().Get("dcs_id"), r.URL.Query().Get("date"), page)
+		dcsID, r.URL.Query().Get("date"), page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -115,12 +134,17 @@ func (h *handler) batchSyncPours(w http.ResponseWriter, r *http.Request) {
 
 // supersedePour handles POST /collection/pours/{id}/supersede.
 func (h *handler) supersedePour(w http.ResponseWriter, r *http.Request) {
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req SupersedePourRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	pour, err := h.svc.SupersedePour(r.Context(), requestActor(r), chi.URLParam(r, "id"), req)
+	pour, err := h.svc.SupersedePour(r.Context(), requestActor(r), id, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -132,11 +156,21 @@ func (h *handler) supersedePour(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listPours(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ParsePage(r)
 	q := r.URL.Query()
+	dcsID, err := optionalQueryID(r, "dcs_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	farmerID, err := optionalQueryID(r, "farmer_party_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	pours, total, err := h.svc.ListPours(r.Context(), requestActor(r), pourListFilter{
-		DCSID:         q.Get("dcs_id"),
+		DCSID:         dcsID,
 		Date:          q.Get("date"),
 		Shift:         q.Get("shift"),
-		FarmerPartyID: q.Get("farmer_party_id"),
+		FarmerPartyID: farmerID,
 	}, page)
 	if err != nil {
 		httpx.Error(w, r, err)
@@ -164,10 +198,20 @@ func (h *handler) generateInvoices(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listInvoices(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ParsePage(r)
 	q := r.URL.Query()
+	dcsID, err := optionalQueryID(r, "dcs_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	farmerID, err := optionalQueryID(r, "farmer_party_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	invoices, total, err := h.svc.ListInvoices(r.Context(), requestActor(r), invoiceListFilter{
-		DCSID:         q.Get("dcs_id"),
+		DCSID:         dcsID,
 		Date:          q.Get("date"),
-		FarmerPartyID: q.Get("farmer_party_id"),
+		FarmerPartyID: farmerID,
 		Status:        q.Get("status"),
 	}, page)
 	if err != nil {
@@ -179,7 +223,12 @@ func (h *handler) listInvoices(w http.ResponseWriter, r *http.Request) {
 
 // getInvoice handles GET /collection/invoices/{id}.
 func (h *handler) getInvoice(w http.ResponseWriter, r *http.Request) {
-	invoice, err := h.svc.GetInvoice(r.Context(), requestActor(r), chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	invoice, err := h.svc.GetInvoice(r.Context(), requestActor(r), id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

@@ -1,16 +1,21 @@
 package cattle
 
-import "time"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
 
 // RegisterAnimalRequest is the payload for POST /cattle/animals.
+// ObjectID fields unmarshal from plain hex JSON strings.
 type RegisterAnimalRequest struct {
-	PashuAadhaar    string `json:"pashu_aadhaar"`  // 12-digit national ear-tag ID
-	OwnerPartyID    string `json:"owner_party_id"` // required for non-FARMER registrars; farmers always own their registration
-	DCSID           string `json:"dcs_id"`
-	Species         string `json:"species"` // COW, BUFFALO
-	Breed           string `json:"breed"`
-	Sex             string `json:"sex"`
-	LactationStatus string `json:"lactation_status"` // DRY, LACTATING
+	PashuAadhaar    string              `json:"pashu_aadhaar"`  // 12-digit national ear-tag ID
+	OwnerPartyID    *primitive.ObjectID `json:"owner_party_id"` // required for non-FARMER registrars; farmers always own their registration
+	DCSID           primitive.ObjectID  `json:"dcs_id"`
+	Species         string              `json:"species"` // COW, BUFFALO
+	Breed           string              `json:"breed"`
+	Sex             string              `json:"sex"`
+	LactationStatus string              `json:"lactation_status"` // DRY, LACTATING
 }
 
 // LogHealthEventRequest is the payload for POST /cattle/animals/{id}/health-events.
@@ -28,14 +33,14 @@ type BPSyncResponse struct {
 
 // CreateMVUCaseRequest is the payload for POST /cattle/mvu-cases.
 type CreateMVUCaseRequest struct {
-	AnimalID string `json:"animal_id"` // optional — resolves the DCS from the animal when given
-	Symptoms string `json:"symptoms"`
+	AnimalID *primitive.ObjectID `json:"animal_id"` // optional — resolves the DCS from the animal when given
+	Symptoms string              `json:"symptoms"`
 }
 
 // CloseMVUCaseRequest is the payload for POST /cattle/mvu-cases/{id}/close.
 type CloseMVUCaseRequest struct {
-	VisitNotes     string   `json:"visit_notes"`
-	HealthEventIDs []string `json:"health_event_ids"`
+	VisitNotes     string               `json:"visit_notes"`
+	HealthEventIDs []primitive.ObjectID `json:"health_event_ids"`
 }
 
 // CreateEducationRequest is the payload for POST /cattle/education.

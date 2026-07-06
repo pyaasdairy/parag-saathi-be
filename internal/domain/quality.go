@@ -3,6 +3,8 @@ package domain
 import (
 	"fmt"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // FSSAI limits for liquid milk (blueprint §8.3). Aflatoxin M1 is heat-stable
@@ -16,13 +18,13 @@ const (
 
 // QC test names.
 const (
-	TestAflatoxinM1  = "AFLATOXIN_M1"           // µg/kg
-	TestColiform     = "COLIFORM"               // CFU/ml
-	TestTPC          = "TPC"                    // CFU/ml, graded — recorded, not hard-gated here
-	TestAntibiotic   = "ANTIBIOTIC_TETRACYCLINE" // mg/kg
-	TestPhosphatase  = "PHOSPHATASE"            // 0 = negative (pass post-pasteurisation), 1 = positive
-	TestFat          = "FAT"                    // %
-	TestSNF          = "SNF"                    // %
+	TestAflatoxinM1 = "AFLATOXIN_M1"            // µg/kg
+	TestColiform    = "COLIFORM"                // CFU/ml
+	TestTPC         = "TPC"                     // CFU/ml, graded — recorded, not hard-gated here
+	TestAntibiotic  = "ANTIBIOTIC_TETRACYCLINE" // mg/kg
+	TestPhosphatase = "PHOSPHATASE"             // 0 = negative (pass post-pasteurisation), 1 = positive
+	TestFat         = "FAT"                     // %
+	TestSNF         = "SNF"                     // %
 )
 
 // QC stages.
@@ -50,21 +52,21 @@ type QCTest struct {
 // OverallPass drives the safety gate; a certificate is attached to provenance
 // on pass, a block + quarantine on fail.
 type QCResult struct {
-	ID                string    `bson:"_id"          json:"id"`
-	SubjectType       string    `bson:"subject_type" json:"subject_type"`
-	SubjectID         string    `bson:"subject_id"   json:"subject_id"`
-	Stage             string    `bson:"stage"        json:"stage"`
-	Tests             []QCTest  `bson:"tests"        json:"tests"`
-	OverallPass       bool      `bson:"overall_pass" json:"overall_pass"`
-	FailureReasons    []string  `bson:"failure_reasons,omitempty" json:"failure_reasons,omitempty"`
-	AnalystPartyID    string    `bson:"analyst_party_id" json:"analyst_party_id"`
-	LabRef            string    `bson:"lab_ref,omitempty"            json:"lab_ref,omitempty"`
-	CertificateNumber string    `bson:"certificate_number,omitempty" json:"certificate_number,omitempty"`
+	ID                primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	SubjectType       string             `bson:"subject_type"  json:"subject_type"`
+	SubjectID         primitive.ObjectID `bson:"subject_id"    json:"subject_id"`
+	Stage             string             `bson:"stage"         json:"stage"`
+	Tests             []QCTest           `bson:"tests"         json:"tests"`
+	OverallPass       bool               `bson:"overall_pass"  json:"overall_pass"`
+	FailureReasons    []string           `bson:"failure_reasons,omitempty" json:"failure_reasons,omitempty"`
+	AnalystPartyID    primitive.ObjectID `bson:"analyst_party_id" json:"analyst_party_id"`
+	LabRef            string             `bson:"lab_ref,omitempty"            json:"lab_ref,omitempty"`
+	CertificateNumber string             `bson:"certificate_number,omitempty" json:"certificate_number,omitempty"`
 	// Superseded marks a result voided after losing the gate race — the
 	// verdict on the subject came from a different, earlier result.
-	Superseded bool      `bson:"superseded,omitempty" json:"superseded,omitempty"`
-	RecordedAt time.Time `bson:"recorded_at"  json:"recorded_at"`
-	ProvenanceSeq     int64     `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
+	Superseded    bool      `bson:"superseded,omitempty" json:"superseded,omitempty"`
+	RecordedAt    time.Time `bson:"recorded_at"   json:"recorded_at"`
+	ProvenanceSeq int64     `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
 }
 
 // EvaluateQCTests applies the FSSAI gate to a set of tests: it fills each

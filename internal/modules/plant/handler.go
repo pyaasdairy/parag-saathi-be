@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -30,7 +30,7 @@ func (h *Handler) CreateBMCLot(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	if req.BMCID == "" {
+	if req.BMCID.IsZero() {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "bmc_id is required"))
 		return
 	}
@@ -57,6 +57,11 @@ func (h *Handler) CreateBMCLot(w http.ResponseWriter, r *http.Request) {
 // CloseBMCLot handles POST /plant/bmc-lots/{id}/close.
 func (h *Handler) CloseBMCLot(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req CloseBMCLotRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
@@ -66,7 +71,7 @@ func (h *Handler) CloseBMCLot(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "chilling_temp_c is required"))
 		return
 	}
-	lot, err := h.svc.CloseBMCLot(r.Context(), actor, chi.URLParam(r, "id"), *req.ChillingTempC)
+	lot, err := h.svc.CloseBMCLot(r.Context(), actor, id, *req.ChillingTempC)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -77,7 +82,12 @@ func (h *Handler) CloseBMCLot(w http.ResponseWriter, r *http.Request) {
 // DispatchBMCLot handles POST /plant/bmc-lots/{id}/dispatch — the safety gate.
 func (h *Handler) DispatchBMCLot(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	lot, err := h.svc.DispatchBMCLot(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	lot, err := h.svc.DispatchBMCLot(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -93,9 +103,18 @@ func (h *Handler) ListBMCLots(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.BadRequest("INVALID_DATE", "date must be YYYY-MM-DD"))
 		return
 	}
+	var bmcID primitive.ObjectID
+	if hex := q.Get("bmc_id"); hex != "" {
+		id, err := httpx.ParseID(hex, "bmc_id")
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		bmcID = id
+	}
 	page := httpx.ParsePage(r)
 	lots, total, err := h.svc.ListBMCLots(r.Context(), actor, BMCLotListFilter{
-		BMCID:  q.Get("bmc_id"),
+		BMCID:  bmcID,
 		Date:   q.Get("date"),
 		Status: q.Get("status"),
 	}, page)
@@ -114,7 +133,7 @@ func (h *Handler) CreateBatch(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	if req.PlantID == "" {
+	if req.PlantID.IsZero() {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "plant_id is required"))
 		return
 	}
@@ -137,7 +156,12 @@ func (h *Handler) CreateBatch(w http.ResponseWriter, r *http.Request) {
 // CompleteBatch handles POST /plant/batches/{id}/complete.
 func (h *Handler) CompleteBatch(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	batch, err := h.svc.CompleteBatch(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	batch, err := h.svc.CompleteBatch(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -148,7 +172,12 @@ func (h *Handler) CompleteBatch(w http.ResponseWriter, r *http.Request) {
 // GetBatch handles GET /plant/batches/{id}.
 func (h *Handler) GetBatch(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	batch, err := h.svc.GetBatch(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	batch, err := h.svc.GetBatch(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -160,9 +189,18 @@ func (h *Handler) GetBatch(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListBatches(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
 	q := r.URL.Query()
+	var plantID primitive.ObjectID
+	if hex := q.Get("plant_id"); hex != "" {
+		id, err := httpx.ParseID(hex, "plant_id")
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		plantID = id
+	}
 	page := httpx.ParsePage(r)
 	batches, total, err := h.svc.ListBatches(r.Context(), actor, BatchListFilter{
-		PlantID: q.Get("plant_id"),
+		PlantID: plantID,
 		Status:  q.Get("status"),
 	}, page)
 	if err != nil {
@@ -181,7 +219,7 @@ func (h *Handler) CreateProductLot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case req.BatchID == "":
+	case req.BatchID.IsZero():
 		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "batch_id is required"))
 		return
 	case req.SKU == "":
@@ -217,6 +255,11 @@ func (h *Handler) CreateProductLot(w http.ResponseWriter, r *http.Request) {
 // RecallProductLot handles POST /plant/product-lots/{id}/recall.
 func (h *Handler) RecallProductLot(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req RecallProductLotRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
@@ -226,7 +269,7 @@ func (h *Handler) RecallProductLot(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "reason is required"))
 		return
 	}
-	lot, err := h.svc.RecallProductLot(r.Context(), actor, chi.URLParam(r, "id"), req.Reason)
+	lot, err := h.svc.RecallProductLot(r.Context(), actor, id, req.Reason)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -242,7 +285,7 @@ func (h *Handler) IssueQR(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	if req.ProductLotID == "" {
+	if req.ProductLotID.IsZero() {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "product_lot_id is required"))
 		return
 	}
@@ -257,9 +300,18 @@ func (h *Handler) IssueQR(w http.ResponseWriter, r *http.Request) {
 // ListQRs handles GET /plant/qrs?product_lot_id=.
 func (h *Handler) ListQRs(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	var productLotID primitive.ObjectID
+	if hex := r.URL.Query().Get("product_lot_id"); hex != "" {
+		id, err := httpx.ParseID(hex, "product_lot_id")
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		productLotID = id
+	}
 	page := httpx.ParsePage(r)
 	qrs, total, err := h.svc.ListQRs(r.Context(), actor, QRListFilter{
-		ProductLotID: r.URL.Query().Get("product_lot_id"),
+		ProductLotID: productLotID,
 	}, page)
 	if err != nil {
 		httpx.Error(w, r, err)
