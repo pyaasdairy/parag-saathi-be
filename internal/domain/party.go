@@ -80,26 +80,26 @@ const (
 // Aadhaar compliance (blueprint §18-A): only the LAST 4 digits and an opaque
 // vault reference are ever stored — never the full number, never biometrics.
 type KYCRecord struct {
-	ID                primitive.ObjectID   `bson:"_id,omitempty" json:"id"`
-	PartyID           primitive.ObjectID   `bson:"party_id"      json:"party_id"`
-	RequestedTier     string               `bson:"requested_tier" json:"requested_tier"`
-	AadhaarLast4      string               `bson:"aadhaar_last4,omitempty"       json:"aadhaar_last4,omitempty"`
-	AadhaarVaultRef   string               `bson:"aadhaar_vault_ref,omitempty"   json:"-"` // opaque Aadhaar Data Vault de-tokenization handle — persisted, NEVER serialized to any client surface
-	BankAccountMasked string               `bson:"bank_account_masked,omitempty" json:"bank_account_masked,omitempty"`
-	BankIFSC          string               `bson:"bank_ifsc,omitempty"           json:"bank_ifsc,omitempty"`
-	BankVerified      bool                 `bson:"bank_verified"                 json:"bank_verified"`
-	BankNameMatch     float64              `bson:"bank_name_match,omitempty"     json:"bank_name_match,omitempty"` // penny-drop name-match score 0..1
-	DigiLockerDocs    []DocRef             `bson:"digilocker_docs,omitempty"     json:"digilocker_docs,omitempty"`
-	VideoKYCRef       string               `bson:"video_kyc_ref,omitempty"       json:"video_kyc_ref,omitempty"`
-	ConsentID         *primitive.ObjectID  `bson:"consent_id,omitempty"          json:"consent_id,omitempty"`
-	Status            string               `bson:"status"        json:"status"`
-	RejectionReason   string               `bson:"rejection_reason,omitempty" json:"rejection_reason,omitempty"`
-	ReviewedBy        *primitive.ObjectID  `bson:"reviewed_by,omitempty"      json:"reviewed_by,omitempty"` // approver party
-	ReviewedByRole    string               `bson:"reviewed_by_role,omitempty" json:"reviewed_by_role,omitempty"`
-	ReviewedAt        *time.Time           `bson:"reviewed_at,omitempty"      json:"reviewed_at,omitempty"`
-	VerifiedAt        *time.Time           `bson:"verified_at,omitempty"      json:"verified_at,omitempty"`
-	CreatedAt         time.Time            `bson:"created_at"    json:"created_at"`
-	UpdatedAt         time.Time            `bson:"updated_at"    json:"updated_at"`
+	ID                primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
+	PartyID           primitive.ObjectID  `bson:"party_id"      json:"party_id"`
+	RequestedTier     string              `bson:"requested_tier" json:"requested_tier"`
+	AadhaarLast4      string              `bson:"aadhaar_last4,omitempty"       json:"aadhaar_last4,omitempty"`
+	AadhaarVaultRef   string              `bson:"aadhaar_vault_ref,omitempty"   json:"-"` // opaque Aadhaar Data Vault de-tokenization handle — persisted, NEVER serialized to any client surface
+	BankAccountMasked string              `bson:"bank_account_masked,omitempty" json:"bank_account_masked,omitempty"`
+	BankIFSC          string              `bson:"bank_ifsc,omitempty"           json:"bank_ifsc,omitempty"`
+	BankVerified      bool                `bson:"bank_verified"                 json:"bank_verified"`
+	BankNameMatch     float64             `bson:"bank_name_match,omitempty"     json:"bank_name_match,omitempty"` // penny-drop name-match score 0..1
+	DigiLockerDocs    []DocRef            `bson:"digilocker_docs,omitempty"     json:"digilocker_docs,omitempty"`
+	VideoKYCRef       string              `bson:"video_kyc_ref,omitempty"       json:"video_kyc_ref,omitempty"`
+	ConsentID         *primitive.ObjectID `bson:"consent_id,omitempty"          json:"consent_id,omitempty"`
+	Status            string              `bson:"status"        json:"status"`
+	RejectionReason   string              `bson:"rejection_reason,omitempty" json:"rejection_reason,omitempty"`
+	ReviewedBy        *primitive.ObjectID `bson:"reviewed_by,omitempty"      json:"reviewed_by,omitempty"` // approver party
+	ReviewedByRole    string              `bson:"reviewed_by_role,omitempty" json:"reviewed_by_role,omitempty"`
+	ReviewedAt        *time.Time          `bson:"reviewed_at,omitempty"      json:"reviewed_at,omitempty"`
+	VerifiedAt        *time.Time          `bson:"verified_at,omitempty"      json:"verified_at,omitempty"`
+	CreatedAt         time.Time           `bson:"created_at"    json:"created_at"`
+	UpdatedAt         time.Time           `bson:"updated_at"    json:"updated_at"`
 }
 
 // DocRef points at an externally fetched document (DigiLocker etc.).

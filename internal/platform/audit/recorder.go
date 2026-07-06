@@ -21,16 +21,16 @@ const collection = "audit_logs"
 // arrive from JWT claims as ObjectID hex strings.
 type Entry struct {
 	ID           primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	ActorPartyID string         `bson:"actor_party_id" json:"actor_party_id"`
-	ActorRole    string         `bson:"actor_role,omitempty" json:"actor_role,omitempty"`
-	Action       string         `bson:"action"         json:"action"` // e.g. "http.POST /api/v1/collection/pours" or "support.pii_lookup"
-	TargetType   string         `bson:"target_type,omitempty" json:"target_type,omitempty"`
-	TargetID     string         `bson:"target_id,omitempty"   json:"target_id,omitempty"`
-	Status       int            `bson:"status,omitempty"      json:"status,omitempty"`
-	IP           string         `bson:"ip,omitempty"          json:"ip,omitempty"`
-	RequestID    string         `bson:"request_id,omitempty"  json:"request_id,omitempty"`
-	Meta         map[string]any `bson:"meta,omitempty"        json:"meta,omitempty"`
-	TS           time.Time      `bson:"ts"             json:"ts"`
+	ActorPartyID string             `bson:"actor_party_id" json:"actor_party_id"`
+	ActorRole    string             `bson:"actor_role,omitempty" json:"actor_role,omitempty"`
+	Action       string             `bson:"action"         json:"action"` // e.g. "http.POST /api/v1/collection/pours" or "support.pii_lookup"
+	TargetType   string             `bson:"target_type,omitempty" json:"target_type,omitempty"`
+	TargetID     string             `bson:"target_id,omitempty"   json:"target_id,omitempty"`
+	Status       int                `bson:"status,omitempty"      json:"status,omitempty"`
+	IP           string             `bson:"ip,omitempty"          json:"ip,omitempty"`
+	RequestID    string             `bson:"request_id,omitempty"  json:"request_id,omitempty"`
+	Meta         map[string]any     `bson:"meta,omitempty"        json:"meta,omitempty"`
+	TS           time.Time          `bson:"ts"             json:"ts"`
 }
 
 // Recorder persists audit entries asynchronously so auditing never adds

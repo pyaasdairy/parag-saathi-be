@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pyaas/saathi-backend/internal/config"
+	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/httpapi"
 	"github.com/pyaas/saathi-backend/internal/platform/audit"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -25,6 +26,10 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/mongodb"
 	"github.com/pyaas/saathi-backend/internal/platform/orgscope"
 	"github.com/pyaas/saathi-backend/internal/platform/provenance"
+	"github.com/pyaas/saathi-backend/internal/platform/ratelimit"
+	"github.com/pyaas/saathi-backend/internal/platform/sse"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -70,16 +75,62 @@ func run() error {
 		return err
 	}
 
+	bus := eventbus.New(log)
+	sseHub := sse.NewHub(log)
+
+	// Rate limiter: shared Redis token bucket when REDIS_URL is set (global
+	// fairness across replicas), else an in-process bucket (single instance).
+	// Duplicate-prevention deliberately does NOT use Redis — that lives in
+	// MongoDB's atomic conditional updates, which are safer than any lock.
+	var limiter ratelimit.Limiter
+	if cfg.RedisURL != "" {
+		opt, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			return fmt.Errorf("parse REDIS_URL: %w", err)
+		}
+		rdb := redis.NewClient(opt)
+		if err := rdb.Ping(bootCtx).Err(); err != nil {
+			return fmt.Errorf("redis ping (%s): %w", cfg.RedisURL, err)
+		}
+		defer rdb.Close()
+		limiter = ratelimit.NewRedis(rdb, cfg.RateLimitRPS, cfg.RateLimitBurst, log)
+		log.Info("rate limiter: redis (shared across replicas)")
+	} else {
+		limiter = ratelimit.NewMemory(cfg.RateLimitRPS, cfg.RateLimitBurst)
+		log.Info("rate limiter: in-process (single instance)")
+	}
+
+	// Bridge the KYC review-queue topic to the SSE hub: when a record is
+	// submitted/approved/rejected, nudge connected reviewer dashboards so their
+	// "pending KYC" badge re-counts live. Reviewer roles only — the client's
+	// own scoped count query does the org filtering (nudge, then re-count).
+	bus.Subscribe(eventbus.TopicKYCQueueChanged, func(_ context.Context, _ string, payload any) {
+		ev, ok := payload.(eventbus.KYCQueueEvent)
+		if !ok {
+			return
+		}
+		sseHub.Broadcast(sse.Event{
+			Type: "kyc.pending.changed",
+			Data: ev,
+			Roles: []string{
+				domain.RoleOrganisingManager, domain.RoleDistrictVerifier,
+				domain.RolePCDFAdmin, domain.RoleSuperAdmin,
+			},
+		})
+	})
+
 	d := &deps.Deps{
-		Cfg:    cfg,
-		Log:    log,
-		DB:     db,
-		JWT:    auth.NewJWTManager(cfg.JWTSecret, cfg.AccessTokenTTL),
-		Ledger: provenance.NewLedger(db),
-		Audit:  audit.NewRecorder(db, log),
-		Flags:  flagSvc,
-		Orgs:   orgscope.NewResolver(db),
-		Bus:    eventbus.New(log),
+		Cfg:         cfg,
+		Log:         log,
+		DB:          db,
+		JWT:         auth.NewJWTManager(cfg.JWTSecret, cfg.AccessTokenTTL),
+		Ledger:      provenance.NewLedger(db),
+		Audit:       audit.NewRecorder(db, log),
+		Flags:       flagSvc,
+		Orgs:        orgscope.NewResolver(db),
+		Bus:         bus,
+		SSE:         sseHub,
+		RateLimiter: limiter,
 	}
 
 	srv := &http.Server{

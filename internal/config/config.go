@@ -34,6 +34,11 @@ type Config struct {
 	RateLimitRPS   float64
 	RateLimitBurst int
 
+	// RedisURL, when set, switches rate limiting to a shared Redis token bucket
+	// for global fairness across replicas. Empty → in-process limiting (dev,
+	// single instance). Format: redis://[:password@]host:port/db
+	RedisURL string
+
 	SeedAdminPhone string
 }
 
@@ -60,6 +65,7 @@ func Load() (*Config, error) {
 		OTPDevMode:      envBool("OTP_DEV_MODE", false),
 		RateLimitRPS:    envFloat("RATE_LIMIT_RPS", 50),
 		RateLimitBurst:  envInt("RATE_LIMIT_BURST", 100),
+		RedisURL:        os.Getenv("REDIS_URL"),
 		SeedAdminPhone:  envStr("SEED_ADMIN_PHONE", "9999999999"),
 	}
 

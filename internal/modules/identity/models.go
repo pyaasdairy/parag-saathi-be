@@ -247,6 +247,13 @@ type pendingKYCItem struct {
 	Party *pendingPartySummary `json:"party,omitempty"`
 }
 
+// pendingKYCCountResponse is the live badge value for the reviewer dashboard.
+// Capped is true when the true count exceeds the scan cap (display "count+").
+type pendingKYCCountResponse struct {
+	Count  int64 `json:"count"`
+	Capped bool  `json:"capped"`
+}
+
 // kycReviewResponse returns the reviewed record plus the party's KYC tier
 // after the review (upgraded on approval when the requested tier is higher).
 type kycReviewResponse struct {

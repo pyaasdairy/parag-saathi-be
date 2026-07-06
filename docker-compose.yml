@@ -12,6 +12,17 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   api:
     build: .
     restart: unless-stopped
@@ -27,8 +38,12 @@ services:
       QR_SIGNING_SECRET: dev-only-qr-secret-change-me
       OTP_HASH_SECRET: dev-only-otp-secret-change-me
       OTP_DEV_MODE: "true"
+      # Shared rate limiting across replicas (scale `api` and it stays fair).
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:
