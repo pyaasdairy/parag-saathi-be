@@ -1,0 +1,189 @@
+package quality
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/pyaas/saathi-backend/internal/domain"
+	"github.com/pyaas/saathi-backend/internal/platform/httpx"
+	"github.com/pyaas/saathi-backend/internal/platform/mongodb"
+)
+
+// repository is all MongoDB access for the quality module. It owns qc_results
+// and — as the safety-gate verdict writer (blueprint §8.3) — performs the
+// documented cross-collection status write onto bmc_lots and
+// processing_batches. No other module may flip those gate statuses.
+type repository struct {
+	results  *mongo.Collection
+	bmcLots  *mongo.Collection
+	batches  *mongo.Collection
+	counters *mongo.Collection
+}
+
+// newRepository binds the repository to its collections.
+func newRepository(db *mongo.Database) *repository {
+	return &repository{
+		results:  db.Collection(mongodb.CollQCResults),
+		bmcLots:  db.Collection(mongodb.CollBMCLots),
+		batches:  db.Collection(mongodb.CollBatches),
+		counters: db.Collection(mongodb.CollCounters),
+	}
+}
+
+// insertResult stores a new QC result document.
+func (r *repository) insertResult(ctx context.Context, res *domain.QCResult) error {
+	if _, err := r.results.InsertOne(ctx, res); err != nil {
+		return httpx.Internal(fmt.Errorf("insert qc result: %w", err))
+	}
+	return nil
+}
+
+// setResultProvenanceSeq stamps the ledger sequence onto a stored result.
+func (r *repository) setResultProvenanceSeq(ctx context.Context, resultID string, seq int64) error {
+	_, err := r.results.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: resultID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "provenance_seq", Value: seq}}}},
+	)
+	if err != nil {
+		return httpx.Internal(fmt.Errorf("set qc result provenance seq: %w", err))
+	}
+	return nil
+}
+
+// markResultSuperseded voids a result that lost the gate race — the subject's
+// verdict came from a different, earlier result.
+func (r *repository) markResultSuperseded(ctx context.Context, resultID string) error {
+	_, err := r.results.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: resultID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "superseded", Value: true}}}},
+	)
+	if err != nil {
+		return httpx.Internal(fmt.Errorf("mark qc result superseded: %w", err))
+	}
+	return nil
+}
+
+// findResultByID returns one QC result or NotFound.
+func (r *repository) findResultByID(ctx context.Context, resultID string) (*domain.QCResult, error) {
+	var res domain.QCResult
+	err := r.results.FindOne(ctx, bson.D{{Key: "_id", Value: resultID}}).Decode(&res)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("qc result")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find qc result: %w", err))
+	}
+	return &res, nil
+}
+
+// listResults returns a page of QC results, newest first, optionally filtered
+// by subject. It also returns the total matching count for pagination meta.
+func (r *repository) listResults(ctx context.Context, subjectType, subjectID string, page httpx.Page) ([]domain.QCResult, int64, error) {
+	filter := bson.D{}
+	if subjectType != "" {
+		filter = append(filter, bson.E{Key: "subject_type", Value: subjectType})
+	}
+	if subjectID != "" {
+		filter = append(filter, bson.E{Key: "subject_id", Value: subjectID})
+	}
+
+	total, err := r.results.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("count qc results: %w", err))
+	}
+
+	cur, err := r.results.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "recorded_at", Value: -1}}).
+		SetSkip(page.Offset).
+		SetLimit(page.Limit),
+	)
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("list qc results: %w", err))
+	}
+	results := []domain.QCResult{}
+	if err := cur.All(ctx, &results); err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("decode qc results: %w", err))
+	}
+	return results, total, nil
+}
+
+// findBMCLot returns a BMC lot or NotFound.
+func (r *repository) findBMCLot(ctx context.Context, lotID string) (*domain.BMCLot, error) {
+	var lot domain.BMCLot
+	err := r.bmcLots.FindOne(ctx, bson.D{{Key: "_id", Value: lotID}}).Decode(&lot)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("bmc lot")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find bmc lot: %w", err))
+	}
+	return &lot, nil
+}
+
+// findBatch returns a processing batch or NotFound.
+func (r *repository) findBatch(ctx context.Context, batchID string) (*domain.ProcessingBatch, error) {
+	var batch domain.ProcessingBatch
+	err := r.batches.FindOne(ctx, bson.D{{Key: "_id", Value: batchID}}).Decode(&batch)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("processing batch")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find processing batch: %w", err))
+	}
+	return &batch, nil
+}
+
+// gateBMCLot applies the gate verdict to a BMC lot still in QC_PENDING.
+// Returns false when the lot was already gated by a concurrent writer.
+func (r *repository) gateBMCLot(ctx context.Context, lotID, resultID, newStatus, blockReason string) (bool, error) {
+	return gateSubjectDoc(ctx, r.bmcLots, lotID, domain.BMCLotStatusQCPending, resultID, newStatus, blockReason)
+}
+
+// gateBatch applies the gate verdict to a processing batch still in QC_PENDING.
+// Returns false when the batch was already gated by a concurrent writer.
+func (r *repository) gateBatch(ctx context.Context, batchID, resultID, newStatus, blockReason string) (bool, error) {
+	return gateSubjectDoc(ctx, r.batches, batchID, domain.BatchStatusQCPending, resultID, newStatus, blockReason)
+}
+
+// gateSubjectDoc is the shared conditional gate write: the filter pins the
+// subject to QC_PENDING so a lost race cannot double-apply a verdict — the
+// optimistic pattern that replaces transactions on a standalone server.
+func gateSubjectDoc(ctx context.Context, coll *mongo.Collection, subjectID, pendingStatus, resultID, newStatus, blockReason string) (bool, error) {
+	set := bson.D{{Key: "status", Value: newStatus}}
+	if blockReason != "" {
+		set = append(set, bson.E{Key: "block_reason", Value: blockReason})
+	}
+	res, err := coll.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: subjectID}, {Key: "status", Value: pendingStatus}},
+		bson.D{
+			{Key: "$set", Value: set},
+			{Key: "$push", Value: bson.D{{Key: "qc_result_ids", Value: resultID}}},
+		},
+	)
+	if err != nil {
+		return false, httpx.Internal(fmt.Errorf("gate %s subject %s: %w", coll.Name(), subjectID, err))
+	}
+	return res.MatchedCount == 1, nil
+}
+
+// nextCertificateSeq atomically increments and returns the per-stage QC
+// certificate counter (counters collection, upsert-on-first-use).
+func (r *repository) nextCertificateSeq(ctx context.Context, stage string) (int64, error) {
+	var doc struct {
+		Seq int64 `bson:"seq"`
+	}
+	err := r.counters.FindOneAndUpdate(ctx,
+		bson.D{{Key: "_id", Value: "qc_certificate:" + stage}},
+		bson.D{{Key: "$inc", Value: bson.D{{Key: "seq", Value: int64(1)}}}},
+		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
+	).Decode(&doc)
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("next qc certificate seq: %w", err))
+	}
+	return doc.Seq, nil
+}

@@ -27,46 +27,11 @@ logs/
 tmp/
 *.tmp
 
-# ================================================================
-# The backend language is an open decision (§15/§20). The ignores
-# below cover the candidate stacks (Node / Python / JVM / Go).
-# Prune the ones you don't use once the stack is chosen.
-# ================================================================
-
-# ---- Node / TypeScript ----
-node_modules/
-dist/
-build/
-coverage/
-.next/
-*.tsbuildinfo
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# ---- Python ----
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-env/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
-
-# ---- JVM (Kotlin / Java / Gradle / Maven) ----
-.gradle/
-target/
-*.class
-*.jar
-!gradle/wrapper/gradle-wrapper.jar
-out/
-
-# ---- Go ----
+# ---- Go (stack decided: Go + MongoDB) ----
 bin/
 vendor/
+coverage.out
+dist/
 
 # ---- Infra / containers ----
 *.tfstate

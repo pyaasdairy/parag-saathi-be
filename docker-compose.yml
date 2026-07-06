@@ -1,0 +1,35 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ENV: dev
+      PORT: "8080"
+      LOG_LEVEL: info
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB: saathi
+      JWT_SECRET: dev-only-jwt-secret-change-me
+      QR_SIGNING_SECRET: dev-only-qr-secret-change-me
+      OTP_HASH_SECRET: dev-only-otp-secret-change-me
+      OTP_DEV_MODE: "true"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo-data:

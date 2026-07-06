@@ -3,10 +3,12 @@
 > Backend services for **Saathi**, a digital dairy supply-chain & traceability platform for the
 > **Nand Baba Dugdh Mission** (Uttar Pradesh / PCDF–Parag).
 
-**Status:** v0.1 — greenfield. This repository currently contains the architecture blueprint
-([`SAATHI_Architecture_Framework_Parag.pdf`](SAATHI_Architecture_Framework_Parag.pdf)) and this
-onboarding guide. Application code has not been written yet; the blueprint is the source of truth
-for what to build.
+**Status:** v0.2 — the backend is implemented as a **Go + MongoDB modular monolith** covering
+P0 + P1 of the blueprint (identity/RBAC → pour → same-day invoice → logistics → FSSAI safety
+gate → batch → QR → public trace → settlement) plus P2 foundations. The blueprint
+([`SAATHI_Architecture_Framework_Parag.pdf`](SAATHI_Architecture_Framework_Parag.pdf)) remains
+the source of truth for *what* to build; [`docs/TECHNICAL_NOTES.md`](docs/TECHNICAL_NOTES.md)
+documents *what has been built* and what comes next — read it first.
 
 > ⚠️ **Confidential.** This document set is the proprietary property of PYAAS and is disclosed on a
 > strictly confidential basis. Do not fork, publish, or share outside the authorised team. The
@@ -126,19 +128,56 @@ These block architecture and should be settled before heavy build:
 
 ## Getting started (for the next developer)
 
-There is **no build to run yet** — this repo is the blueprint stage. Suggested first steps:
+Prerequisites: **Go 1.23+** and **MongoDB** (local `mongod` or any URI — connection is
+env-only, never hardcoded).
 
-1. Read [`SAATHI_Architecture_Framework_Parag.pdf`](SAATHI_Architecture_Framework_Parag.pdf) end to end (it's the spec).
-2. Drive the **open decisions (§20)** to a conclusion with the team — especially the backend language and provenance store.
-3. Stand up the **P0 slice**: Party/RBAC identity + org-unit model, tiered KYC onboarding, and an offline-capable pour receipt.
-4. Establish repo conventions (language, service layout, CI, IaC) once the stack is chosen, and document them here.
+```bash
+cp .env.example .env      # set MONGO_URI here (required — server refuses to boot without it)
+make tidy                 # resolve Go dependencies
+make run                  # start the API on :8080
+make seed                 # idempotent demo data: org tree, one party per role, rate chart
+make test                 # unit tests
+make smoke                # full E2E of the pour→payment→QR loop against a scratch DB
+make docker-up            # alternative: MongoDB + API via docker compose
+```
+
+Quick check once running:
+
+```bash
+curl -s localhost:8080/healthz     # {"data":{"status":"ok"}}
+curl -s localhost:8080/readyz      # MongoDB ping
+curl -s localhost:8080/version
+```
+
+With `OTP_DEV_MODE=true`, `POST /api/v1/auth/otp/request` returns the OTP in the response —
+seeded demo phones are listed by `make seed` (super-admin `9999999999`, sacheev `9000000001`,
+farmer `9000000011`, …).
+
+Then read:
+
+- [`docs/WORKFLOW_GUIDE.md`](docs/WORKFLOW_GUIDE.md) — **who does what**: every role (farmer →
+  sacheev → adhyaksh → rider → BMC → plant → admin) with end-to-end flow diagrams.
+- [`docs/TECHNICAL_NOTES.md`](docs/TECHNICAL_NOTES.md) — architecture decisions, module map, API
+  conventions, what's mocked vs real, and the ordered next-steps list.
 
 ## Repository layout
 
 ```
 .
-├── README.md                              # this file
-└── SAATHI_Architecture_Framework_Parag.pdf  # v0.1 architecture blueprint (source of truth)
+├── README.md                                # this file
+├── SAATHI_Architecture_Framework_Parag.pdf  # v0.1 architecture blueprint (source of truth)
+├── docs/WORKFLOW_GUIDE.md                   # roles + end-to-end flows with diagrams
+├── docs/TECHNICAL_NOTES.md                  # implementation handoff (read after the blueprint)
+├── cmd/                                     # server + seed binaries
+├── internal/
+│   ├── config/                              # env-only configuration
+│   ├── domain/                              # pure entity contract (roles, FSSAI limits, statuses)
+│   ├── platform/                            # auth, RBAC, provenance ledger, audit, flags, mongo
+│   ├── httpapi/                             # router + module registration
+│   └── modules/                             # 10 domain modules (future microservice seams)
+├── scripts/smoke.sh                         # end-to-end loop test
+├── Dockerfile · docker-compose.yml · Makefile
+└── .env.example                             # every environment variable, documented
 ```
 
 ---
