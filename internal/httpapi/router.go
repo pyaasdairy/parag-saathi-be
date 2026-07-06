@@ -28,6 +28,7 @@ func New(d *deps.Deps) http.Handler {
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(middleware.Metrics)
+	r.Use(middleware.RequestLogger(d.Log))
 	r.Use(middleware.PerIPRateLimit(d.Cfg.RateLimitRPS, d.Cfg.RateLimitBurst))
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))

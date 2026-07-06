@@ -7,62 +7,68 @@ import (
 	"strings"
 	"testing"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 )
 
 func TestValidateApproval(t *testing.T) {
+	sacheev := primitive.NewObjectID()
+	adhyaksh := primitive.NewObjectID()
+	superAdmin := primitive.NewObjectID()
+
 	tests := []struct {
 		name       string
 		batch      domain.SettlementBatch
-		approver   string
+		approver   primitive.ObjectID
 		wantStatus int    // 0 = no error expected
 		wantReason string // expected details.reason, "" = don't check
 	}{
 		{
 			name: "different approver on pending batch passes",
 			batch: domain.SettlementBatch{
-				InitiatedBy: "party-sacheev",
+				InitiatedBy: sacheev,
 				Status:      domain.SettlementStatusPendingApproval,
 			},
-			approver: "party-adhyaksh",
+			approver: adhyaksh,
 		},
 		{
 			name: "initiator approving own batch is a dual-control violation",
 			batch: domain.SettlementBatch{
-				InitiatedBy: "party-sacheev",
+				InitiatedBy: sacheev,
 				Status:      domain.SettlementStatusPendingApproval,
 			},
-			approver:   "party-sacheev",
+			approver:   sacheev,
 			wantStatus: http.StatusForbidden,
 			wantReason: "DUAL_CONTROL_VIOLATION",
 		},
 		{
 			name: "dual control is checked before status — even a super-admin initiator on an approved batch is refused as a violation",
 			batch: domain.SettlementBatch{
-				InitiatedBy: "party-superadmin",
+				InitiatedBy: superAdmin,
 				Status:      domain.SettlementStatusApproved,
 			},
-			approver:   "party-superadmin",
+			approver:   superAdmin,
 			wantStatus: http.StatusForbidden,
 			wantReason: "DUAL_CONTROL_VIOLATION",
 		},
 		{
 			name: "already approved batch conflicts",
 			batch: domain.SettlementBatch{
-				InitiatedBy: "party-sacheev",
+				InitiatedBy: sacheev,
 				Status:      domain.SettlementStatusApproved,
 			},
-			approver:   "party-adhyaksh",
+			approver:   adhyaksh,
 			wantStatus: http.StatusConflict,
 		},
 		{
 			name: "rejected batch conflicts",
 			batch: domain.SettlementBatch{
-				InitiatedBy: "party-sacheev",
+				InitiatedBy: sacheev,
 				Status:      domain.SettlementStatusRejected,
 			},
-			approver:   "party-adhyaksh",
+			approver:   adhyaksh,
 			wantStatus: http.StatusConflict,
 		},
 	}

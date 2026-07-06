@@ -3,9 +3,11 @@ package cattle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -16,7 +18,8 @@ import (
 
 // repository is the module's only MongoDB touchpoint. It maps driver errors
 // to httpx errors (mongo.ErrNoDocuments → NotFound, duplicate key → Conflict)
-// so the service layer stays driver-free.
+// so the service layer stays driver-free. Unexpected driver errors are wrapped
+// with the failing operation so ERROR logs upstream name the op.
 type repository struct {
 	animals   *mongo.Collection
 	health    *mongo.Collection
@@ -41,47 +44,47 @@ func (r *repository) InsertAnimal(ctx context.Context, a *domain.Animal) error {
 		if mongo.IsDuplicateKeyError(err) {
 			return httpx.Conflict("ANIMAL_EXISTS", "an animal with this pashu_aadhaar is already registered")
 		}
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert animal: %w", err))
 	}
 	return nil
 }
 
 // FindAnimalByID loads one animal or returns NotFound.
-func (r *repository) FindAnimalByID(ctx context.Context, id string) (*domain.Animal, error) {
+func (r *repository) FindAnimalByID(ctx context.Context, id primitive.ObjectID) (*domain.Animal, error) {
 	var a domain.Animal
 	err := r.animals.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&a)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, httpx.NotFound("animal")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find animal %s: %w", id.Hex(), err))
 	}
 	return &a, nil
 }
 
-// ListAnimals returns a page of animals filtered by owner and/or DCS,
-// newest first, plus the total match count.
-func (r *repository) ListAnimals(ctx context.Context, ownerPartyID, dcsID string, page httpx.Page) ([]domain.Animal, int64, error) {
+// ListAnimals returns a page of animals filtered by owner and/or DCS (zero
+// ObjectID = no filter), newest first, plus the total match count.
+func (r *repository) ListAnimals(ctx context.Context, ownerPartyID, dcsID primitive.ObjectID, page httpx.Page) ([]domain.Animal, int64, error) {
 	filter := bson.D{}
-	if ownerPartyID != "" {
+	if !ownerPartyID.IsZero() {
 		filter = append(filter, bson.E{Key: "owner_party_id", Value: ownerPartyID})
 	}
-	if dcsID != "" {
+	if !dcsID.IsZero() {
 		filter = append(filter, bson.E{Key: "dcs_id", Value: dcsID})
 	}
 	total, err := r.animals.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count animals: %w", err))
 	}
 	cur, err := r.animals.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: -1}}).
 		SetSkip(page.Offset).SetLimit(page.Limit))
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("list animals: %w", err))
 	}
 	out := []domain.Animal{}
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode animals: %w", err))
 	}
 	return out, total, nil
 }
@@ -89,35 +92,35 @@ func (r *repository) ListAnimals(ctx context.Context, ownerPartyID, dcsID string
 // InsertHealthEvent appends one entry to an animal's health history.
 func (r *repository) InsertHealthEvent(ctx context.Context, e *domain.HealthEvent) error {
 	if _, err := r.health.InsertOne(ctx, e); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert health event: %w", err))
 	}
 	return nil
 }
 
 // ListHealthEventsByAnimal returns a page of an animal's health history,
 // most recent occurrence first, plus the total count.
-func (r *repository) ListHealthEventsByAnimal(ctx context.Context, animalID string, page httpx.Page) ([]domain.HealthEvent, int64, error) {
+func (r *repository) ListHealthEventsByAnimal(ctx context.Context, animalID primitive.ObjectID, page httpx.Page) ([]domain.HealthEvent, int64, error) {
 	filter := bson.D{{Key: "animal_id", Value: animalID}}
 	total, err := r.health.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count health events: %w", err))
 	}
 	cur, err := r.health.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "occurred_at", Value: -1}}).
 		SetSkip(page.Offset).SetLimit(page.Limit))
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("list health events: %w", err))
 	}
 	out := []domain.HealthEvent{}
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode health events: %w", err))
 	}
 	return out, total, nil
 }
 
 // MarkPendingHealthEventsSynced flips every PENDING event of one animal to
 // SYNCED with the given Bharat Pashudhan reference, returning how many synced.
-func (r *repository) MarkPendingHealthEventsSynced(ctx context.Context, animalID, bpSyncRef string) (int64, error) {
+func (r *repository) MarkPendingHealthEventsSynced(ctx context.Context, animalID primitive.ObjectID, bpSyncRef string) (int64, error) {
 	res, err := r.health.UpdateMany(ctx,
 		bson.D{
 			{Key: "animal_id", Value: animalID},
@@ -128,7 +131,7 @@ func (r *repository) MarkPendingHealthEventsSynced(ctx context.Context, animalID
 			{Key: "bp_sync_ref", Value: bpSyncRef},
 		}}})
 	if err != nil {
-		return 0, httpx.Internal(err)
+		return 0, httpx.Internal(fmt.Errorf("mark health events synced: %w", err))
 	}
 	return res.ModifiedCount, nil
 }
@@ -136,20 +139,20 @@ func (r *repository) MarkPendingHealthEventsSynced(ctx context.Context, animalID
 // InsertMVUCase persists a new MVU case.
 func (r *repository) InsertMVUCase(ctx context.Context, c *domain.MVUCase) error {
 	if _, err := r.mvuCases.InsertOne(ctx, c); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert mvu case: %w", err))
 	}
 	return nil
 }
 
 // FindMVUCaseByID loads one MVU case or returns NotFound.
-func (r *repository) FindMVUCaseByID(ctx context.Context, id string) (*domain.MVUCase, error) {
+func (r *repository) FindMVUCaseByID(ctx context.Context, id primitive.ObjectID) (*domain.MVUCase, error) {
 	var c domain.MVUCase
 	err := r.mvuCases.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&c)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, httpx.NotFound("MVU case")
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find mvu case %s: %w", id.Hex(), err))
 	}
 	return &c, nil
 }
@@ -158,26 +161,26 @@ func (r *repository) FindMVUCaseByID(ctx context.Context, id string) (*domain.MV
 // and/or driver. The status guard in the filter is the optimistic lock (no
 // transactions on a standalone server): a false return means the case was
 // not in REQUESTED state — e.g. a concurrent dispatch won the race.
-func (r *repository) DispatchMVUCase(ctx context.Context, id, vetPartyID, driverPartyID string) (bool, error) {
+func (r *repository) DispatchMVUCase(ctx context.Context, id primitive.ObjectID, vetPartyID, driverPartyID *primitive.ObjectID) (bool, error) {
 	set := bson.D{{Key: "status", Value: domain.MVUCaseDispatched}}
-	if vetPartyID != "" {
-		set = append(set, bson.E{Key: "vet_party_id", Value: vetPartyID})
+	if vetPartyID != nil {
+		set = append(set, bson.E{Key: "vet_party_id", Value: *vetPartyID})
 	}
-	if driverPartyID != "" {
-		set = append(set, bson.E{Key: "driver_party_id", Value: driverPartyID})
+	if driverPartyID != nil {
+		set = append(set, bson.E{Key: "driver_party_id", Value: *driverPartyID})
 	}
 	res, err := r.mvuCases.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: domain.MVUCaseRequested}},
 		bson.D{{Key: "$set", Value: set}})
 	if err != nil {
-		return false, httpx.Internal(err)
+		return false, httpx.Internal(fmt.Errorf("dispatch mvu case %s: %w", id.Hex(), err))
 	}
 	return res.MatchedCount == 1, nil
 }
 
 // CloseMVUCase moves a DISPATCHED (or ARRIVED) case to CLOSED with the visit
 // log. Same optimistic status-guard pattern as DispatchMVUCase.
-func (r *repository) CloseMVUCase(ctx context.Context, id, visitNotes string, healthEventIDs []string, closedAt time.Time) (bool, error) {
+func (r *repository) CloseMVUCase(ctx context.Context, id primitive.ObjectID, visitNotes string, healthEventIDs []primitive.ObjectID, closedAt time.Time) (bool, error) {
 	set := bson.D{
 		{Key: "status", Value: domain.MVUCaseClosed},
 		{Key: "visit_notes", Value: visitNotes},
@@ -195,16 +198,16 @@ func (r *repository) CloseMVUCase(ctx context.Context, id, visitNotes string, he
 		},
 		bson.D{{Key: "$set", Value: set}})
 	if err != nil {
-		return false, httpx.Internal(err)
+		return false, httpx.Internal(fmt.Errorf("close mvu case %s: %w", id.Hex(), err))
 	}
 	return res.MatchedCount == 1, nil
 }
 
-// ListMVUCases returns a page of cases filtered by DCS and/or status,
-// most recently requested first, plus the total match count.
-func (r *repository) ListMVUCases(ctx context.Context, dcsID, status string, page httpx.Page) ([]domain.MVUCase, int64, error) {
+// ListMVUCases returns a page of cases filtered by DCS (zero ObjectID = no
+// filter) and/or status, most recently requested first, plus the total count.
+func (r *repository) ListMVUCases(ctx context.Context, dcsID primitive.ObjectID, status string, page httpx.Page) ([]domain.MVUCase, int64, error) {
 	filter := bson.D{}
-	if dcsID != "" {
+	if !dcsID.IsZero() {
 		filter = append(filter, bson.E{Key: "dcs_id", Value: dcsID})
 	}
 	if status != "" {
@@ -212,17 +215,17 @@ func (r *repository) ListMVUCases(ctx context.Context, dcsID, status string, pag
 	}
 	total, err := r.mvuCases.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count mvu cases: %w", err))
 	}
 	cur, err := r.mvuCases.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "requested_at", Value: -1}}).
 		SetSkip(page.Offset).SetLimit(page.Limit))
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("list mvu cases: %w", err))
 	}
 	out := []domain.MVUCase{}
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode mvu cases: %w", err))
 	}
 	return out, total, nil
 }
@@ -230,7 +233,7 @@ func (r *repository) ListMVUCases(ctx context.Context, dcsID, status string, pag
 // InsertEducation persists a new education-hub item.
 func (r *repository) InsertEducation(ctx context.Context, e *domain.EducationContent) error {
 	if _, err := r.education.InsertOne(ctx, e); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert education content: %w", err))
 	}
 	return nil
 }
@@ -247,17 +250,17 @@ func (r *repository) ListPublishedEducation(ctx context.Context, topic, language
 	}
 	total, err := r.education.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count education content: %w", err))
 	}
 	cur, err := r.education.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: -1}}).
 		SetSkip(page.Offset).SetLimit(page.Limit))
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("list education content: %w", err))
 	}
 	out := []domain.EducationContent{}
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode education content: %w", err))
 	}
 	return out, total, nil
 }

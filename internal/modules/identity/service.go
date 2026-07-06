@@ -3,12 +3,15 @@ package identity
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
+	"github.com/pyaas/saathi-backend/internal/platform/audit"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -23,6 +26,10 @@ const (
 	consentPurposeAadhaarEKYC = "AADHAAR_EKYC"
 	consentTextVersion        = "v1"
 	defaultLanguage           = "hi"
+
+	// msgAwaitingVerification is the human-readable status returned to a party
+	// after submitting a KYC request — there is no auto-verify anymore.
+	msgAwaitingVerification = "awaiting verification"
 
 	// MOCK penny-drop output (§18-A): a real penny-drop adapter returns the
 	// beneficiary-name match score from the bank; the mock always verifies
@@ -53,6 +60,12 @@ var grantableRoles = map[string]map[string]bool{
 		domain.RoleFarmer:     true,
 		domain.RoleMilkTester: true,
 		domain.RoleLRP:        true,
+	},
+	// An organising manager (ground-level field worker) enrols farmers and
+	// consumers within their own org scope (enforced via RequireInScope).
+	domain.RoleOrganisingManager: {
+		domain.RoleFarmer:   true,
+		domain.RoleConsumer: true,
 	},
 }
 
@@ -92,15 +105,24 @@ func isNotFound(err error) bool {
 	return errors.As(err, &ae) && ae.Status == http.StatusNotFound
 }
 
+// actorID parses the actor's party id (carried as an ObjectID hex string in
+// the JWT) into a primitive.ObjectID — call once per service method that
+// stores or compares the actor's identity.
+func actorID(actor auth.Actor) (primitive.ObjectID, error) {
+	return httpx.ParseID(actor.PartyID, "actor")
+}
+
 // service holds every business rule of the identity module.
 type service struct {
 	deps *deps.Deps
 	repo *repository
+	log  *slog.Logger
 }
 
-// newService wires the service.
-func newService(d *deps.Deps, repo *repository) *service {
-	return &service{deps: d, repo: repo}
+// newService wires the service. log is the module-scoped logger derived in
+// Register.
+func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
+	return &service{deps: d, repo: repo, log: log}
 }
 
 // --- Auth: OTP login ---
@@ -111,6 +133,7 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 	now := time.Now().UTC()
 	code, err := auth.GenerateNumericOTP(otpLength)
 	if err != nil {
+		s.log.ErrorContext(ctx, "otp generation failed", slog.Any("err", err))
 		return nil, httpx.Internal(err)
 	}
 
@@ -122,13 +145,13 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 		Attempts:  0,
 	}
 	if err := s.repo.insertOTPChallenge(ctx, challenge); err != nil {
+		s.log.ErrorContext(ctx, "otp challenge insert failed", slog.String("phone", phone), slog.Any("err", err))
 		return nil, err
 	}
 
 	// Outbox SMS: the plaintext code travels only inside the notification
 	// params so the sender can deliver it; the challenge stores the hash.
 	notification := domain.Notification{
-		ID:          uuid.NewString(),
 		Phone:       phone,
 		Channel:     domain.ChannelSMS,
 		TemplateKey: domain.TemplateOTP,
@@ -138,15 +161,18 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 		QueuedAt:    now,
 	}
 	if party, err := s.repo.findPartyByPhone(ctx, phone); err == nil {
-		notification.PartyID = party.ID
+		pid := party.ID
+		notification.PartyID = &pid
 		if party.PreferredLanguage != "" {
 			notification.Language = party.PreferredLanguage
 		}
 	}
 	if err := s.repo.insertNotification(ctx, notification); err != nil {
+		s.log.ErrorContext(ctx, "otp notification queue failed", slog.String("phone", phone), slog.Any("err", err))
 		return nil, err
 	}
 
+	s.log.InfoContext(ctx, "otp requested", slog.String("phone", phone))
 	resp := &otpRequestResponse{Phone: phone, ExpiresAt: challenge.ExpiresAt}
 	if s.deps.Cfg.OTPDevMode {
 		resp.DevOTP = code // dev only — config refuses OTP_DEV_MODE in prod
@@ -162,11 +188,13 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 	challenge, err := s.repo.latestOTPChallenge(ctx, phone, now)
 	if err != nil {
 		if isNotFound(err) {
+			s.log.WarnContext(ctx, "otp verify rejected: no active challenge", slog.String("phone", phone))
 			return nil, httpx.Unauthorized("no active OTP for this phone — request a new code")
 		}
 		return nil, err
 	}
 	if challenge.Attempts >= maxOTPAttempts {
+		s.log.WarnContext(ctx, "otp verify rejected: too many attempts", slog.String("phone", phone))
 		return nil, httpx.TooManyRequests("too many incorrect OTP attempts — request a new code")
 	}
 	expected := auth.HMACHash(s.deps.Cfg.OTPHashSecret, phone, otp)
@@ -174,6 +202,7 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 		if err := s.repo.incrementOTPAttempts(ctx, challenge.ID); err != nil {
 			return nil, err
 		}
+		s.log.WarnContext(ctx, "otp verify rejected: incorrect code", slog.String("phone", phone))
 		return nil, httpx.Unauthorized("incorrect OTP")
 	}
 
@@ -187,9 +216,17 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 		return nil, err
 	}
 	if party.Status != domain.PartyStatusActive {
+		s.log.WarnContext(ctx, "otp verify rejected: party suspended",
+			slog.String("phone", phone), slog.String("party_id", party.ID.Hex()))
 		return nil, httpx.Forbidden("party is suspended")
 	}
-	return s.issueLoginTokens(ctx, party, now)
+	tokens, err := s.issueLoginTokens(ctx, party, now)
+	if err != nil {
+		return nil, err
+	}
+	s.log.InfoContext(ctx, "party logged in",
+		slog.String("party_id", party.ID.Hex()), slog.String("phone", phone))
+	return tokens, nil
 }
 
 // issueLoginTokens mints a SESSION access token plus a fresh rotating
@@ -197,10 +234,10 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 func (s *service) issueLoginTokens(ctx context.Context, party *domain.Party, now time.Time) (*authTokensResponse, error) {
 	refreshToken, err := auth.RandomToken(32)
 	if err != nil {
+		s.log.ErrorContext(ctx, "refresh token generation failed", slog.Any("err", err))
 		return nil, httpx.Internal(err)
 	}
 	doc := refreshTokenDoc{
-		ID:        uuid.NewString(),
 		TokenHash: auth.HMACHash(s.deps.Cfg.OTPHashSecret, refreshHashLabel, refreshToken),
 		PartyID:   party.ID,
 		ExpiresAt: now.Add(s.deps.Cfg.RefreshTokenTTL),
@@ -211,6 +248,8 @@ func (s *service) issueLoginTokens(ctx context.Context, party *domain.Party, now
 	}
 	accessToken, err := s.deps.JWT.IssueSessionToken(*party)
 	if err != nil {
+		s.log.ErrorContext(ctx, "session token issue failed",
+			slog.String("party_id", party.ID.Hex()), slog.Any("err", err))
 		return nil, httpx.Internal(err)
 	}
 	return &authTokensResponse{
@@ -229,12 +268,14 @@ func (s *service) refresh(ctx context.Context, refreshToken string) (*authTokens
 	doc, err := s.repo.findRefreshToken(ctx, tokenHash)
 	if err != nil {
 		if isNotFound(err) {
+			s.log.WarnContext(ctx, "refresh rejected: unknown token")
 			return nil, httpx.Unauthorized("invalid refresh token")
 		}
 		return nil, err
 	}
 	if !now.Before(doc.ExpiresAt) {
 		_, _ = s.repo.deleteRefreshToken(ctx, tokenHash)
+		s.log.WarnContext(ctx, "refresh rejected: token expired", slog.String("party_id", doc.PartyID.Hex()))
 		return nil, httpx.Unauthorized("refresh token expired — log in again")
 	}
 
@@ -245,17 +286,20 @@ func (s *service) refresh(ctx context.Context, refreshToken string) (*authTokens
 		return nil, err
 	}
 	if deleted == 0 {
+		s.log.WarnContext(ctx, "refresh rejected: token already used", slog.String("party_id", doc.PartyID.Hex()))
 		return nil, httpx.Unauthorized("refresh token already used")
 	}
 
 	party, err := s.repo.findPartyByID(ctx, doc.PartyID)
 	if err != nil {
 		if isNotFound(err) {
+			s.log.WarnContext(ctx, "refresh rejected: party gone", slog.String("party_id", doc.PartyID.Hex()))
 			return nil, httpx.Unauthorized("party no longer exists")
 		}
 		return nil, err
 	}
 	if party.Status != domain.PartyStatusActive {
+		s.log.WarnContext(ctx, "refresh rejected: party suspended", slog.String("party_id", party.ID.Hex()))
 		return nil, httpx.Forbidden("party is suspended")
 	}
 	return s.issueLoginTokens(ctx, party, now)
@@ -263,8 +307,12 @@ func (s *service) refresh(ctx context.Context, refreshToken string) (*authTokens
 
 // logout revokes one refresh token belonging to the caller. Idempotent.
 func (s *service) logout(ctx context.Context, actor auth.Actor, refreshToken string) error {
+	aid, err := actorID(actor)
+	if err != nil {
+		return err
+	}
 	tokenHash := auth.HMACHash(s.deps.Cfg.OTPHashSecret, refreshHashLabel, refreshToken)
-	return s.repo.deleteRefreshTokenForParty(ctx, tokenHash, actor.PartyID)
+	return s.repo.deleteRefreshTokenForParty(ctx, tokenHash, aid)
 }
 
 // --- Auth: roles ---
@@ -272,7 +320,11 @@ func (s *service) logout(ctx context.Context, actor auth.Actor, refreshToken str
 // listMyRoles returns the actor's currently usable assignments, enriched
 // with org-unit display fields for the role-switcher UI.
 func (s *service) listMyRoles(ctx context.Context, actor auth.Actor) ([]assignmentWithOrg, error) {
-	assignments, err := s.repo.listActiveAssignments(ctx, actor.PartyID)
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	assignments, err := s.repo.listActiveAssignments(ctx, aid)
 	if err != nil {
 		return nil, err
 	}
@@ -300,32 +352,47 @@ func (s *service) withOrg(ctx context.Context, ra domain.RoleAssignment) assignm
 }
 
 // selectRole exchanges the session for a ROLE-kind token pinned to one
-// usable assignment, gated on the role's minimum KYC tier (§5.2).
-func (s *service) selectRole(ctx context.Context, actor auth.Actor, assignmentID string) (*roleSelectResponse, error) {
+// usable assignment, gated on the role's minimum KYC tier (§5.2). With
+// auto-verify gone, this genuinely blocks un-approved parties.
+func (s *service) selectRole(ctx context.Context, actor auth.Actor, assignmentID primitive.ObjectID) (*roleSelectResponse, error) {
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
 	assignment, err := s.repo.findAssignmentByID(ctx, assignmentID)
 	if err != nil {
 		return nil, err
 	}
-	if assignment.PartyID != actor.PartyID {
+	if assignment.PartyID != aid {
 		// Same shape as an unknown ID — never confirm other parties' grants.
+		s.log.WarnContext(ctx, "role select rejected: not owner",
+			slog.String("assignment_id", assignmentID.Hex()), slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.NotFound("role assignment")
 	}
 	now := time.Now().UTC()
 	if !assignment.UsableAt(now) {
+		s.log.WarnContext(ctx, "role select rejected: assignment not usable",
+			slog.String("assignment_id", assignmentID.Hex()), slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Forbidden("role assignment is revoked or outside its validity window")
 	}
 
 	// Re-read the party: the KYC tier may have upgraded since the session
 	// token was minted.
-	party, err := s.repo.findPartyByID(ctx, actor.PartyID)
+	party, err := s.repo.findPartyByID(ctx, aid)
 	if err != nil {
 		return nil, err
 	}
 	if party.Status != domain.PartyStatusActive {
+		s.log.WarnContext(ctx, "role select rejected: party suspended", slog.String("party_id", party.ID.Hex()))
 		return nil, httpx.Forbidden("party is suspended")
 	}
 	requiredTier := domain.RequiredKYCTier[assignment.RoleCode]
 	if !domain.KYCTierSatisfies(party.KYCTier, requiredTier) {
+		s.log.WarnContext(ctx, "role select rejected: kyc tier insufficient",
+			slog.String("party_id", party.ID.Hex()),
+			slog.String("role_code", assignment.RoleCode),
+			slog.String("current_tier", party.KYCTier),
+			slog.String("required_tier", requiredTier))
 		appErr := httpx.Forbidden("your KYC tier does not permit this role — complete verification first").
 			WithDetails(map[string]string{
 				"current_tier":  party.KYCTier,
@@ -341,8 +408,15 @@ func (s *service) selectRole(ctx context.Context, actor auth.Actor, assignmentID
 	}
 	accessToken, err := s.deps.JWT.IssueRoleToken(*party, *assignment, org.Type)
 	if err != nil {
+		s.log.ErrorContext(ctx, "role token issue failed",
+			slog.String("assignment_id", assignmentID.Hex()), slog.Any("err", err))
 		return nil, httpx.Internal(err)
 	}
+	s.log.InfoContext(ctx, "role selected",
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("assignment_id", assignmentID.Hex()),
+		slog.String("role_code", assignment.RoleCode),
+		slog.String("org_unit_id", assignment.OrgUnitID.Hex()))
 	return &roleSelectResponse{
 		AccessToken: accessToken,
 		RoleCode:    assignment.RoleCode,
@@ -356,7 +430,11 @@ func (s *service) selectRole(ctx context.Context, actor auth.Actor, assignmentID
 // getMe aggregates the caller's party, usable assignments and latest KYC
 // summary in one call.
 func (s *service) getMe(ctx context.Context, actor auth.Actor) (*meResponse, error) {
-	party, err := s.repo.findPartyByID(ctx, actor.PartyID)
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	party, err := s.repo.findPartyByID(ctx, aid)
 	if err != nil {
 		return nil, err
 	}
@@ -365,9 +443,9 @@ func (s *service) getMe(ctx context.Context, actor auth.Actor) (*meResponse, err
 		return nil, err
 	}
 	resp := &meResponse{Party: party, Assignments: assignments}
-	if latest, err := s.repo.latestKYCRecord(ctx, actor.PartyID); err == nil {
+	if latest, err := s.repo.latestKYCRecord(ctx, aid); err == nil {
 		resp.KYC = &kycSummary{
-			Tier:              latest.Tier,
+			RequestedTier:     latest.RequestedTier,
 			Status:            latest.Status,
 			AadhaarLast4:      latest.AadhaarLast4,
 			BankAccountMasked: latest.BankAccountMasked,
@@ -383,27 +461,58 @@ func (s *service) getMe(ctx context.Context, actor auth.Actor) (*meResponse, err
 
 // patchMe updates the caller's own profile fields.
 func (s *service) patchMe(ctx context.Context, actor auth.Actor, req patchMeRequest) (*domain.Party, error) {
-	return s.repo.updatePartyProfile(ctx, actor.PartyID, req.FullName, req.PreferredLanguage, time.Now().UTC())
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.updatePartyProfile(ctx, aid, req.FullName, req.PreferredLanguage, time.Now().UTC())
 }
 
 // --- KYC (mock DPI adapters — real UIDAI / penny-drop integration later) ---
 
-// verifyAadhaar runs the MOCK Aadhaar eKYC flow (§18-A). The full Aadhaar
+// verifyAadhaar runs the MOCK Aadhaar eKYC capture (§18-A). The full Aadhaar
 // number exists only in this request's memory: what is persisted is the
 // last 4 digits plus an opaque reference from the (mock) Aadhaar Data Vault.
-func (s *service) verifyAadhaar(ctx context.Context, actor auth.Actor, req aadhaarKYCRequest) (*aadhaarKYCResponse, error) {
+//
+// There is NO auto-verify and NO tier change here: the record is created
+// PENDING and enters the approval workflow. Returns created=false when an
+// identical PENDING request already exists (idempotent replay → 200).
+func (s *service) verifyAadhaar(ctx context.Context, actor auth.Actor, req aadhaarKYCRequest) (*aadhaarKYCResponse, bool, error) {
 	now := time.Now().UTC()
-	party, err := s.repo.findPartyByID(ctx, actor.PartyID)
+	aid, err := actorID(actor)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	party, err := s.repo.findPartyByID(ctx, aid)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Idempotency: an existing PENDING request for the same tier is returned
+	// as-is rather than duplicated.
+	if existing, err := s.repo.findPendingKYCRecord(ctx, party.ID, req.RequestedTier); err == nil {
+		s.log.WarnContext(ctx, "kyc submit replayed idempotently",
+			slog.String("kyc_id", existing.ID.Hex()),
+			slog.String("party_id", party.ID.Hex()),
+			slog.String("requested_tier", req.RequestedTier))
+		return &aadhaarKYCResponse{
+			Record:  existing,
+			Status:  domain.KYCStatusPending,
+			Message: msgAwaitingVerification,
+		}, false, nil
+	} else if !isNotFound(err) {
+		return nil, false, err
 	}
 
 	language := party.PreferredLanguage
 	if language == "" {
 		language = defaultLanguage
 	}
+	// Pre-generate the consent id so the KYC record can reference it in the
+	// same flow.
+	consentID := primitive.NewObjectID()
 	consent := domain.Consent{
-		ID:          uuid.NewString(),
+		ID:          consentID,
 		PartyID:     party.ID,
 		Purpose:     consentPurposeAadhaarEKYC,
 		TextVersion: consentTextVersion,
@@ -411,7 +520,7 @@ func (s *service) verifyAadhaar(ctx context.Context, actor auth.Actor, req aadha
 		GrantedAt:   now,
 	}
 	if err := s.repo.insertConsent(ctx, consent); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// MOCK Aadhaar Data Vault (§18-A): a real deployment sends the number to
@@ -419,66 +528,80 @@ func (s *service) verifyAadhaar(ctx context.Context, actor auth.Actor, req aadha
 	vaultRef := uuid.NewString()
 	last4 := req.AadhaarNumber[len(req.AadhaarNumber)-4:]
 
-	// MOCK UIDAI eKYC: always succeeds. The real adapter drives the OTP-based
-	// eKYC exchange and may return PENDING/REJECTED.
 	record := domain.KYCRecord{
-		ID:              uuid.NewString(),
+		ID:              primitive.NewObjectID(),
 		PartyID:         party.ID,
-		Tier:            req.RequestedTier,
+		RequestedTier:   req.RequestedTier,
 		AadhaarLast4:    last4,
 		AadhaarVaultRef: vaultRef,
-		ConsentID:       consent.ID,
-		Status:          domain.KYCStatusVerified,
-		VerifiedAt:      &now,
+		ConsentID:       &consentID,
+		Status:          domain.KYCStatusPending,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
 	if err := s.repo.insertKYCRecord(ctx, record); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	newTier := upgradedKYCTier(party.KYCTier, req.RequestedTier)
-	if newTier != party.KYCTier {
-		if err := s.repo.updatePartyKYCTier(ctx, party.ID, newTier, now); err != nil {
-			return nil, err
-		}
-	}
-	return &aadhaarKYCResponse{Record: &record, KYCTier: newTier}, nil
+	s.log.InfoContext(ctx, "kyc submitted",
+		slog.String("kyc_id", record.ID.Hex()),
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("requested_tier", req.RequestedTier))
+	return &aadhaarKYCResponse{
+		Record:  &record,
+		Status:  domain.KYCStatusPending,
+		Message: msgAwaitingVerification,
+	}, true, nil
 }
 
 // verifyBank runs the MOCK penny-drop verification and stores ONLY the
-// masked account tail and IFSC on the caller's latest KYC record (creating
-// one when none exists yet).
+// masked account tail and IFSC on the caller's latest KYC record (creating a
+// PENDING record carrying just the bank evidence when none exists yet).
 func (s *service) verifyBank(ctx context.Context, actor auth.Actor, req bankKYCRequest) (*domain.KYCRecord, error) {
 	now := time.Now().UTC()
-	party, err := s.repo.findPartyByID(ctx, actor.PartyID)
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	party, err := s.repo.findPartyByID(ctx, aid)
 	if err != nil {
 		return nil, err
 	}
 	masked := maskAccount(req.AccountNumber)
 
-	latest, err := s.repo.latestKYCRecord(ctx, actor.PartyID)
+	latest, err := s.repo.latestKYCRecord(ctx, aid)
 	switch {
-	case err == nil:
-		// MOCK penny-drop: always verified with a fixed name-match score.
-		return s.repo.updateKYCRecordBank(ctx, latest.ID, masked, req.IFSC, mockPennyDropNameMatch, now)
-	case isNotFound(err):
+	case err == nil && latest.Status == domain.KYCStatusPending:
+		// Only a PENDING record may accrue bank evidence in place — a reviewer
+		// has not yet decided it. MOCK penny-drop: fixed name-match score.
+		rec, err := s.repo.updateKYCRecordBank(ctx, latest.ID, masked, req.IFSC, mockPennyDropNameMatch, now)
+		if err != nil {
+			return nil, err
+		}
+		s.log.InfoContext(ctx, "bank evidence attached",
+			slog.String("kyc_id", rec.ID.Hex()), slog.String("party_id", party.ID.Hex()))
+		return rec, nil
+	case err == nil, isNotFound(err):
+		// The latest record is terminal (VERIFIED/REJECTED) or none exists yet:
+		// a changed bank account must NOT silently overwrite reviewer-approved
+		// evidence, so route it back through review as a fresh PENDING record.
 		record := domain.KYCRecord{
-			ID:                uuid.NewString(),
+			ID:                primitive.NewObjectID(),
 			PartyID:           party.ID,
-			Tier:              party.KYCTier,
+			RequestedTier:     party.KYCTier,
 			BankAccountMasked: masked,
 			BankIFSC:          req.IFSC,
 			BankVerified:      true, // MOCK penny-drop: always succeeds
 			BankNameMatch:     mockPennyDropNameMatch,
-			Status:            domain.KYCStatusVerified,
-			VerifiedAt:        &now,
+			Status:            domain.KYCStatusPending,
 			CreatedAt:         now,
 			UpdatedAt:         now,
 		}
 		if err := s.repo.insertKYCRecord(ctx, record); err != nil {
 			return nil, err
 		}
+		s.log.InfoContext(ctx, "bank evidence recorded on new pending kyc",
+			slog.String("kyc_id", record.ID.Hex()), slog.String("party_id", party.ID.Hex()))
 		return &record, nil
 	default:
 		return nil, err
@@ -488,7 +611,297 @@ func (s *service) verifyBank(ctx context.Context, actor auth.Actor, req bankKYCR
 // listMyKYC pages the caller's KYC records (masked fields only — full
 // numbers are never persisted anywhere).
 func (s *service) listMyKYC(ctx context.Context, actor auth.Actor, page httpx.Page) ([]domain.KYCRecord, int64, error) {
-	return s.repo.listKYCRecords(ctx, actor.PartyID, page)
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.repo.listKYCRecords(ctx, aid, page)
+}
+
+// --- KYC approval workflow (reviewer console) ---
+
+// kycSubjectInScope reports whether the reviewer's org scope covers the KYC
+// subject: true when the subject holds at least one active role assignment
+// inside the reviewer's organisational scope (the KYC record itself carries
+// no org, so the subject's org is resolved via their assignments — mirroring
+// how createAssignment/revokeAssignment obtain the OrgUnitID). SUPER_ADMIN and
+// STATE_AUDITOR are platform-wide and always cover; PCDF_ADMIN (rooted at the
+// federation) covers naturally through RequireInScope's ancestry test.
+func (s *service) kycSubjectInScope(ctx context.Context, actor auth.Actor, subjectPartyID primitive.ObjectID) (bool, error) {
+	if actor.RoleCode == domain.RoleSuperAdmin || actor.RoleCode == domain.RoleStateAuditor {
+		return true, nil
+	}
+	assignments, err := s.repo.listActiveAssignments(ctx, subjectPartyID)
+	if err != nil {
+		return false, err
+	}
+	for _, ra := range assignments {
+		if s.deps.Orgs.RequireInScope(ctx, actor, ra.OrgUnitID) == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// requireKYCSubjectInScope denies the reviewer a KYC decision on a subject
+// outside their organisational scope (a cross-org privilege escalation guard).
+func (s *service) requireKYCSubjectInScope(ctx context.Context, actor auth.Actor, subjectPartyID primitive.ObjectID) error {
+	inScope, err := s.kycSubjectInScope(ctx, actor, subjectPartyID)
+	if err != nil {
+		return err
+	}
+	if !inScope {
+		s.log.WarnContext(ctx, "kyc review denied: subject out of scope",
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("subject_party_id", subjectPartyID.Hex()))
+		appErr := httpx.Forbidden("KYC subject is outside your organisational scope")
+		appErr.Code = "KYC_SUBJECT_OUT_OF_SCOPE"
+		return appErr
+	}
+	return nil
+}
+
+// listPendingKYC pages PENDING KYC records newest-first, constrained to
+// subjects within the reviewer's org scope, enriched with a reviewer-facing
+// party summary, and audits the access.
+func (s *service) listPendingKYC(ctx context.Context, actor auth.Actor, page httpx.Page) ([]pendingKYCItem, int64, error) {
+	records, total, err := s.repo.listPendingKYC(ctx, page)
+	if err != nil {
+		return nil, 0, err
+	}
+	ids := make([]primitive.ObjectID, 0, len(records))
+	for _, rec := range records {
+		ids = append(ids, rec.PartyID)
+	}
+	parties, err := s.repo.findPartiesByIDs(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	items := make([]pendingKYCItem, 0, len(records))
+	for _, rec := range records {
+		// Org-scope gate: a scoped reviewer only ever sees (and thus only ever
+		// gets the contact PII of) subjects within their own area.
+		inScope, err := s.kycSubjectInScope(ctx, actor, rec.PartyID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !inScope {
+			continue
+		}
+		item := pendingKYCItem{KYCRecord: rec}
+		if p, ok := parties[rec.PartyID]; ok {
+			item.Party = &pendingPartySummary{
+				ID:       p.ID,
+				Phone:    p.Phone,
+				FullName: p.FullName,
+				KYCTier:  p.KYCTier,
+			}
+		}
+		items = append(items, item)
+	}
+
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action: "kyc.pending_list",
+		Meta:   map[string]any{"count": len(items), "total": total},
+	})
+	s.log.InfoContext(ctx, "kyc pending list accessed",
+		slog.String("actor_party_id", actor.PartyID),
+		slog.Int("count", len(items)),
+		slog.Int64("total", total))
+	return items, total, nil
+}
+
+// approveKYC verifies a PENDING record, upgrades the party's KYC tier upward
+// only, notifies the party and audits the decision. The reviewer's role must
+// be authorised for the requested tier — even SUPER_ADMIN passes through the
+// approvable-tier map (which grants it everything).
+func (s *service) approveKYC(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*kycReviewResponse, error) {
+	now := time.Now().UTC()
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	record, err := s.repo.findKYCRecordByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if record.Status != domain.KYCStatusPending {
+		s.log.WarnContext(ctx, "kyc approve rejected: record not pending",
+			slog.String("kyc_id", id.Hex()), slog.String("status", record.Status),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Conflict("KYC_NOT_PENDING", "kyc record is not pending review")
+	}
+	// Separation of duties: a reviewer may never decide their own KYC record.
+	if record.PartyID == aid {
+		s.log.WarnContext(ctx, "kyc approve rejected: self-review",
+			slog.String("kyc_id", id.Hex()), slog.String("actor_party_id", actor.PartyID))
+		appErr := httpx.Forbidden("you may not review your own KYC record")
+		appErr.Code = "KYC_SELF_REVIEW"
+		return nil, appErr
+	}
+	// Org scope: a reviewer may only decide KYC for subjects within their area.
+	if err := s.requireKYCSubjectInScope(ctx, actor, record.PartyID); err != nil {
+		return nil, err
+	}
+	if !domain.CanApproveKYCTier(actor.RoleCode, record.RequestedTier) {
+		s.log.WarnContext(ctx, "kyc approve rejected: tier not approvable",
+			slog.String("kyc_id", id.Hex()), slog.String("reviewer_role", actor.RoleCode),
+			slog.String("requested_tier", record.RequestedTier))
+		appErr := httpx.Forbidden("your role may not approve KYC at the " + record.RequestedTier + " tier")
+		appErr.Code = "KYC_TIER_NOT_APPROVABLE"
+		return nil, appErr
+	}
+
+	updated, err := s.repo.approveKYCRecord(ctx, id, aid, actor.RoleCode, now)
+	if err != nil {
+		if isNotFound(err) {
+			// Lost the race — another reviewer already moved it out of PENDING.
+			s.log.WarnContext(ctx, "kyc approve lost race: record no longer pending",
+				slog.String("kyc_id", id.Hex()), slog.String("actor_party_id", actor.PartyID))
+			return nil, httpx.Conflict("KYC_NOT_PENDING", "kyc record is not pending review")
+		}
+		return nil, err
+	}
+
+	party, err := s.repo.findPartyByID(ctx, updated.PartyID)
+	if err != nil {
+		return nil, err
+	}
+	newTier := upgradedKYCTier(party.KYCTier, updated.RequestedTier)
+	if newTier != party.KYCTier {
+		if err := s.repo.updatePartyKYCTier(ctx, party.ID, newTier, now); err != nil {
+			return nil, err
+		}
+	}
+
+	language := party.PreferredLanguage
+	if language == "" {
+		language = defaultLanguage
+	}
+	pid := party.ID
+	if err := s.repo.insertNotification(ctx, domain.Notification{
+		PartyID:     &pid,
+		Phone:       party.Phone,
+		Channel:     domain.ChannelSMS,
+		TemplateKey: domain.TemplateKYCApproved,
+		Language:    language,
+		Params:      map[string]string{"tier": updated.RequestedTier},
+		Status:      domain.NotificationQueued,
+		QueuedAt:    now,
+	}); err != nil {
+		return nil, err
+	}
+
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "kyc.approve",
+		TargetType: "kyc_record",
+		TargetID:   id.Hex(),
+		Meta: map[string]any{
+			"party_id":       party.ID.Hex(),
+			"requested_tier": updated.RequestedTier,
+			"new_tier":       newTier,
+		},
+	})
+	s.log.InfoContext(ctx, "kyc approved",
+		slog.String("kyc_id", id.Hex()),
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("requested_tier", updated.RequestedTier),
+		slog.String("new_tier", newTier),
+		slog.String("reviewer_role", actor.RoleCode),
+		slog.String("actor_party_id", actor.PartyID))
+	return &kycReviewResponse{Record: updated, KYCTier: newTier}, nil
+}
+
+// rejectKYC moves a PENDING record to REJECTED with a mandatory reason,
+// notifies the party and audits the decision. Same approvable-tier authority
+// as approveKYC.
+func (s *service) rejectKYC(ctx context.Context, actor auth.Actor, id primitive.ObjectID, reason string) (*kycReviewResponse, error) {
+	now := time.Now().UTC()
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	record, err := s.repo.findKYCRecordByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if record.Status != domain.KYCStatusPending {
+		s.log.WarnContext(ctx, "kyc reject rejected: record not pending",
+			slog.String("kyc_id", id.Hex()), slog.String("status", record.Status),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Conflict("KYC_NOT_PENDING", "kyc record is not pending review")
+	}
+	// Separation of duties: a reviewer may never decide their own KYC record.
+	if record.PartyID == aid {
+		s.log.WarnContext(ctx, "kyc reject rejected: self-review",
+			slog.String("kyc_id", id.Hex()), slog.String("actor_party_id", actor.PartyID))
+		appErr := httpx.Forbidden("you may not review your own KYC record")
+		appErr.Code = "KYC_SELF_REVIEW"
+		return nil, appErr
+	}
+	// Org scope: a reviewer may only decide KYC for subjects within their area.
+	if err := s.requireKYCSubjectInScope(ctx, actor, record.PartyID); err != nil {
+		return nil, err
+	}
+	if !domain.CanApproveKYCTier(actor.RoleCode, record.RequestedTier) {
+		s.log.WarnContext(ctx, "kyc reject rejected: tier not approvable",
+			slog.String("kyc_id", id.Hex()), slog.String("reviewer_role", actor.RoleCode),
+			slog.String("requested_tier", record.RequestedTier))
+		appErr := httpx.Forbidden("your role may not review KYC at the " + record.RequestedTier + " tier")
+		appErr.Code = "KYC_TIER_NOT_APPROVABLE"
+		return nil, appErr
+	}
+
+	updated, err := s.repo.rejectKYCRecord(ctx, id, aid, actor.RoleCode, reason, now)
+	if err != nil {
+		if isNotFound(err) {
+			s.log.WarnContext(ctx, "kyc reject lost race: record no longer pending",
+				slog.String("kyc_id", id.Hex()), slog.String("actor_party_id", actor.PartyID))
+			return nil, httpx.Conflict("KYC_NOT_PENDING", "kyc record is not pending review")
+		}
+		return nil, err
+	}
+
+	party, err := s.repo.findPartyByID(ctx, updated.PartyID)
+	if err != nil {
+		return nil, err
+	}
+	language := party.PreferredLanguage
+	if language == "" {
+		language = defaultLanguage
+	}
+	pid := party.ID
+	if err := s.repo.insertNotification(ctx, domain.Notification{
+		PartyID:     &pid,
+		Phone:       party.Phone,
+		Channel:     domain.ChannelSMS,
+		TemplateKey: domain.TemplateKYCRejected,
+		Language:    language,
+		Params:      map[string]string{"tier": updated.RequestedTier, "reason": reason},
+		Status:      domain.NotificationQueued,
+		QueuedAt:    now,
+	}); err != nil {
+		return nil, err
+	}
+
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "kyc.reject",
+		TargetType: "kyc_record",
+		TargetID:   id.Hex(),
+		Meta: map[string]any{
+			"party_id":       party.ID.Hex(),
+			"requested_tier": updated.RequestedTier,
+			"reason":         reason,
+		},
+	})
+	s.log.WarnContext(ctx, "kyc rejected",
+		slog.String("kyc_id", id.Hex()),
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("requested_tier", updated.RequestedTier),
+		slog.String("reviewer_role", actor.RoleCode),
+		slog.String("actor_party_id", actor.PartyID),
+		slog.String("reason", reason))
+	return &kycReviewResponse{Record: updated, KYCTier: party.KYCTier}, nil
 }
 
 // --- Role administration ---
@@ -496,12 +909,13 @@ func (s *service) listMyKYC(ctx context.Context, actor auth.Actor, page httpx.Pa
 // requireGrantAuthority enforces the non-admin granter matrix (§5.2):
 // UNION_PRESIDENT manages village/logistics/union-tier roles anywhere in
 // scope; SAMITI_ADHYAKSH manages only FARMER/MILK_TESTER/LRP inside their
-// own DCS. Admin granters pass.
-func (s *service) requireGrantAuthority(actor auth.Actor, roleCode, orgUnitID string) error {
+// own DCS; ORGANISING_MANAGER enrols FARMER/CONSUMER within org scope.
+// Admin granters pass.
+func (s *service) requireGrantAuthority(actor auth.Actor, roleCode string, orgUnitID primitive.ObjectID) error {
 	if !granterMayGrant(actor.RoleCode, roleCode) {
 		return httpx.Forbidden("role " + actor.RoleCode + " may not grant or revoke " + roleCode)
 	}
-	if actor.RoleCode == domain.RoleSamitiAdhyaksh && orgUnitID != actor.OrgUnitID {
+	if actor.RoleCode == domain.RoleSamitiAdhyaksh && orgUnitID.Hex() != actor.OrgUnitID {
 		return httpx.Forbidden("SAMITI_ADHYAKSH may manage roles only within their own DCS")
 	}
 	return nil
@@ -509,11 +923,15 @@ func (s *service) requireGrantAuthority(actor auth.Actor, roleCode, orgUnitID st
 
 // createAssignment grants a role to a party inside an org unit.
 func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req createAssignmentRequest) (*domain.RoleAssignment, error) {
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+
 	// Resolve the target party (party_id wins over phone).
 	var party *domain.Party
-	var err error
-	if req.PartyID != "" {
-		party, err = s.repo.findPartyByID(ctx, req.PartyID)
+	if req.PartyID != nil {
+		party, err = s.repo.findPartyByID(ctx, *req.PartyID)
 	} else {
 		party, err = s.repo.findPartyByPhone(ctx, req.Phone)
 	}
@@ -522,9 +940,17 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 	}
 
 	if err := s.deps.Orgs.RequireInScope(ctx, actor, req.OrgUnitID); err != nil {
+		s.log.WarnContext(ctx, "assignment grant denied: out of scope",
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("org_unit_id", req.OrgUnitID.Hex()),
+			slog.String("role_code", req.RoleCode))
 		return nil, err
 	}
 	if err := s.requireGrantAuthority(actor, req.RoleCode, req.OrgUnitID); err != nil {
+		s.log.WarnContext(ctx, "assignment grant denied: granter not authorised",
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("granter_role", actor.RoleCode),
+			slog.String("role_code", req.RoleCode))
 		return nil, err
 	}
 
@@ -533,6 +959,10 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 		return nil, err
 	}
 	if exists {
+		s.log.WarnContext(ctx, "assignment grant rejected: already exists",
+			slog.String("party_id", party.ID.Hex()),
+			slog.String("role_code", req.RoleCode),
+			slog.String("org_unit_id", req.OrgUnitID.Hex()))
 		return nil, httpx.Conflict("ASSIGNMENT_EXISTS", "party already holds an active "+req.RoleCode+" assignment in this org unit")
 	}
 
@@ -547,11 +977,11 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 		validTo = &t
 	}
 	assignment := domain.RoleAssignment{
-		ID:        uuid.NewString(),
+		ID:        primitive.NewObjectID(),
 		PartyID:   party.ID,
 		RoleCode:  req.RoleCode,
 		OrgUnitID: req.OrgUnitID,
-		GrantedBy: actor.PartyID,
+		GrantedBy: &aid,
 		ValidFrom: validFrom,
 		ValidTo:   validTo,
 		Status:    domain.RoleAssignmentActive,
@@ -560,30 +990,78 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 	if err := s.repo.insertAssignment(ctx, assignment); err != nil {
 		return nil, err
 	}
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "role.grant",
+		TargetType: "role_assignment",
+		TargetID:   assignment.ID.Hex(),
+		Meta: map[string]any{
+			"party_id":    party.ID.Hex(),
+			"role_code":   req.RoleCode,
+			"org_unit_id": req.OrgUnitID.Hex(),
+		},
+	})
+	s.log.InfoContext(ctx, "role assignment created",
+		slog.String("assignment_id", assignment.ID.Hex()),
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("role_code", req.RoleCode),
+		slog.String("org_unit_id", req.OrgUnitID.Hex()),
+		slog.String("actor_party_id", actor.PartyID))
 	return &assignment, nil
 }
 
 // revokeAssignment flips an assignment to REVOKED — the record is never
 // deleted (§4.1). Revocation authority mirrors grant authority.
-func (s *service) revokeAssignment(ctx context.Context, actor auth.Actor, assignmentID string) (*domain.RoleAssignment, error) {
+func (s *service) revokeAssignment(ctx context.Context, actor auth.Actor, assignmentID primitive.ObjectID) (*domain.RoleAssignment, error) {
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
 	assignment, err := s.repo.findAssignmentByID(ctx, assignmentID)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.deps.Orgs.RequireInScope(ctx, actor, assignment.OrgUnitID); err != nil {
+		s.log.WarnContext(ctx, "assignment revoke denied: out of scope",
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("assignment_id", assignmentID.Hex()))
 		return nil, err
 	}
 	if err := s.requireGrantAuthority(actor, assignment.RoleCode, assignment.OrgUnitID); err != nil {
+		s.log.WarnContext(ctx, "assignment revoke denied: granter not authorised",
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("granter_role", actor.RoleCode),
+			slog.String("role_code", assignment.RoleCode))
 		return nil, err
 	}
 	if assignment.Status != domain.RoleAssignmentActive {
+		s.log.WarnContext(ctx, "assignment revoke rejected: already revoked",
+			slog.String("assignment_id", assignmentID.Hex()))
 		return nil, httpx.Conflict("ALREADY_REVOKED", "role assignment is already revoked")
 	}
-	return s.repo.revokeAssignment(ctx, assignmentID, actor.PartyID, time.Now().UTC())
+	revoked, err := s.repo.revokeAssignment(ctx, assignmentID, aid, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "role.revoke",
+		TargetType: "role_assignment",
+		TargetID:   assignmentID.Hex(),
+		Meta: map[string]any{
+			"party_id":    revoked.PartyID.Hex(),
+			"role_code":   revoked.RoleCode,
+			"org_unit_id": revoked.OrgUnitID.Hex(),
+		},
+	})
+	s.log.InfoContext(ctx, "role assignment revoked",
+		slog.String("assignment_id", assignmentID.Hex()),
+		slog.String("party_id", revoked.PartyID.Hex()),
+		slog.String("role_code", revoked.RoleCode),
+		slog.String("actor_party_id", actor.PartyID))
+	return revoked, nil
 }
 
 // listAssignments pages assignments inside one org unit the actor can see.
-func (s *service) listAssignments(ctx context.Context, actor auth.Actor, orgUnitID, roleCode string, page httpx.Page) ([]domain.RoleAssignment, int64, error) {
+func (s *service) listAssignments(ctx context.Context, actor auth.Actor, orgUnitID primitive.ObjectID, roleCode string, page httpx.Page) ([]domain.RoleAssignment, int64, error) {
 	if err := s.deps.Orgs.RequireInScope(ctx, actor, orgUnitID); err != nil {
 		return nil, 0, err
 	}

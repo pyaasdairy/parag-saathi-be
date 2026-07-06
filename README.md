@@ -155,10 +155,16 @@ farmer `9000000011`, …).
 
 Then read:
 
+- [`docs/strict_brief.md`](docs/strict_brief.md) — **the API contract**: every endpoint, its auth,
+  and how the backend works (ground rules: ObjectID scheme, envelopes, auth, scoping, logging).
 - [`docs/WORKFLOW_GUIDE.md`](docs/WORKFLOW_GUIDE.md) — **who does what**: every role (farmer →
-  sacheev → adhyaksh → rider → BMC → plant → admin) with end-to-end flow diagrams.
+  sacheev → adhyaksh → organising manager → rider → BMC → plant → admin) with end-to-end flow
+  diagrams, including the KYC-approval onboarding gate.
 - [`docs/TECHNICAL_NOTES.md`](docs/TECHNICAL_NOTES.md) — architecture decisions, module map, API
   conventions, what's mocked vs real, and the ordered next-steps list.
+- [`docs/PCDF_Cooperative_Constitution.md`](docs/PCDF_Cooperative_Constitution.md) — the real UP
+  dairy cooperative structure (Farmer → Samiti → Sangh → PCDF) that the org tree and roles are
+  grounded in — the *why* behind the model.
 
 ## Repository layout
 
@@ -166,8 +172,10 @@ Then read:
 .
 ├── README.md                                # this file
 ├── SAATHI_Architecture_Framework_Parag.pdf  # v0.1 architecture blueprint (source of truth)
+├── docs/strict_brief.md                     # the API contract — every endpoint + how it works
 ├── docs/WORKFLOW_GUIDE.md                   # roles + end-to-end flows with diagrams
 ├── docs/TECHNICAL_NOTES.md                  # implementation handoff (read after the blueprint)
+├── docs/PCDF_Cooperative_Constitution.md    # the real cooperative structure the model is grounded in
 ├── cmd/                                     # server + seed binaries
 ├── internal/
 │   ├── config/                              # env-only configuration

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -52,7 +52,7 @@ func validateRecordRequest(req RecordQCResultRequest) error {
 	if strings.TrimSpace(req.SubjectType) == "" {
 		return httpx.BadRequest("MISSING_SUBJECT_TYPE", "subject_type is required")
 	}
-	if strings.TrimSpace(req.SubjectID) == "" {
+	if req.SubjectID.IsZero() {
 		return httpx.BadRequest("MISSING_SUBJECT_ID", "subject_id is required")
 	}
 	if strings.TrimSpace(req.Stage) == "" {
@@ -81,7 +81,15 @@ func (h *handler) listQCResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subjectType := r.URL.Query().Get("subject_type")
-	subjectID := r.URL.Query().Get("subject_id")
+	subjectID := primitive.NilObjectID
+	if raw := r.URL.Query().Get("subject_id"); raw != "" {
+		id, err := httpx.ParseID(raw, "subject_id")
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		subjectID = id
+	}
 	page := httpx.ParsePage(r)
 
 	results, total, err := h.svc.listQCResults(r.Context(), actor, subjectType, subjectID, page)
@@ -100,7 +108,13 @@ func (h *handler) getQCResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.svc.getQCResult(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+
+	result, err := h.svc.getQCResult(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

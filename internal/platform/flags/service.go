@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -23,13 +24,15 @@ const (
 	FlagConsumerCommerce = "consumer_commerce_enabled"
 )
 
-// Flag is the stored document.
+// Flag is the stored document. `_id` is a generated ObjectID; Key is the
+// unique business identifier all lookups use.
 type Flag struct {
-	Key         string    `bson:"_id"         json:"key"`
-	Enabled     bool      `bson:"enabled"     json:"enabled"`
-	Description string    `bson:"description,omitempty" json:"description,omitempty"`
-	UpdatedBy   string    `bson:"updated_by,omitempty"  json:"updated_by,omitempty"`
-	UpdatedAt   time.Time `bson:"updated_at"  json:"updated_at"`
+	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Key         string             `bson:"key"           json:"key"`
+	Enabled     bool               `bson:"enabled"       json:"enabled"`
+	Description string             `bson:"description,omitempty" json:"description,omitempty"`
+	UpdatedBy   string             `bson:"updated_by,omitempty"  json:"updated_by,omitempty"` // approver party ObjectID hex
+	UpdatedAt   time.Time          `bson:"updated_at"    json:"updated_at"`
 }
 
 type cached struct {
@@ -66,7 +69,7 @@ func (s *Service) Enabled(ctx context.Context, key string) bool {
 	}
 
 	var f Flag
-	err := s.coll.FindOne(ctx, bson.D{{Key: "_id", Value: key}}).Decode(&f)
+	err := s.coll.FindOne(ctx, bson.D{{Key: "key", Value: key}}).Decode(&f)
 	enabled := err == nil && f.Enabled
 
 	s.mu.Lock()
@@ -75,10 +78,10 @@ func (s *Service) Enabled(ctx context.Context, key string) bool {
 	return enabled
 }
 
-// Set upserts a flag and invalidates the cache entry immediately.
+// Set upserts a flag by key and invalidates the cache entry immediately.
 func (s *Service) Set(ctx context.Context, key string, enabled bool, updatedBy string) error {
 	_, err := s.coll.UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: key}},
+		bson.D{{Key: "key", Value: key}},
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "enabled", Value: enabled},
 			{Key: "updated_by", Value: updatedBy},
@@ -116,7 +119,7 @@ func (s *Service) EnsureDefaults(ctx context.Context, defaults map[string]Flag) 
 			f.UpdatedAt = time.Now().UTC()
 		}
 		_, err := s.coll.UpdateOne(ctx,
-			bson.D{{Key: "_id", Value: key}},
+			bson.D{{Key: "key", Value: key}},
 			bson.D{{Key: "$setOnInsert", Value: f}},
 			options.Update().SetUpsert(true),
 		)

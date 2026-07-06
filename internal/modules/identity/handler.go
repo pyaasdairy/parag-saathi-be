@@ -3,8 +3,6 @@ package identity
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -190,7 +188,8 @@ func (h *handler) patchMe(w http.ResponseWriter, r *http.Request) {
 
 // --- /kyc ---
 
-// verifyAadhaar handles POST /kyc/aadhaar.
+// verifyAadhaar handles POST /kyc/aadhaar. A fresh submission returns 201;
+// an idempotent replay of an existing PENDING request returns 200.
 func (h *handler) verifyAadhaar(w http.ResponseWriter, r *http.Request) {
 	actor, ok := actorOr401(w, r)
 	if !ok {
@@ -205,12 +204,16 @@ func (h *handler) verifyAadhaar(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	resp, err := h.svc.verifyAadhaar(r.Context(), actor, req)
+	resp, created, err := h.svc.verifyAadhaar(r.Context(), actor, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, resp)
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	httpx.JSON(w, status, resp)
 }
 
 // verifyBank handles POST /kyc/bank.
@@ -251,6 +254,68 @@ func (h *handler) listMyKYC(w http.ResponseWriter, r *http.Request) {
 	httpx.JSONMeta(w, http.StatusOK, records, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
 }
 
+// listPendingKYC handles GET /kyc/pending — reviewer console.
+func (h *handler) listPendingKYC(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	page := httpx.ParsePage(r)
+	items, total, err := h.svc.listPendingKYC(r.Context(), actor, page)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSONMeta(w, http.StatusOK, items, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
+}
+
+// approveKYC handles POST /kyc/{id}/approve.
+func (h *handler) approveKYC(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	resp, err := h.svc.approveKYC(r.Context(), actor, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
+// rejectKYC handles POST /kyc/{id}/reject.
+func (h *handler) rejectKYC(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req kycRejectRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if err := req.validate(); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	resp, err := h.svc.rejectKYC(r.Context(), actor, id, req.Reason)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
 // --- /roles ---
 
 // createAssignment handles POST /roles/assignments.
@@ -282,9 +347,9 @@ func (h *handler) revokeAssignment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id := chi.URLParam(r, "id")
-	if id == "" {
-		httpx.Error(w, r, httpx.BadRequest("MISSING_ID", "assignment id is required"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
 		return
 	}
 	assignment, err := h.svc.revokeAssignment(r.Context(), actor, id)
@@ -301,9 +366,14 @@ func (h *handler) listAssignments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	orgUnitID := r.URL.Query().Get("org_unit_id")
-	if orgUnitID == "" {
+	rawOrgUnitID := r.URL.Query().Get("org_unit_id")
+	if rawOrgUnitID == "" {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_ORG_UNIT", "org_unit_id query parameter is required"))
+		return
+	}
+	orgUnitID, err := httpx.ParseID(rawOrgUnitID, "org_unit_id")
+	if err != nil {
+		httpx.Error(w, r, err)
 		return
 	}
 	roleCode := r.URL.Query().Get("role_code")

@@ -10,6 +10,8 @@
 package quality
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -20,8 +22,9 @@ import (
 // Register wires the quality module and mounts its routes under /quality
 // (the router hands us the /api/v1 subtree).
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "quality"))
 	repo := newRepository(d.DB)
-	svc := newService(d, repo)
+	svc := newService(d, repo, log)
 	h := newHandler(svc)
 
 	r.Route("/quality", func(r chi.Router) {

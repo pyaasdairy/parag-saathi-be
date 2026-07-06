@@ -1,26 +1,28 @@
 package logistics
 
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
 // createConsignmentRequest asks to pool one DCS shift's RECORDED pours.
 type createConsignmentRequest struct {
-	DCSID string `json:"dcs_id"`
-	Date  string `json:"date,omitempty"` // YYYY-MM-DD; defaults to today (IST)
-	Shift string `json:"shift"`
+	DCSID primitive.ObjectID `json:"dcs_id"`
+	Date  string             `json:"date,omitempty"` // YYYY-MM-DD; defaults to today (IST)
+	Shift string             `json:"shift"`
 }
 
 // tripStopRequest names one pickup on a planned route.
 type tripStopRequest struct {
-	DCSID         string `json:"dcs_id"`
-	ConsignmentID string `json:"consignment_id"`
+	DCSID         primitive.ObjectID `json:"dcs_id"`
+	ConsignmentID primitive.ObjectID `json:"consignment_id"`
 }
 
 // createTripRequest plans a van run across DCS stops for one date+shift.
 type createTripRequest struct {
-	RouteName       string            `json:"route_name"`
-	UnionID         string            `json:"union_id"`
-	Date            string            `json:"date,omitempty"` // YYYY-MM-DD; defaults to today (IST)
-	Shift           string            `json:"shift"`
-	VanRiderPartyID string            `json:"van_rider_party_id,omitempty"` // defaults to the actor when a VAN_RIDER plans
-	Stops           []tripStopRequest `json:"stops"`
+	RouteName       string              `json:"route_name"`
+	UnionID         primitive.ObjectID  `json:"union_id"`
+	Date            string              `json:"date,omitempty"` // YYYY-MM-DD; defaults to today (IST)
+	Shift           string              `json:"shift"`
+	VanRiderPartyID *primitive.ObjectID `json:"van_rider_party_id,omitempty"` // defaults to the actor when a VAN_RIDER plans
+	Stops           []tripStopRequest   `json:"stops"`
 }
 
 // pickupRequest records collecting one consignment at a stop. TempC is a
@@ -40,21 +42,23 @@ type coldChainRequest struct {
 
 // deliverRequest hands the whole trip's load to a BMC.
 type deliverRequest struct {
-	BMCID string `json:"bmc_id"`
+	BMCID primitive.ObjectID `json:"bmc_id"`
 }
 
-// consignmentListQuery carries the GET /consignments filters.
+// consignmentListQuery carries the GET /consignments filters. Zero ObjectID
+// means "not filtered".
 type consignmentListQuery struct {
-	DCSID  string
+	DCSID  primitive.ObjectID
 	Date   string
 	Status string
 }
 
-// tripListQuery carries the GET /trips filters.
+// tripListQuery carries the GET /trips filters. Zero ObjectIDs mean "not
+// filtered".
 type tripListQuery struct {
-	UnionID         string
+	UnionID         primitive.ObjectID
 	Date            string
-	VanRiderPartyID string
+	VanRiderPartyID primitive.ObjectID
 }
 
 // listMeta is the pagination envelope for list responses.

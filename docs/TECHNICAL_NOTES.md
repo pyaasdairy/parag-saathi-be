@@ -4,9 +4,14 @@
 > `SAATHI_Architecture_Framework_Parag.pdf` (the blueprint, source of truth) and you have the
 > complete picture. Blueprint section references look like (§8.3).
 >
-> **Status:** P0 + P1 implemented end-to-end (identity → pour → invoice → logistics → safety
-> gate → batch → QR → public trace → settlement), with P2 foundations (cattle/health, MVU,
-> education, dormant collar path). Consumer commerce is **deliberately descoped** (dormant flag).
+> **Status:** P0 + P1 implemented end-to-end (identity → **KYC approval** → pour → invoice →
+> logistics → safety gate → batch → QR → public trace → settlement), with P2 foundations
+> (cattle/health, MVU, education, dormant collar path). Consumer commerce is **deliberately
+> descoped** (dormant flag).
+>
+> **For the full API surface + per-endpoint behaviour, see [`strict_brief.md`](strict_brief.md).**
+> **For role-by-role flows with diagrams, see [`WORKFLOW_GUIDE.md`](WORKFLOW_GUIDE.md).**
+> **For why the org/role model is shaped this way, see [`PCDF_Cooperative_Constitution.md`](PCDF_Cooperative_Constitution.md)** (the real UP cooperative structure — Farmer → Samiti → Sangh → PCDF — that the org tree and 23-role catalog are grounded in).
 
 ---
 
@@ -20,7 +25,9 @@
 | HTTP | chi router, REST JSON under `/api/v1` | frontend lives in a separate repo; this is a pure API |
 | Events | in-process pub/sub (`internal/platform/eventbus`) | mirrors a broker API; swap to Kafka/NATS (§15) without touching module code |
 | Provenance | **hash-chained append-only event ledger in MongoDB** (§7.3 "ledger-style" option) | tamper-evident without running a graph DB; graph traversal implemented over `refs` edges; can be projected to Neo4j later |
-| IDs | **UUID strings**, not ObjectIDs | offline-first devices (§3.1) must mint IDs locally with zero coordination; string IDs also travel cleanly through JSON. References still work exactly like ObjectID refs (`farmer_party_id`, `dcs_id`, …) |
+| IDs | **MongoDB ObjectID `_id`**; every cross-collection reference is an ObjectID (`farmer_party_id`, `dcs_id`, …) so `$lookup`/populate is native. Human-readable strings (`code`, `phone`, `invoice_number`, `qr_code`, `pashu_aadhaar`) are **separate unique business keys**, never used for joins. | ObjectID refs are the natural Mongo mapping/populate primitive. The one string kept for identity is `milk_pours.client_event_id` — an offline device-minted idempotency key (§3.1); the server still assigns a real ObjectID `_id`. |
+| Onboarding | **KYC approval workflow**: submit → `PENDING` → reviewer (`ORGANISING_MANAGER` / `DISTRICT_VERIFIER` / `PCDF_ADMIN` / `SUPER_ADMIN`) approves → tier upgraded. A role token is only issuable once the party's tier satisfies the role — so "login as rider" is impossible before approval. | Matches the field reality: a ground-level Organising Manager decides a user's position after verifying them; the position itself is a `RoleAssignment` (role_code + org scope), which the frontend reads to pick the dashboard. |
+| Logging | Structured `slog`: one line per request (id, actor, status, duration) + per-module INFO/WARN/ERROR tagged `module=` and correlatable by `request_id`. | Debugging & CERT-In ≥180-day retention (§17); every rejection and failure is traceable end-to-end. |
 
 ### Scaling posture (1cr+ users)
 - Stateless server → run N replicas behind a gateway/LB; per-IP rate limiting is per-replica by

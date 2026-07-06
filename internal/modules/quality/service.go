@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -24,17 +25,23 @@ import (
 type service struct {
 	deps *deps.Deps
 	repo *repository
+	log  *slog.Logger
 }
 
-// newService wires the service.
-func newService(d *deps.Deps, repo *repository) *service {
-	return &service{deps: d, repo: repo}
+// newService wires the service with its module-scoped logger.
+func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
+	return &service{deps: d, repo: repo, log: log}
+}
+
+// actorID parses the actor's party ObjectID out of its JWT hex string.
+func actorID(actor auth.Actor) (primitive.ObjectID, error) {
+	return httpx.ParseID(actor.PartyID, "actor")
 }
 
 // gateSubject is what the gate needs to know about an eligible subject.
 type gateSubject struct {
-	entityType string // provenance entity const for the subject
-	orgUnitID  string // owning org unit (BMC or plant) for scope + ledger
+	entityType string             // provenance entity const for the subject
+	orgUnitID  primitive.ObjectID // owning org unit (BMC or plant) for scope + ledger
 	status     string
 }
 
@@ -126,14 +133,40 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 		return nil, httpx.BadRequest("INVALID_STAGE", "stage must be "+domain.QCStageBMCRapid+" or "+domain.QCStagePlantLab)
 	}
 	if actor.RoleCode != requiredRole {
+		s.log.WarnContext(ctx, "qc stage-role mismatch rejected",
+			slog.String("stage", req.Stage),
+			slog.String("required_role", requiredRole),
+			slog.String("actor_role", actor.RoleCode),
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()))
 		return nil, httpx.Forbidden("STAGE_ROLE_MISMATCH: stage " + req.Stage + " results may only be recorded by " + requiredRole)
+	}
+
+	analystID, err := actorID(actor)
+	if err != nil {
+		return nil, err
 	}
 
 	subject, err := s.loadGateSubject(ctx, req.SubjectType, req.SubjectID)
 	if err != nil {
+		var appErr *httpx.AppError
+		if errors.As(err, &appErr) && appErr.Status == http.StatusConflict {
+			s.log.WarnContext(ctx, "qc subject not awaiting verdict",
+				slog.String("subject_type", req.SubjectType),
+				slog.String("subject_id", req.SubjectID.Hex()),
+				slog.String("actor_party_id", actor.PartyID),
+				slog.String("reason", appErr.Error()))
+		}
 		return nil, err
 	}
 	if err := s.deps.Orgs.RequireInScope(ctx, actor, subject.orgUnitID); err != nil {
+		s.log.WarnContext(ctx, "qc scope denied",
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()),
+			slog.String("subject_org_unit_id", subject.orgUnitID.Hex()),
+			slog.String("actor_party_id", actor.PartyID),
+			slog.Any("err", err))
 		return nil, err
 	}
 
@@ -151,12 +184,20 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	// submission (blueprint §8.3). A failing partial submission still records
 	// its BLOCK: quarantining on partial evidence is safety-conservative.
 	if missing := missingMandatoryTests(req.Stage, req.Tests); len(missing) > 0 && overallPass {
+		s.log.WarnContext(ctx, "qc pass rejected: mandatory tests missing",
+			slog.String("stage", req.Stage),
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()),
+			slog.Any("missing_tests", missing),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Unprocessable("MISSING_MANDATORY_TESTS",
 			"stage "+req.Stage+" cannot PASS without its mandatory tests").
 			WithDetails(map[string]any{"missing_tests": missing})
 	}
 
-	resultID := uuid.NewString()
+	// Pre-generate the result ID so the insert, the provenance refs and the
+	// gate write all share one consistent identifier.
+	resultID := primitive.NewObjectID()
 	now := time.Now().UTC()
 
 	result := &domain.QCResult{
@@ -166,7 +207,7 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 		Stage:          req.Stage,
 		Tests:          evaluated,
 		OverallPass:    overallPass,
-		AnalystPartyID: actor.PartyID,
+		AnalystPartyID: analystID,
 		LabRef:         req.LabRef,
 		RecordedAt:     now,
 	}
@@ -180,6 +221,7 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	if overallPass {
 		seq, err := s.repo.nextCertificateSeq(wctx, req.Stage)
 		if err != nil {
+			s.logInternal(ctx, "issue qc certificate seq", req, err)
 			return nil, err
 		}
 		result.CertificateNumber = certificateNumber(req.Stage, seq)
@@ -193,6 +235,7 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	// on the subject happens LAST. A crash mid-sequence can leave an extra
 	// auditable result document, never a PASSED lot without evidence.
 	if err := s.repo.insertResult(wctx, result); err != nil {
+		s.logInternal(ctx, "insert qc result", req, err)
 		return nil, err
 	}
 
@@ -201,12 +244,12 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	recorded, err := s.deps.Ledger.Append(wctx, provenance.AppendInput{
 		Type:       domain.EventQCRecorded,
 		EntityType: domain.EntityQCResult,
-		EntityID:   resultID,
+		EntityID:   resultID.Hex(),
 		Refs: []provenance.Ref{
-			{EntityType: subject.entityType, EntityID: req.SubjectID, Relation: "tested"},
+			{EntityType: subject.entityType, EntityID: req.SubjectID.Hex(), Relation: "tested"},
 		},
 		Actor:     ledgerActor,
-		OrgUnitID: subject.orgUnitID,
+		OrgUnitID: subject.orgUnitID.Hex(),
 		Payload: map[string]any{
 			"stage":        req.Stage,
 			"subject_type": req.SubjectType,
@@ -214,33 +257,36 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 		},
 	})
 	if err != nil {
+		s.logInternal(ctx, "append qc.recorded provenance event", req, err)
 		return nil, httpx.Internal(err)
 	}
 
 	gateEvent := provenance.AppendInput{
 		EntityType: domain.EntityQCResult,
-		EntityID:   resultID,
+		EntityID:   resultID.Hex(),
 		Actor:      ledgerActor,
-		OrgUnitID:  subject.orgUnitID,
+		OrgUnitID:  subject.orgUnitID.Hex(),
 	}
 	if overallPass {
 		gateEvent.Type = domain.EventGatePassed
 		gateEvent.Refs = []provenance.Ref{
-			{EntityType: subject.entityType, EntityID: req.SubjectID, Relation: "certifies"},
+			{EntityType: subject.entityType, EntityID: req.SubjectID.Hex(), Relation: "certifies"},
 		}
 		gateEvent.Payload = map[string]any{"certificate_number": result.CertificateNumber}
 	} else {
 		gateEvent.Type = domain.EventGateBlocked
 		gateEvent.Refs = []provenance.Ref{
-			{EntityType: subject.entityType, EntityID: req.SubjectID, Relation: "blocks"},
+			{EntityType: subject.entityType, EntityID: req.SubjectID.Hex(), Relation: "blocks"},
 		}
 		gateEvent.Payload = map[string]any{"failure_reasons": failures}
 	}
 	if _, err := s.deps.Ledger.Append(wctx, gateEvent); err != nil {
+		s.logInternal(ctx, "append gate verdict provenance event", req, err)
 		return nil, httpx.Internal(err)
 	}
 
 	if err := s.repo.setResultProvenanceSeq(wctx, resultID, recorded.Seq); err != nil {
+		s.logInternal(ctx, "stamp qc result provenance seq", req, err)
 		return nil, err
 	}
 	result.ProvenanceSeq = recorded.Seq
@@ -250,18 +296,42 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	// auditable and harmless, unlike a dangling status flip).
 	gated, err := s.applyGate(wctx, req.SubjectType, req.SubjectID, resultID, overallPass, blockReason)
 	if err != nil {
+		s.logInternal(ctx, "apply gate verdict", req, err)
 		return nil, err
 	}
 	if !gated {
 		if err := s.repo.markResultSuperseded(wctx, resultID); err != nil {
+			s.logInternal(ctx, "mark qc result superseded", req, err)
 			return nil, err
 		}
+		s.log.WarnContext(ctx, "qc gate race lost: result superseded",
+			slog.String("qc_result_id", resultID.Hex()),
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()),
+			slog.String("stage", req.Stage),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("SUBJECT_ALREADY_GATED", "subject is no longer awaiting QC — a verdict was already recorded")
 	}
 
-	// Broadcast the block so the plant module quarantines downstream — a
-	// blocked lot can never advance.
-	if !overallPass {
+	if overallPass {
+		s.log.InfoContext(ctx, "qc gate passed",
+			slog.String("qc_result_id", resultID.Hex()),
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()),
+			slog.String("stage", req.Stage),
+			slog.String("certificate_number", result.CertificateNumber),
+			slog.String("actor_party_id", actor.PartyID))
+	} else {
+		// Gate block is a WARN: the subject is quarantined and can never advance.
+		s.log.WarnContext(ctx, "qc gate blocked: subject quarantined",
+			slog.String("qc_result_id", resultID.Hex()),
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()),
+			slog.String("stage", req.Stage),
+			slog.Any("failure_reasons", failures),
+			slog.String("actor_party_id", actor.PartyID))
+		// Broadcast the block so the plant module quarantines downstream — a
+		// blocked lot can never advance.
 		s.deps.Bus.Publish(eventbus.TopicGateBlocked, GateBlockedPayload{
 			SubjectType:    req.SubjectType,
 			SubjectID:      req.SubjectID,
@@ -273,9 +343,19 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	return result, nil
 }
 
+// logInternal records an unexpected failure with the operation and subject
+// context before the error surfaces as a 500.
+func (s *service) logInternal(ctx context.Context, op string, req RecordQCResultRequest, err error) {
+	s.log.ErrorContext(ctx, "qc record failed: "+op,
+		slog.String("subject_type", req.SubjectType),
+		slog.String("subject_id", req.SubjectID.Hex()),
+		slog.String("stage", req.Stage),
+		slog.Any("err", err))
+}
+
 // loadGateSubject fetches a gate-eligible subject and verifies it is awaiting
 // QC. Only BMC lots and processing batches carry the software safety gate.
-func (s *service) loadGateSubject(ctx context.Context, subjectType, subjectID string) (gateSubject, error) {
+func (s *service) loadGateSubject(ctx context.Context, subjectType string, subjectID primitive.ObjectID) (gateSubject, error) {
 	switch subjectType {
 	case domain.QCSubjectBMCLot:
 		lot, err := s.repo.findBMCLot(ctx, subjectID)
@@ -307,7 +387,7 @@ func (s *service) loadGateSubject(ctx context.Context, subjectType, subjectID st
 
 // applyGate routes the conditional verdict write to the subject's collection,
 // mapping the verdict onto that subject kind's status constants.
-func (s *service) applyGate(ctx context.Context, subjectType, subjectID, resultID string, pass bool, blockReason string) (bool, error) {
+func (s *service) applyGate(ctx context.Context, subjectType string, subjectID, resultID primitive.ObjectID, pass bool, blockReason string) (bool, error) {
 	switch subjectType {
 	case domain.QCSubjectBMCLot:
 		status := domain.BMCLotStatusBlocked
@@ -328,14 +408,15 @@ func (s *service) applyGate(ctx context.Context, subjectType, subjectID, resultI
 
 // listQCResults returns a page of results, newest first. When the filter
 // identifies an org-owned subject, the caller must be in that org's scope.
-func (s *service) listQCResults(ctx context.Context, actor auth.Actor, subjectType, subjectID string, page httpx.Page) ([]domain.QCResult, int64, error) {
+// A zero subjectID means "no subject filter".
+func (s *service) listQCResults(ctx context.Context, actor auth.Actor, subjectType string, subjectID primitive.ObjectID, page httpx.Page) ([]domain.QCResult, int64, error) {
 	if subjectType != "" && !isValidSubjectType(subjectType) {
 		return nil, 0, httpx.BadRequest("INVALID_SUBJECT_TYPE", "unknown subject_type "+subjectType)
 	}
-	if subjectID != "" && subjectType == "" {
+	if !subjectID.IsZero() && subjectType == "" {
 		return nil, 0, httpx.BadRequest("MISSING_SUBJECT_TYPE", "subject_id requires subject_type")
 	}
-	if subjectID != "" {
+	if !subjectID.IsZero() {
 		if err := s.requireSubjectScope(ctx, actor, subjectType, subjectID); err != nil {
 			return nil, 0, err
 		}
@@ -345,7 +426,7 @@ func (s *service) listQCResults(ctx context.Context, actor auth.Actor, subjectTy
 
 // getQCResult returns one result (its tests carry the stored pass verdicts),
 // enforcing the subject org scope.
-func (s *service) getQCResult(ctx context.Context, actor auth.Actor, resultID string) (*domain.QCResult, error) {
+func (s *service) getQCResult(ctx context.Context, actor auth.Actor, resultID primitive.ObjectID) (*domain.QCResult, error) {
 	result, err := s.repo.findResultByID(ctx, resultID)
 	if err != nil {
 		return nil, err
@@ -359,35 +440,44 @@ func (s *service) getQCResult(ctx context.Context, actor auth.Actor, resultID st
 // requireSubjectScope enforces the caller's org scope over the org unit that
 // owns a QC subject. Subjects that no longer resolve (or subject types that
 // carry no org) skip the check — the role gate still applies.
-func (s *service) requireSubjectScope(ctx context.Context, actor auth.Actor, subjectType, subjectID string) error {
+func (s *service) requireSubjectScope(ctx context.Context, actor auth.Actor, subjectType string, subjectID primitive.ObjectID) error {
 	orgID, err := s.subjectOrgUnit(ctx, subjectType, subjectID)
 	if err != nil {
 		return err
 	}
-	if orgID == "" {
+	if orgID.IsZero() {
 		return nil
 	}
-	return s.deps.Orgs.RequireInScope(ctx, actor, orgID)
+	if err := s.deps.Orgs.RequireInScope(ctx, actor, orgID); err != nil {
+		s.log.WarnContext(ctx, "qc read scope denied",
+			slog.String("subject_type", subjectType),
+			slog.String("subject_id", subjectID.Hex()),
+			slog.String("subject_org_unit_id", orgID.Hex()),
+			slog.String("actor_party_id", actor.PartyID),
+			slog.Any("err", err))
+		return err
+	}
+	return nil
 }
 
-// subjectOrgUnit resolves the owning org unit of a subject, or "" when the
-// subject is missing or not an org-owned gate subject.
-func (s *service) subjectOrgUnit(ctx context.Context, subjectType, subjectID string) (string, error) {
+// subjectOrgUnit resolves the owning org unit of a subject, or the zero
+// ObjectID when the subject is missing or not an org-owned gate subject.
+func (s *service) subjectOrgUnit(ctx context.Context, subjectType string, subjectID primitive.ObjectID) (primitive.ObjectID, error) {
 	switch subjectType {
 	case domain.QCSubjectBMCLot:
 		lot, err := s.repo.findBMCLot(ctx, subjectID)
 		if err != nil {
-			return "", ignoreNotFound(err)
+			return primitive.NilObjectID, ignoreNotFound(err)
 		}
 		return lot.BMCID, nil
 	case domain.QCSubjectProcessingBatch:
 		batch, err := s.repo.findBatch(ctx, subjectID)
 		if err != nil {
-			return "", ignoreNotFound(err)
+			return primitive.NilObjectID, ignoreNotFound(err)
 		}
 		return batch.PlantID, nil
 	default:
-		return "", nil
+		return primitive.NilObjectID, nil
 	}
 }
 

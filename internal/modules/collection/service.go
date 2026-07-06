@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -42,9 +42,35 @@ type service struct {
 	log  *slog.Logger
 }
 
-// newService wires the service onto the platform dependencies.
-func newService(d *deps.Deps, r *repo) *service {
-	return &service{d: d, repo: r, log: d.Log}
+// newService wires the service onto the platform dependencies. log is the
+// module-scoped logger derived in Register.
+func newService(d *deps.Deps, r *repo, log *slog.Logger) *service {
+	return &service{d: d, repo: r, log: log}
+}
+
+// actorID parses the actor's party id (carried as an ObjectID hex string in
+// the JWT) into a primitive.ObjectID — call once per service method that
+// stores or compares the actor's identity.
+func actorID(actor auth.Actor) (primitive.ObjectID, error) {
+	return httpx.ParseID(actor.PartyID, "actor")
+}
+
+// requireInScope enforces the actor's org scope over a target org unit and
+// WARN-logs the denial (business rejection, never silent).
+func (s *service) requireInScope(ctx context.Context, actor auth.Actor, targetOrgID primitive.ObjectID, op string) error {
+	err := s.d.Orgs.RequireInScope(ctx, actor, targetOrgID)
+	if err != nil {
+		var appErr *httpx.AppError
+		if errors.As(err, &appErr) && appErr.Status == http.StatusForbidden {
+			s.log.WarnContext(ctx, "org scope denied",
+				slog.String("op", op),
+				slog.String("target_org_id", targetOrgID.Hex()),
+				slog.String("actor_party_id", actor.PartyID),
+				slog.String("actor_role", actor.RoleCode))
+		}
+		return err
+	}
+	return nil
 }
 
 // --- rate charts ---
@@ -52,7 +78,7 @@ func newService(d *deps.Deps, r *repo) *service {
 // CreateRateChart stores a new pricing chart for an org unit and deactivates
 // the org's previously active charts (the new chart supersedes them).
 func (s *service) CreateRateChart(ctx context.Context, actor auth.Actor, req CreateRateChartRequest) (*domain.RateChart, error) {
-	if req.OrgUnitID == "" || req.Name == "" {
+	if req.OrgUnitID.IsZero() || req.Name == "" {
 		return nil, httpx.BadRequest("VALIDATION", "org_unit_id and name are required")
 	}
 	if req.BaseRatePerLitre < 0 || req.FatRatePerPoint < 0 || req.SNFRatePerPoint < 0 {
@@ -64,7 +90,11 @@ func (s *service) CreateRateChart(ctx context.Context, actor auth.Actor, req Cre
 	if _, err := s.d.Orgs.Get(ctx, req.OrgUnitID); err != nil {
 		return nil, err
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, req.OrgUnitID); err != nil {
+	if err := s.requireInScope(ctx, actor, req.OrgUnitID, "create rate chart"); err != nil {
+		return nil, err
+	}
+	createdBy, err := actorID(actor)
+	if err != nil {
 		return nil, err
 	}
 
@@ -77,7 +107,7 @@ func (s *service) CreateRateChart(ctx context.Context, actor auth.Actor, req Cre
 		return nil, err
 	}
 	chart := &domain.RateChart{
-		ID:               uuid.NewString(),
+		ID:               primitive.NewObjectID(),
 		OrgUnitID:        req.OrgUnitID,
 		Name:             req.Name,
 		BaseRatePerLitre: req.BaseRatePerLitre,
@@ -85,12 +115,18 @@ func (s *service) CreateRateChart(ctx context.Context, actor auth.Actor, req Cre
 		SNFRatePerPoint:  req.SNFRatePerPoint,
 		EffectiveFrom:    effectiveFrom,
 		Active:           true,
-		CreatedBy:        actor.PartyID,
+		CreatedBy:        createdBy,
 		CreatedAt:        now,
 	}
 	if err := s.repo.insertRateChart(ctx, chart); err != nil {
 		return nil, err
 	}
+	s.log.InfoContext(ctx, "rate chart created",
+		slog.String("rate_chart_id", chart.ID.Hex()),
+		slog.String("org_unit_id", chart.OrgUnitID.Hex()),
+		slog.String("name", chart.Name),
+		slog.Float64("base_rate_per_litre", chart.BaseRatePerLitre),
+		slog.String("actor_party_id", actor.PartyID))
 	return chart, nil
 }
 
@@ -98,37 +134,38 @@ func (s *service) CreateRateChart(ctx context.Context, actor auth.Actor, req Cre
 // caller's org scope over the DCS (pricing policy is confidential — any
 // authenticated user must not be able to enumerate other unions' rates) and
 // then delegates to the unchecked resolver.
-func (s *service) ResolveActiveChart(ctx context.Context, actor auth.Actor, dcsID string) (*domain.RateChart, error) {
+func (s *service) ResolveActiveChart(ctx context.Context, actor auth.Actor, dcsID primitive.ObjectID) (*domain.RateChart, error) {
 	dcs, err := s.d.Orgs.Get(ctx, dcsID)
 	if err != nil {
 		return nil, err
 	}
 	if dcs.Type != domain.OrgTypeDCS {
-		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+dcsID+" is not a DCS")
+		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+dcsID.Hex()+" is not a DCS")
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, dcsID); err != nil {
+	if err := s.requireInScope(ctx, actor, dcsID, "resolve rate chart"); err != nil {
 		return nil, err
 	}
 	return s.resolveActiveChartForDCS(ctx, dcsID)
 }
 
 // resolveActiveChartForDCS finds the rate chart pricing a DCS's pours: among
-// active charts already effective on the DCS itself or any of its ancestors,
-// the nearest org wins; ties break to the latest effective_from. Returns
-// httpx.NotFound when no chart covers the DCS. Scope enforcement is the
-// caller's job — the pour pricing path has already checked the actor's scope.
-func (s *service) resolveActiveChartForDCS(ctx context.Context, dcsID string) (*domain.RateChart, error) {
+// active charts already effective on the DCS itself or any of its ancestors
+// (org_unit_id ∈ dcs.Path ∪ {dcs.ID}), the nearest org wins; ties break to
+// the latest effective_from. Returns httpx.NotFound when no chart covers the
+// DCS. Scope enforcement is the caller's job — the pour pricing path has
+// already checked the actor's scope.
+func (s *service) resolveActiveChartForDCS(ctx context.Context, dcsID primitive.ObjectID) (*domain.RateChart, error) {
 	dcs, err := s.d.Orgs.Get(ctx, dcsID)
 	if err != nil {
 		return nil, err
 	}
 	if dcs.Type != domain.OrgTypeDCS {
-		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+dcsID+" is not a DCS")
+		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+dcsID.Hex()+" is not a DCS")
 	}
 
 	// Distance 0 = the DCS itself; Path is root→parent, so walk it backwards.
-	distance := map[string]int{dcs.ID: 0}
-	orgIDs := []string{dcs.ID}
+	distance := map[primitive.ObjectID]int{dcs.ID: 0}
+	orgIDs := []primitive.ObjectID{dcs.ID}
 	for i := len(dcs.Path) - 1; i >= 0; i-- {
 		distance[dcs.Path[i]] = len(dcs.Path) - i
 		orgIDs = append(orgIDs, dcs.Path[i])
@@ -151,7 +188,7 @@ func (s *service) resolveActiveChartForDCS(ctx context.Context, dcsID string) (*
 		}
 	}
 	if best == nil {
-		return nil, httpx.NotFound("active rate chart for DCS " + dcsID)
+		return nil, httpx.NotFound("active rate chart for DCS " + dcsID.Hex())
 	}
 	return best, nil
 }
@@ -187,7 +224,7 @@ func deriveIntegrityFlags(mode string, ocrConfidence float64, hasGeotag bool, de
 // CreateReading stores one analyzer measurement. Suspicious readings are
 // flagged, never rejected — the anomaly trail is the deterrent (§8.2).
 func (s *service) CreateReading(ctx context.Context, actor auth.Actor, req CreateReadingRequest) (*domain.AnalyzerReading, error) {
-	if req.DCSID == "" {
+	if req.DCSID.IsZero() {
 		return nil, httpx.BadRequest("VALIDATION", "dcs_id is required")
 	}
 	switch req.Mode {
@@ -198,11 +235,18 @@ func (s *service) CreateReading(ctx context.Context, actor auth.Actor, req Creat
 	if req.FatPct <= 0 || req.SNFPct <= 0 {
 		return nil, httpx.BadRequest("VALIDATION", "fat_pct and snf_pct are required")
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, req.DCSID); err != nil {
+	if err := s.requireInScope(ctx, actor, req.DCSID, "create reading"); err != nil {
+		return nil, err
+	}
+	recordedBy, err := actorID(actor)
+	if err != nil {
 		return nil, err
 	}
 	if req.Mode == domain.ReadingModePhotoOCR {
 		if !s.d.Flags.Enabled(ctx, flags.FlagPhotoOCR) {
+			s.log.WarnContext(ctx, "reading rejected: photo-OCR feature disabled",
+				slog.String("dcs_id", req.DCSID.Hex()),
+				slog.String("actor_party_id", actor.PartyID))
 			featureErr := httpx.Forbidden("photo-OCR ingestion is disabled on this deployment")
 			featureErr.Code = "FEATURE_DISABLED"
 			return nil, featureErr
@@ -223,7 +267,7 @@ func (s *service) CreateReading(ctx context.Context, actor auth.Actor, req Creat
 	integrityFlags = append(integrityFlags, plausibilityFlags...)
 
 	reading := &domain.AnalyzerReading{
-		ID:               uuid.NewString(),
+		ID:               primitive.NewObjectID(),
 		DCSID:            req.DCSID,
 		DeviceID:         req.DeviceID,
 		Mode:             req.Mode,
@@ -238,7 +282,7 @@ func (s *service) CreateReading(ctx context.Context, actor auth.Actor, req Creat
 		ServerReceivedAt: now,
 		IntegrityFlags:   integrityFlags,
 		PlausibilityOK:   len(plausibilityFlags) == 0,
-		RecordedBy:       actor.PartyID,
+		RecordedBy:       recordedBy,
 		CreatedAt:        now,
 	}
 	if hasGeo {
@@ -251,26 +295,45 @@ func (s *service) CreateReading(ctx context.Context, actor auth.Actor, req Creat
 	if _, err := s.d.Ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventReadingRecorded,
 		EntityType: domain.EntityAnalyzerReading,
-		EntityID:   reading.ID,
+		EntityID:   reading.ID.Hex(),
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  reading.DCSID,
+		OrgUnitID:  reading.DCSID.Hex(),
 		Payload: map[string]any{
 			"mode":            reading.Mode,
 			"integrity_flags": reading.IntegrityFlags,
 		},
 	}); err != nil {
-		return nil, httpx.Internal(fmt.Errorf("append reading provenance: %w", err))
+		err = fmt.Errorf("append reading provenance: %w", err)
+		s.log.ErrorContext(ctx, "reading provenance append failed",
+			slog.String("reading_id", reading.ID.Hex()), slog.Any("err", err))
+		return nil, httpx.Internal(err)
 	}
+	if len(integrityFlags) > 0 {
+		s.log.WarnContext(ctx, "reading recorded with integrity flags",
+			slog.String("reading_id", reading.ID.Hex()),
+			slog.String("dcs_id", reading.DCSID.Hex()),
+			slog.String("mode", reading.Mode),
+			slog.Any("integrity_flags", integrityFlags),
+			slog.String("actor_party_id", actor.PartyID))
+	}
+	s.log.InfoContext(ctx, "reading recorded",
+		slog.String("reading_id", reading.ID.Hex()),
+		slog.String("dcs_id", reading.DCSID.Hex()),
+		slog.String("mode", reading.Mode),
+		slog.Float64("fat_pct", reading.FatPct),
+		slog.Float64("snf_pct", reading.SNFPct),
+		slog.Bool("plausibility_ok", reading.PlausibilityOK),
+		slog.String("actor_party_id", actor.PartyID))
 	return reading, nil
 }
 
 // ListReadings pages a DCS's readings for anomaly review, optionally
 // restricted to one IST day.
-func (s *service) ListReadings(ctx context.Context, actor auth.Actor, dcsID, date string, page httpx.Page) ([]domain.AnalyzerReading, int64, error) {
-	if dcsID == "" {
+func (s *service) ListReadings(ctx context.Context, actor auth.Actor, dcsID primitive.ObjectID, date string, page httpx.Page) ([]domain.AnalyzerReading, int64, error) {
+	if dcsID.IsZero() {
 		return nil, 0, httpx.BadRequest("VALIDATION", "dcs_id is required")
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, dcsID); err != nil {
+	if err := s.requireInScope(ctx, actor, dcsID, "list readings"); err != nil {
 		return nil, 0, err
 	}
 	var dayStart, dayEnd *time.Time
@@ -290,7 +353,7 @@ func (s *service) ListReadings(ctx context.Context, actor auth.Actor, dcsID, dat
 // same client_event_id return the stored pour with idempotentReplay=true —
 // offline sync retries are harmless (§3.1).
 func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePourRequest) (pour *domain.MilkPour, idempotentReplay bool, err error) {
-	if req.ClientEventID == "" || req.FarmerPartyID == "" || req.DCSID == "" {
+	if req.ClientEventID == "" || req.FarmerPartyID.IsZero() || req.DCSID.IsZero() {
 		return nil, false, httpx.BadRequest("VALIDATION", "client_event_id, farmer_party_id and dcs_id are required")
 	}
 	if req.Shift != domain.ShiftMorning && req.Shift != domain.ShiftEvening {
@@ -304,7 +367,11 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 	default:
 		return nil, false, httpx.BadRequest("VALIDATION", "source must be ANALYZER_DIRECT, PHOTO_OCR or MANUAL")
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, req.DCSID); err != nil {
+	if err := s.requireInScope(ctx, actor, req.DCSID, "create pour"); err != nil {
+		return nil, false, err
+	}
+	recordedBy, err := actorID(actor)
+	if err != nil {
 		return nil, false, err
 	}
 
@@ -324,6 +391,11 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 		return nil, false, err
 	}
 	if !member {
+		s.log.WarnContext(ctx, "pour rejected: farmer not an active member",
+			slog.String("farmer_party_id", req.FarmerPartyID.Hex()),
+			slog.String("dcs_id", req.DCSID.Hex()),
+			slog.String("client_event_id", req.ClientEventID),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, false, httpx.Unprocessable("FARMER_NOT_MEMBER",
 			"farmer does not hold an active FARMER assignment at this DCS")
 	}
@@ -331,6 +403,14 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 	// HARD plausibility gate: receipts must be trustworthy, so implausible
 	// values are rejected here (unlike readings, which are merely flagged).
 	if violations := domain.CheckPlausibility(req.FatPct, req.SNFPct, req.QuantityLitres); len(violations) > 0 {
+		s.log.WarnContext(ctx, "pour rejected: implausible values",
+			slog.String("farmer_party_id", req.FarmerPartyID.Hex()),
+			slog.String("dcs_id", req.DCSID.Hex()),
+			slog.String("client_event_id", req.ClientEventID),
+			slog.Float64("fat_pct", req.FatPct),
+			slog.Float64("snf_pct", req.SNFPct),
+			slog.Float64("quantity_litres", req.QuantityLitres),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, false, httpx.Unprocessable("IMPLAUSIBLE_VALUES",
 			"fat/SNF/quantity outside physically plausible bounds")
 	}
@@ -355,11 +435,19 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 		return nil, false, err
 	}
 	if consigned {
+		s.log.WarnContext(ctx, "pour rejected: shift already consigned",
+			slog.String("dcs_id", req.DCSID.Hex()),
+			slog.String("pour_date", pourDate),
+			slog.String("shift", req.Shift),
+			slog.String("client_event_id", req.ClientEventID),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, false, httpx.Conflict("SHIFT_CONSIGNED",
 			"a consignment already pools this DCS shift — the pour set is sealed for "+pourDate+" "+req.Shift)
 	}
+	// Pre-generated _id keeps the insert and the ledger refs consistent in
+	// one flow.
 	p := &domain.MilkPour{
-		ID:                uuid.NewString(),
+		ID:                primitive.NewObjectID(),
 		ClientEventID:     req.ClientEventID,
 		FarmerPartyID:     req.FarmerPartyID,
 		AnimalID:          req.AnimalID,
@@ -377,7 +465,7 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 		Source:            req.Source,
 		Status:            domain.PourStatusRecorded,
 		PouredAt:          pouredAt,
-		RecordedBy:        actor.PartyID,
+		RecordedBy:        recordedBy,
 		DeviceID:          req.DeviceID,
 		CreatedAt:         now,
 	}
@@ -402,6 +490,16 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 	if err := s.recordPourProvenance(ctx, actor, p); err != nil {
 		return nil, false, err
 	}
+	s.log.InfoContext(ctx, "pour recorded",
+		slog.String("pour_id", p.ID.Hex()),
+		slog.String("farmer_party_id", p.FarmerPartyID.Hex()),
+		slog.String("dcs_id", p.DCSID.Hex()),
+		slog.String("pour_date", p.PourDate),
+		slog.String("shift", p.Shift),
+		slog.Float64("quantity_litres", p.QuantityLitres),
+		slog.Float64("rate_per_litre", p.RatePerLitre),
+		slog.Float64("amount", p.Amount),
+		slog.String("actor_party_id", actor.PartyID))
 	s.announcePour(ctx, p)
 	return p, false, nil
 }
@@ -416,9 +514,12 @@ func (s *service) replayStoredPour(ctx context.Context, actor auth.Actor, existi
 	if existing.Status == domain.PourStatusRecorded && existing.ProvenanceSeq == 0 {
 		// The append itself must stay idempotent: a pour.recorded event may
 		// already be chained if only the seq back-stamp failed last time.
-		evs, err := s.d.Ledger.EventsForEntity(ctx, domain.EntityMilkPour, existing.ID)
+		evs, err := s.d.Ledger.EventsForEntity(ctx, domain.EntityMilkPour, existing.ID.Hex())
 		if err != nil {
-			return nil, false, httpx.Internal(fmt.Errorf("check pour provenance: %w", err))
+			err = fmt.Errorf("check pour provenance: %w", err)
+			s.log.ErrorContext(ctx, "pour provenance check failed",
+				slog.String("pour_id", existing.ID.Hex()), slog.Any("err", err))
+			return nil, false, httpx.Internal(err)
 		}
 		var chained *provenance.Event
 		for i := range evs {
@@ -439,6 +540,12 @@ func (s *service) replayStoredPour(ctx context.Context, actor auth.Actor, existi
 			s.announcePour(ctx, existing)
 		}
 	}
+	s.log.WarnContext(ctx, "pour replayed idempotently",
+		slog.String("pour_id", existing.ID.Hex()),
+		slog.String("client_event_id", existing.ClientEventID),
+		slog.String("farmer_party_id", existing.FarmerPartyID.Hex()),
+		slog.String("dcs_id", existing.DCSID.Hex()),
+		slog.String("actor_party_id", actor.PartyID))
 	return existing, true, nil
 }
 
@@ -463,21 +570,21 @@ func isNotFoundErr(err error) bool {
 // onto the pour.
 func (s *service) recordPourProvenance(ctx context.Context, actor auth.Actor, p *domain.MilkPour) error {
 	refs := []provenance.Ref{
-		{EntityType: domain.EntityParty, EntityID: p.FarmerPartyID, Relation: "produced_by"},
+		{EntityType: domain.EntityParty, EntityID: p.FarmerPartyID.Hex(), Relation: "produced_by"},
 	}
-	if p.AnimalID != "" {
-		refs = append(refs, provenance.Ref{EntityType: domain.EntityAnimal, EntityID: p.AnimalID, Relation: "from_animal"})
+	if p.AnimalID != nil {
+		refs = append(refs, provenance.Ref{EntityType: domain.EntityAnimal, EntityID: p.AnimalID.Hex(), Relation: "from_animal"})
 	}
-	if p.AnalyzerReadingID != "" {
-		refs = append(refs, provenance.Ref{EntityType: domain.EntityAnalyzerReading, EntityID: p.AnalyzerReadingID, Relation: "measured_by"})
+	if p.AnalyzerReadingID != nil {
+		refs = append(refs, provenance.Ref{EntityType: domain.EntityAnalyzerReading, EntityID: p.AnalyzerReadingID.Hex(), Relation: "measured_by"})
 	}
 	ev, err := s.d.Ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventPourRecorded,
 		EntityType: domain.EntityMilkPour,
-		EntityID:   p.ID,
+		EntityID:   p.ID.Hex(),
 		Refs:       refs,
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  p.DCSID,
+		OrgUnitID:  p.DCSID.Hex(),
 		Payload: map[string]any{
 			"quantity_litres": p.QuantityLitres,
 			"rate_per_litre":  p.RatePerLitre,
@@ -485,7 +592,10 @@ func (s *service) recordPourProvenance(ctx context.Context, actor auth.Actor, p 
 		},
 	})
 	if err != nil {
-		return httpx.Internal(fmt.Errorf("append pour provenance: %w", err))
+		err = fmt.Errorf("append pour provenance: %w", err)
+		s.log.ErrorContext(ctx, "pour provenance append failed",
+			slog.String("pour_id", p.ID.Hex()), slog.Any("err", err))
+		return httpx.Internal(err)
 	}
 	if err := s.repo.setPourProvenanceSeq(ctx, p.ID, ev.Seq); err != nil {
 		return err
@@ -497,11 +607,13 @@ func (s *service) recordPourProvenance(ctx context.Context, actor auth.Actor, p 
 // resolveChartForPricing wraps resolveActiveChartForDCS, converting "no
 // chart" into a 422 — the pour payload itself is fine, the DCS just cannot
 // price it yet.
-func (s *service) resolveChartForPricing(ctx context.Context, dcsID string) (*domain.RateChart, error) {
+func (s *service) resolveChartForPricing(ctx context.Context, dcsID primitive.ObjectID) (*domain.RateChart, error) {
 	chart, err := s.resolveActiveChartForDCS(ctx, dcsID)
 	if err != nil {
 		var appErr *httpx.AppError
 		if errors.As(err, &appErr) && appErr.Status == http.StatusNotFound {
+			s.log.WarnContext(ctx, "pour rejected: no active rate chart",
+				slog.String("dcs_id", dcsID.Hex()))
 			return nil, httpx.Unprocessable("NO_ACTIVE_RATE_CHART",
 				"no active rate chart covers this DCS — pours cannot be priced")
 		}
@@ -535,10 +647,10 @@ func (s *service) BatchSyncPours(ctx context.Context, actor auth.Actor, req Batc
 			}
 		case replay:
 			res.Status = BatchItemDuplicate
-			res.PourID = pour.ID
+			res.PourID = pour.ID.Hex()
 		default:
 			res.Status = BatchItemCreated
-			res.PourID = pour.ID
+			res.PourID = pour.ID.Hex()
 		}
 		results = append(results, res)
 	}
@@ -548,7 +660,7 @@ func (s *service) BatchSyncPours(ctx context.Context, actor auth.Actor, req Batc
 // SupersedePour applies an append-only correction (§3.4): the old pour is
 // marked SUPERSEDED (the document stays), and a new repriced pour referencing
 // it is recorded.
-func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID string, req SupersedePourRequest) (*domain.MilkPour, error) {
+func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID primitive.ObjectID, req SupersedePourRequest) (*domain.MilkPour, error) {
 	if req.Reason == "" {
 		return nil, httpx.BadRequest("VALIDATION", "reason is required")
 	}
@@ -556,10 +668,18 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID st
 	if err != nil {
 		return nil, err
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, old.DCSID); err != nil {
+	if err := s.requireInScope(ctx, actor, old.DCSID, "supersede pour"); err != nil {
+		return nil, err
+	}
+	recordedBy, err := actorID(actor)
+	if err != nil {
 		return nil, err
 	}
 	if old.Status != domain.PourStatusRecorded {
+		s.log.WarnContext(ctx, "supersede rejected: pour not correctable",
+			slog.String("pour_id", old.ID.Hex()),
+			slog.String("status", old.Status),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("POUR_NOT_CORRECTABLE",
 			"pour is already "+old.Status+" and cannot be superseded")
 	}
@@ -568,6 +688,9 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID st
 		return nil, err
 	}
 	if invoiced {
+		s.log.WarnContext(ctx, "supersede rejected: pour already invoiced",
+			slog.String("pour_id", old.ID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("POUR_INVOICED",
 			"pour is aggregated by an invoice — correct it through settlement instead")
 	}
@@ -580,6 +703,12 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID st
 		return nil, err
 	}
 	if consigned {
+		s.log.WarnContext(ctx, "supersede rejected: shift already consigned",
+			slog.String("pour_id", old.ID.Hex()),
+			slog.String("dcs_id", old.DCSID.Hex()),
+			slog.String("pour_date", old.PourDate),
+			slog.String("shift", old.Shift),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("POUR_CONSIGNED",
 			"pour is aggregated by a consignment — correct it through logistics/settlement instead")
 	}
@@ -598,6 +727,12 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID st
 		return nil, httpx.BadRequest("VALIDATION", "corrected quantity_litres must be positive")
 	}
 	if violations := domain.CheckPlausibility(fat, snf, qty); len(violations) > 0 {
+		s.log.WarnContext(ctx, "supersede rejected: implausible corrected values",
+			slog.String("pour_id", old.ID.Hex()),
+			slog.Float64("fat_pct", fat),
+			slog.Float64("snf_pct", snf),
+			slog.Float64("quantity_litres", qty),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Unprocessable("IMPLAUSIBLE_VALUES",
 			"corrected fat/SNF/quantity outside physically plausible bounds")
 	}
@@ -614,12 +749,15 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID st
 		return nil, err
 	}
 	if !flipped {
+		s.log.WarnContext(ctx, "supersede rejected: pour superseded concurrently",
+			slog.String("pour_id", old.ID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("POUR_NOT_CORRECTABLE", "pour was superseded concurrently")
 	}
 
 	now := time.Now().UTC()
 	corrected := &domain.MilkPour{
-		ID:                uuid.NewString(),
+		ID:                primitive.NewObjectID(),
 		FarmerPartyID:     old.FarmerPartyID,
 		AnimalID:          old.AnimalID,
 		DCSID:             old.DCSID,
@@ -635,39 +773,55 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID st
 		AnalyzerReadingID: old.AnalyzerReadingID,
 		Source:            old.Source,
 		Status:            domain.PourStatusRecorded,
-		SupersedesPourID:  old.ID,
+		SupersedesPourID:  &old.ID,
 		PouredAt:          old.PouredAt,
-		RecordedBy:        actor.PartyID,
+		RecordedBy:        recordedBy,
 		DeviceID:          old.DeviceID,
 		GeoLat:            old.GeoLat,
 		GeoLng:            old.GeoLng,
 		CreatedAt:         now,
 	}
-	corrected.ClientEventID = old.ClientEventID + "::corr::" + corrected.ID[0:8]
+	corrected.ClientEventID = old.ClientEventID + "::corr::" + corrected.ID.Hex()[0:8]
 	if duplicate, err := s.repo.insertPour(ctx, corrected); err != nil {
 		return nil, err
 	} else if duplicate {
+		s.log.WarnContext(ctx, "supersede rejected: correction collided",
+			slog.String("pour_id", old.ID.Hex()),
+			slog.String("client_event_id", corrected.ClientEventID),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("POUR_NOT_CORRECTABLE", "correction collided with a concurrent one")
 	}
 
 	ev, err := s.d.Ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventPourSuperseded,
 		EntityType: domain.EntityMilkPour,
-		EntityID:   corrected.ID,
+		EntityID:   corrected.ID.Hex(),
 		Refs: []provenance.Ref{
-			{EntityType: domain.EntityMilkPour, EntityID: old.ID, Relation: "supersedes"},
+			{EntityType: domain.EntityMilkPour, EntityID: old.ID.Hex(), Relation: "supersedes"},
 		},
 		Actor:     provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID: corrected.DCSID,
+		OrgUnitID: corrected.DCSID.Hex(),
 		Payload:   map[string]any{"reason": req.Reason},
 	})
 	if err != nil {
-		return nil, httpx.Internal(fmt.Errorf("append supersede provenance: %w", err))
+		err = fmt.Errorf("append supersede provenance: %w", err)
+		s.log.ErrorContext(ctx, "supersede provenance append failed",
+			slog.String("pour_id", corrected.ID.Hex()), slog.Any("err", err))
+		return nil, httpx.Internal(err)
 	}
 	if err := s.repo.setPourProvenanceSeq(ctx, corrected.ID, ev.Seq); err != nil {
 		return nil, err
 	}
 	corrected.ProvenanceSeq = ev.Seq
+	s.log.InfoContext(ctx, "pour superseded",
+		slog.String("pour_id", corrected.ID.Hex()),
+		slog.String("supersedes_pour_id", old.ID.Hex()),
+		slog.String("farmer_party_id", corrected.FarmerPartyID.Hex()),
+		slog.String("dcs_id", corrected.DCSID.Hex()),
+		slog.Float64("quantity_litres", corrected.QuantityLitres),
+		slog.Float64("amount", corrected.Amount),
+		slog.String("reason", req.Reason),
+		slog.String("actor_party_id", actor.PartyID))
 	return corrected, nil
 }
 
@@ -675,12 +829,16 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID st
 // pours; staff roles must name a DCS inside their scope.
 func (s *service) ListPours(ctx context.Context, actor auth.Actor, filter pourListFilter, page httpx.Page) ([]domain.MilkPour, int64, error) {
 	if actor.RoleCode == domain.RoleFarmer {
-		filter.FarmerPartyID = actor.PartyID // farmers only ever see their own pours
+		self, err := actorID(actor)
+		if err != nil {
+			return nil, 0, err
+		}
+		filter.FarmerPartyID = self // farmers only ever see their own pours
 	} else {
-		if filter.DCSID == "" {
+		if filter.DCSID.IsZero() {
 			return nil, 0, httpx.BadRequest("VALIDATION", "dcs_id is required")
 		}
-		if err := s.d.Orgs.RequireInScope(ctx, actor, filter.DCSID); err != nil {
+		if err := s.requireInScope(ctx, actor, filter.DCSID, "list pours"); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -699,10 +857,10 @@ func (s *service) ListPours(ctx context.Context, actor auth.Actor, filter pourLi
 
 // GenerateInvoices groups the day's un-invoiced RECORDED pours by farmer and
 // issues one invoice each — the same-day payment artefact (§8.1). The unique
-// farmer+DCS+day index is the true duplicate guard; racing generators simply
-// count the loser as "existing".
+// farmer+DCS+day index (on ObjectIDs) is the true duplicate guard; racing
+// generators simply count the loser as "existing".
 func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req GenerateInvoicesRequest) (*GenerateInvoicesResponse, error) {
-	if req.DCSID == "" {
+	if req.DCSID.IsZero() {
 		return nil, httpx.BadRequest("VALIDATION", "dcs_id is required")
 	}
 	now := time.Now().UTC()
@@ -717,9 +875,9 @@ func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req Ge
 		return nil, err
 	}
 	if dcs.Type != domain.OrgTypeDCS {
-		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+req.DCSID+" is not a DCS")
+		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+req.DCSID.Hex()+" is not a DCS")
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, req.DCSID); err != nil {
+	if err := s.requireInScope(ctx, actor, req.DCSID, "generate invoices"); err != nil {
 		return nil, err
 	}
 
@@ -732,20 +890,21 @@ func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req Ge
 		return nil, err
 	}
 
-	byFarmer := make(map[string][]domain.MilkPour)
+	byFarmer := make(map[primitive.ObjectID][]domain.MilkPour)
 	for _, p := range pours {
 		if alreadyInvoiced[p.ID] {
 			continue
 		}
 		byFarmer[p.FarmerPartyID] = append(byFarmer[p.FarmerPartyID], p)
 	}
-	farmerIDs := make([]string, 0, len(byFarmer))
+	farmerIDs := make([]primitive.ObjectID, 0, len(byFarmer))
 	for id := range byFarmer {
 		farmerIDs = append(farmerIDs, id)
 	}
-	sort.Strings(farmerIDs)
+	sort.Slice(farmerIDs, func(i, j int) bool { return farmerIDs[i].Hex() < farmerIDs[j].Hex() })
 
 	resp := &GenerateInvoicesResponse{Invoices: []domain.Invoice{}}
+	// Counter keys stay strings and keep using the org CODE — internal only.
 	counterKey := "invoice:" + dcs.Code + ":" + dateKey
 	for _, farmerID := range farmerIDs {
 		group := byFarmer[farmerID]
@@ -754,7 +913,7 @@ func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req Ge
 			return nil, err
 		}
 		inv := &domain.Invoice{
-			ID:            uuid.NewString(),
+			ID:            primitive.NewObjectID(),
 			InvoiceNumber: domain.InvoiceNumberFor(dcs.Code, dateKey, seq),
 			FarmerPartyID: farmerID,
 			DCSID:         req.DCSID,
@@ -786,15 +945,15 @@ func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req Ge
 
 		refs := make([]provenance.Ref, 0, len(inv.PourIDs))
 		for _, pid := range inv.PourIDs {
-			refs = append(refs, provenance.Ref{EntityType: domain.EntityMilkPour, EntityID: pid, Relation: "aggregates"})
+			refs = append(refs, provenance.Ref{EntityType: domain.EntityMilkPour, EntityID: pid.Hex(), Relation: "aggregates"})
 		}
 		ev, err := s.d.Ledger.Append(ctx, provenance.AppendInput{
 			Type:       domain.EventInvoiceIssued,
 			EntityType: domain.EntityInvoice,
-			EntityID:   inv.ID,
+			EntityID:   inv.ID.Hex(),
 			Refs:       refs,
 			Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-			OrgUnitID:  inv.DCSID,
+			OrgUnitID:  inv.DCSID.Hex(),
 			Payload: map[string]any{
 				"invoice_number":        inv.InvoiceNumber,
 				"total_quantity_litres": inv.TotalQuantityLitres,
@@ -802,7 +961,10 @@ func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req Ge
 			},
 		})
 		if err != nil {
-			return nil, httpx.Internal(fmt.Errorf("append invoice provenance: %w", err))
+			err = fmt.Errorf("append invoice provenance: %w", err)
+			s.log.ErrorContext(ctx, "invoice provenance append failed",
+				slog.String("invoice_id", inv.ID.Hex()), slog.Any("err", err))
+			return nil, httpx.Internal(err)
 		}
 		if err := s.repo.setInvoiceProvenanceSeq(ctx, inv.ID, ev.Seq); err != nil {
 			return nil, err
@@ -811,6 +973,15 @@ func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req Ge
 
 		s.d.Bus.Publish(eventbus.TopicInvoiceIssued, *inv)
 		s.queueInvoiceSMS(ctx, inv)
+		s.log.InfoContext(ctx, "invoice issued",
+			slog.String("invoice_id", inv.ID.Hex()),
+			slog.String("invoice_number", inv.InvoiceNumber),
+			slog.String("farmer_party_id", inv.FarmerPartyID.Hex()),
+			slog.String("dcs_id", inv.DCSID.Hex()),
+			slog.String("invoice_date", inv.InvoiceDate),
+			slog.Int("pour_count", len(inv.PourIDs)),
+			slog.Float64("total_amount", inv.TotalAmount),
+			slog.String("actor_party_id", actor.PartyID))
 		resp.Created++
 		resp.Invoices = append(resp.Invoices, *inv)
 	}
@@ -822,14 +993,14 @@ func (s *service) GenerateInvoices(ctx context.Context, actor auth.Actor, req Ge
 // amended (the status guard on the update is atomic against a concurrent
 // settlement claim); a PAID/settlement-claimed invoice is never mutated —
 // its pours are surfaced in the response so staff can act, never dropped.
-func (s *service) mergeIntoExistingInvoice(ctx context.Context, actor auth.Actor, dcsID, dateKey, farmerID string, group []domain.MilkPour, resp *GenerateInvoicesResponse) error {
+func (s *service) mergeIntoExistingInvoice(ctx context.Context, actor auth.Actor, dcsID primitive.ObjectID, dateKey string, farmerID primitive.ObjectID, group []domain.MilkPour, resp *GenerateInvoicesResponse) error {
 	existing, err := s.repo.invoiceByFarmerDay(ctx, farmerID, dcsID, dateKey)
 	if err != nil {
 		return err
 	}
 	// Only pours genuinely missing from the invoice are merged — a racing
 	// generator that lost the insert must not double-add the winner's pours.
-	already := make(map[string]bool, len(existing.PourIDs))
+	already := make(map[primitive.ObjectID]bool, len(existing.PourIDs))
 	for _, id := range existing.PourIDs {
 		already[id] = true
 	}
@@ -844,17 +1015,26 @@ func (s *service) mergeIntoExistingInvoice(ctx context.Context, actor auth.Actor
 		return nil
 	}
 
-	skip := func() {
+	skip := func(reason string) {
 		resp.Existing++
+		skipped := make([]string, 0, len(newPours))
 		for _, p := range newPours {
 			resp.SkippedPourIDs = append(resp.SkippedPourIDs, p.ID)
+			skipped = append(skipped, p.ID.Hex())
 		}
+		s.log.WarnContext(ctx, "invoice merge skipped: "+reason,
+			slog.String("invoice_id", existing.ID.Hex()),
+			slog.String("invoice_number", existing.InvoiceNumber),
+			slog.String("farmer_party_id", farmerID.Hex()),
+			slog.String("dcs_id", dcsID.Hex()),
+			slog.Any("skipped_pour_ids", skipped),
+			slog.String("actor_party_id", actor.PartyID))
 	}
 	if existing.Status != domain.InvoiceStatusIssued {
-		skip() // frozen by settlement — un-invoiceable today, surface loudly
+		skip("invoice frozen by settlement") // un-invoiceable today, surface loudly
 		return nil
 	}
-	ids := make([]string, 0, len(newPours))
+	ids := make([]primitive.ObjectID, 0, len(newPours))
 	var addQty, addAmount float64
 	for _, p := range newPours {
 		ids = append(ids, p.ID)
@@ -866,7 +1046,7 @@ func (s *service) mergeIntoExistingInvoice(ctx context.Context, actor auth.Actor
 		return err
 	}
 	if !merged {
-		skip() // invoice left ISSUED between the read and the guarded update
+		skip("invoice left ISSUED concurrently") // between the read and the guarded update
 		return nil
 	}
 	updated, err := s.repo.invoiceByID(ctx, existing.ID)
@@ -881,15 +1061,15 @@ func (s *service) mergeIntoExistingInvoice(ctx context.Context, actor auth.Actor
 
 	refs := make([]provenance.Ref, 0, len(ids))
 	for _, pid := range ids {
-		refs = append(refs, provenance.Ref{EntityType: domain.EntityMilkPour, EntityID: pid, Relation: "aggregates"})
+		refs = append(refs, provenance.Ref{EntityType: domain.EntityMilkPour, EntityID: pid.Hex(), Relation: "aggregates"})
 	}
 	ev, err := s.d.Ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventInvoiceAmended,
 		EntityType: domain.EntityInvoice,
-		EntityID:   updated.ID,
+		EntityID:   updated.ID.Hex(),
 		Refs:       refs,
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  updated.DCSID,
+		OrgUnitID:  updated.DCSID.Hex(),
 		Payload: map[string]any{
 			"invoice_number":        updated.InvoiceNumber,
 			"added_pour_count":      len(ids),
@@ -898,7 +1078,10 @@ func (s *service) mergeIntoExistingInvoice(ctx context.Context, actor auth.Actor
 		},
 	})
 	if err != nil {
-		return httpx.Internal(fmt.Errorf("append invoice amendment provenance: %w", err))
+		err = fmt.Errorf("append invoice amendment provenance: %w", err)
+		s.log.ErrorContext(ctx, "invoice amendment provenance append failed",
+			slog.String("invoice_id", updated.ID.Hex()), slog.Any("err", err))
+		return httpx.Internal(err)
 	}
 	if err := s.repo.setInvoiceProvenanceSeq(ctx, updated.ID, ev.Seq); err != nil {
 		return err
@@ -907,6 +1090,14 @@ func (s *service) mergeIntoExistingInvoice(ctx context.Context, actor auth.Actor
 
 	s.d.Bus.Publish(eventbus.TopicInvoiceIssued, *updated)
 	s.queueInvoiceSMS(ctx, updated)
+	s.log.InfoContext(ctx, "invoice amended",
+		slog.String("invoice_id", updated.ID.Hex()),
+		slog.String("invoice_number", updated.InvoiceNumber),
+		slog.String("farmer_party_id", updated.FarmerPartyID.Hex()),
+		slog.String("dcs_id", updated.DCSID.Hex()),
+		slog.Int("added_pour_count", len(ids)),
+		slog.Float64("total_amount", updated.TotalAmount),
+		slog.String("actor_party_id", actor.PartyID))
 	resp.Updated++
 	resp.Invoices = append(resp.Invoices, *updated)
 	return nil
@@ -925,12 +1116,16 @@ func (s *service) queueInvoiceSMS(ctx context.Context, inv *domain.Invoice) {
 // invoices; staff roles must name a DCS inside their scope.
 func (s *service) ListInvoices(ctx context.Context, actor auth.Actor, filter invoiceListFilter, page httpx.Page) ([]domain.Invoice, int64, error) {
 	if actor.RoleCode == domain.RoleFarmer {
-		filter.FarmerPartyID = actor.PartyID // farmers only ever see their own invoices
+		self, err := actorID(actor)
+		if err != nil {
+			return nil, 0, err
+		}
+		filter.FarmerPartyID = self // farmers only ever see their own invoices
 	} else {
-		if filter.DCSID == "" {
+		if filter.DCSID.IsZero() {
 			return nil, 0, httpx.BadRequest("VALIDATION", "dcs_id is required")
 		}
-		if err := s.d.Orgs.RequireInScope(ctx, actor, filter.DCSID); err != nil {
+		if err := s.requireInScope(ctx, actor, filter.DCSID, "list invoices"); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -952,18 +1147,25 @@ func (s *service) ListInvoices(ctx context.Context, actor auth.Actor, filter inv
 
 // GetInvoice returns one invoice: a farmer may fetch their own, staff roles
 // need the invoice's DCS inside their scope.
-func (s *service) GetInvoice(ctx context.Context, actor auth.Actor, id string) (*domain.Invoice, error) {
+func (s *service) GetInvoice(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*domain.Invoice, error) {
 	inv, err := s.repo.invoiceByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	if actor.RoleCode == domain.RoleFarmer {
-		if inv.FarmerPartyID != actor.PartyID {
+		self, err := actorID(actor)
+		if err != nil {
+			return nil, err
+		}
+		if inv.FarmerPartyID != self {
+			s.log.WarnContext(ctx, "invoice access denied: not the farmer's own",
+				slog.String("invoice_id", inv.ID.Hex()),
+				slog.String("actor_party_id", actor.PartyID))
 			return nil, httpx.Forbidden("farmers may only view their own invoices")
 		}
 		return inv, nil
 	}
-	if err := s.d.Orgs.RequireInScope(ctx, actor, inv.DCSID); err != nil {
+	if err := s.requireInScope(ctx, actor, inv.DCSID, "get invoice"); err != nil {
 		return nil, err
 	}
 	return inv, nil
@@ -973,11 +1175,11 @@ func (s *service) GetInvoice(ctx context.Context, actor auth.Actor, id string) (
 
 // queueFarmerSMS writes an outbox notification for the farmer. Failures are
 // logged, never fatal — the receipt must not block the pour (§8.1).
-func (s *service) queueFarmerSMS(ctx context.Context, farmerPartyID, templateKey string, params map[string]string) {
+func (s *service) queueFarmerSMS(ctx context.Context, farmerPartyID primitive.ObjectID, templateKey string, params map[string]string) {
 	farmer, err := s.repo.getParty(ctx, farmerPartyID)
 	if err != nil {
-		s.log.Warn("collection: farmer lookup for SMS failed",
-			slog.String("farmer_party_id", farmerPartyID), slog.Any("err", err))
+		s.log.WarnContext(ctx, "farmer lookup for SMS failed",
+			slog.String("farmer_party_id", farmerPartyID.Hex()), slog.Any("err", err))
 		return
 	}
 	language := farmer.PreferredLanguage
@@ -985,8 +1187,8 @@ func (s *service) queueFarmerSMS(ctx context.Context, farmerPartyID, templateKey
 		language = defaultLanguage
 	}
 	n := &domain.Notification{
-		ID:          uuid.NewString(),
-		PartyID:     farmer.ID,
+		ID:          primitive.NewObjectID(),
+		PartyID:     &farmer.ID,
 		Phone:       farmer.Phone,
 		Channel:     domain.ChannelSMS,
 		TemplateKey: templateKey,
@@ -996,8 +1198,9 @@ func (s *service) queueFarmerSMS(ctx context.Context, farmerPartyID, templateKey
 		QueuedAt:    time.Now().UTC(),
 	}
 	if err := s.repo.queueNotification(ctx, n); err != nil {
-		s.log.Warn("collection: notification queue failed",
-			slog.String("template", templateKey), slog.Any("err", err))
+		s.log.WarnContext(ctx, "notification queue failed",
+			slog.String("template", templateKey),
+			slog.String("farmer_party_id", farmerPartyID.Hex()), slog.Any("err", err))
 	}
 }
 
@@ -1017,5 +1220,5 @@ func istDayRange(date string) (start, end time.Time, err error) {
 	if parseErr != nil {
 		return time.Time{}, time.Time{}, httpx.BadRequest("VALIDATION", "date must be YYYY-MM-DD")
 	}
-	return day.UTC(), day.Add(24 * time.Hour).UTC(), nil
+	return day.UTC(), day.Add(24*time.Hour).UTC(), nil
 }

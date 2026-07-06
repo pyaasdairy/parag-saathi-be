@@ -3,8 +3,6 @@ package settlement
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 )
@@ -34,7 +32,12 @@ func (h *handler) initiate(w http.ResponseWriter, r *http.Request) {
 // approve handles POST /settlements/{id}/approve.
 func (h *handler) approve(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	batch, err := h.svc.Approve(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	batch, err := h.svc.Approve(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -45,12 +48,17 @@ func (h *handler) approve(w http.ResponseWriter, r *http.Request) {
 // reject handles POST /settlements/{id}/reject.
 func (h *handler) reject(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var in RejectSettlementRequest
 	if err := httpx.DecodeJSON(r, &in); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	batch, err := h.svc.Reject(r.Context(), actor, chi.URLParam(r, "id"), in.Reason)
+	batch, err := h.svc.Reject(r.Context(), actor, id, in.Reason)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -61,7 +69,12 @@ func (h *handler) reject(w http.ResponseWriter, r *http.Request) {
 // execute handles POST /settlements/{id}/execute.
 func (h *handler) execute(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	detail, err := h.svc.Execute(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	detail, err := h.svc.Execute(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -87,7 +100,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 // detail handles GET /settlements/{id}.
 func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	d, err := h.svc.Detail(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	d, err := h.svc.Detail(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -128,12 +146,17 @@ func (h *handler) createDBT(w http.ResponseWriter, r *http.Request) {
 // updateDBTStatus handles POST /dbt/requests/{id}/status.
 func (h *handler) updateDBTStatus(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var in UpdateDBTStatusInput
 	if err := httpx.DecodeJSON(r, &in); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	req, err := h.svc.UpdateDBTStatus(r.Context(), actor, chi.URLParam(r, "id"), in.Status)
+	req, err := h.svc.UpdateDBTStatus(r.Context(), actor, id, in.Status)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

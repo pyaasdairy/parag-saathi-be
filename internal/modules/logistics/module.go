@@ -7,6 +7,8 @@
 package logistics
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -17,7 +19,8 @@ import (
 // Register mounts the logistics routes under /logistics (the router hands us
 // the /api/v1 subtree) and wires handler → service → repo.
 func Register(r chi.Router, d *deps.Deps) {
-	svc := newService(newRepo(d.DB), d.Orgs, d.Ledger)
+	log := d.Log.With(slog.String("module", "logistics"))
+	svc := newService(newRepo(d.DB), d.Orgs, d.Ledger, log)
 	h := &handler{svc: svc}
 
 	r.Route("/logistics", func(r chi.Router) {

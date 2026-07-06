@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -32,13 +33,20 @@ type service struct {
 	log    *slog.Logger
 }
 
+// actorObjectID parses the actor's party identity. JWT claims carry ObjectIDs
+// as hex strings (tokens are JSON); every service method that compares or
+// stores the actor's identity goes through this one helper.
+func actorObjectID(actor auth.Actor) (primitive.ObjectID, error) {
+	return httpx.ParseID(actor.PartyID, "actor")
+}
+
 // ---- pure guardrail checks (unit-tested without a database) ----
 
 // validateApproval enforces the dual-control guardrail (§8.1/§18-B): the
 // approving party MUST differ from the initiator — checked FIRST and on the
 // party identity itself, so not even SUPER_ADMIN's role bypass can approve a
 // batch it initiated. Then the batch must still be awaiting approval.
-func validateApproval(b domain.SettlementBatch, approverPartyID string) error {
+func validateApproval(b domain.SettlementBatch, approverPartyID primitive.ObjectID) error {
 	if b.InitiatedBy == approverPartyID {
 		return httpx.Forbidden("dual-control violation: the settlement initiator cannot approve their own batch (§8.1/§18-B)").
 			WithDetails(map[string]string{"reason": "DUAL_CONTROL_VIOLATION"})
@@ -93,7 +101,11 @@ func mockPFMSRef() string {
 // (§8.1): computation and initiation are one Saathi action; nothing proceeds
 // until a different human approves.
 func (s *service) Initiate(ctx context.Context, actor auth.Actor, in InitiateSettlementRequest) (*domain.SettlementBatch, error) {
-	if in.DCSID == "" {
+	actorID, err := actorObjectID(actor)
+	if err != nil {
+		return nil, err
+	}
+	if in.DCSID.IsZero() {
 		return nil, httpx.BadRequest("MISSING_FIELD", "dcs_id is required")
 	}
 	now := time.Now().UTC()
@@ -104,33 +116,49 @@ func (s *service) Initiate(ctx context.Context, actor auth.Actor, in InitiateSet
 		return nil, httpx.BadRequest("INVALID_DATE", "date must be YYYY-MM-DD")
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, in.DCSID); err != nil {
+		s.log.WarnContext(ctx, "settlement initiation denied: out of scope",
+			slog.String("dcs_id", in.DCSID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 
 	candidates, err := s.repo.issuedInvoices(ctx, in.DCSID, date)
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement initiation: load issued invoices",
+			slog.String("dcs_id", in.DCSID.Hex()), slog.String("date", date), slog.Any("err", err))
 		return nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, httpx.Unprocessable("NO_INVOICES", "no ISSUED invoices for DCS "+in.DCSID+" on "+date)
+		s.log.WarnContext(ctx, "settlement initiation rejected: no ISSUED invoices",
+			slog.String("dcs_id", in.DCSID.Hex()), slog.String("date", date),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Unprocessable("NO_INVOICES", "no ISSUED invoices for DCS "+in.DCSID.Hex()+" on "+date)
 	}
 
 	// Claim optimistically: the status guard on the update means each invoice
-	// lands in exactly one batch even under concurrent initiations.
-	batchID := uuid.NewString()
-	ids := make([]string, 0, len(candidates))
+	// lands in exactly one batch even under concurrent initiations. The batch
+	// ID is pre-generated so claim, insert and ledger all share one identity.
+	batchID := primitive.NewObjectID()
+	ids := make([]primitive.ObjectID, 0, len(candidates))
 	for _, inv := range candidates {
 		ids = append(ids, inv.ID)
 	}
 	if _, err := s.repo.claimInvoices(ctx, ids, batchID); err != nil {
+		s.log.ErrorContext(ctx, "settlement initiation: claim invoices",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	claimed, err := s.repo.invoicesByBatch(ctx, batchID)
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement initiation: read claimed invoices",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	if len(claimed) == 0 {
-		return nil, httpx.Unprocessable("NO_INVOICES", "invoices were claimed by a concurrent settlement for DCS "+in.DCSID+" on "+date)
+		s.log.WarnContext(ctx, "settlement initiation rejected: invoices claimed by concurrent batch",
+			slog.String("dcs_id", in.DCSID.Hex()), slog.String("date", date),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Unprocessable("NO_INVOICES", "invoices were claimed by a concurrent settlement for DCS "+in.DCSID.Hex()+" on "+date)
 	}
 
 	batch := &domain.SettlementBatch{
@@ -138,7 +166,7 @@ func (s *service) Initiate(ctx context.Context, actor auth.Actor, in InitiateSet
 		DCSID:       in.DCSID,
 		Date:        date,
 		Status:      domain.SettlementStatusPendingApproval, // INITIATED → PENDING_APPROVAL immediately
-		InitiatedBy: actor.PartyID,
+		InitiatedBy: actorID,
 		CreatedAt:   now,
 	}
 	for _, inv := range claimed {
@@ -146,9 +174,12 @@ func (s *service) Initiate(ctx context.Context, actor auth.Actor, in InitiateSet
 		batch.TotalAmount += inv.TotalAmount
 	}
 	if err := s.repo.insertBatch(ctx, batch); err != nil {
+		s.log.ErrorContext(ctx, "settlement initiation: insert batch",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", err))
 		// Best-effort release so the claimed invoices are not stranded.
 		if relErr := s.repo.releaseInvoices(ctx, batchID); relErr != nil {
-			s.log.Error("settlement: release after failed insert", slog.String("batch_id", batchID), slog.Any("err", relErr))
+			s.log.ErrorContext(ctx, "settlement: release after failed insert",
+				slog.String("batch_id", batchID.Hex()), slog.Any("err", relErr))
 		}
 		return nil, err
 	}
@@ -158,85 +189,130 @@ func (s *service) Initiate(ctx context.Context, actor auth.Actor, in InitiateSet
 		if i >= initiateRefsCap {
 			break
 		}
-		refs = append(refs, provenance.Ref{EntityType: domain.EntityInvoice, EntityID: inv.ID, Relation: "settles"})
+		refs = append(refs, provenance.Ref{EntityType: domain.EntityInvoice, EntityID: inv.ID.Hex(), Relation: "settles"})
 	}
 	ev, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventSettlementInitiated,
 		EntityType: domain.EntitySettlement,
-		EntityID:   batch.ID,
+		EntityID:   batch.ID.Hex(),
 		Refs:       refs,
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  batch.DCSID,
+		OrgUnitID:  batch.DCSID.Hex(),
 		Payload: map[string]any{
-			"dcs_id":        batch.DCSID,
+			"dcs_id":        batch.DCSID.Hex(),
 			"date":          batch.Date,
 			"invoice_count": len(claimed),
 			"total_amount":  batch.TotalAmount,
 		},
 	})
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement initiation: ledger append",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, httpx.Internal(err)
 	}
 	if err := s.repo.setBatchProvenanceSeq(ctx, batch.ID, ev.Seq); err != nil {
+		s.log.ErrorContext(ctx, "settlement initiation: stamp provenance seq",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	batch.ProvenanceSeq = ev.Seq
+
+	s.log.InfoContext(ctx, "settlement batch initiated",
+		slog.String("batch_id", batch.ID.Hex()),
+		slog.String("dcs_id", batch.DCSID.Hex()),
+		slog.String("date", batch.Date),
+		slog.Int("invoice_count", len(claimed)),
+		slog.Float64("total_amount", batch.TotalAmount),
+		slog.String("actor_party_id", actor.PartyID))
 	return batch, nil
 }
 
 // Approve applies the human dual-control sign-off: PENDING_APPROVAL→APPROVED.
-func (s *service) Approve(ctx context.Context, actor auth.Actor, batchID string) (*domain.SettlementBatch, error) {
+func (s *service) Approve(ctx context.Context, actor auth.Actor, batchID primitive.ObjectID) (*domain.SettlementBatch, error) {
+	actorID, err := actorObjectID(actor)
+	if err != nil {
+		return nil, err
+	}
 	batch, err := s.repo.batchByID(ctx, batchID)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, batch.DCSID); err != nil {
+		s.log.WarnContext(ctx, "settlement approval denied: out of scope",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("dcs_id", batch.DCSID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
-	if err := validateApproval(*batch, actor.PartyID); err != nil {
+	if err := validateApproval(*batch, actorID); err != nil {
+		s.log.WarnContext(ctx, "settlement approval rejected",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("status", batch.Status),
+			slog.String("initiated_by", batch.InitiatedBy.Hex()),
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("reason", err.Error()))
 		return nil, err
 	}
 
 	now := time.Now().UTC()
 	ok, err := s.repo.transitionBatch(ctx, batch.ID, domain.SettlementStatusPendingApproval, bson.D{
 		{Key: "status", Value: domain.SettlementStatusApproved},
-		{Key: "approved_by", Value: actor.PartyID},
+		{Key: "approved_by", Value: actorID},
 		{Key: "approved_at", Value: now},
 	})
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement approval: transition batch",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	if !ok {
+		s.log.WarnContext(ctx, "settlement approval rejected: batch left PENDING_APPROVAL concurrently",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_STATUS", "settlement batch already left "+domain.SettlementStatusPendingApproval)
 	}
 	batch.Status = domain.SettlementStatusApproved
-	batch.ApprovedBy = actor.PartyID
+	batch.ApprovedBy = &actorID
 	batch.ApprovedAt = &now
 
 	ev, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventSettlementApproved,
 		EntityType: domain.EntitySettlement,
-		EntityID:   batch.ID,
+		EntityID:   batch.ID.Hex(),
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  batch.DCSID,
+		OrgUnitID:  batch.DCSID.Hex(),
 		Payload: map[string]any{
 			"approved_by":  actor.PartyID,
 			"total_amount": batch.TotalAmount,
 		},
 	})
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement approval: ledger append",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, httpx.Internal(err)
 	}
 	if err := s.repo.setBatchProvenanceSeq(ctx, batch.ID, ev.Seq); err != nil {
+		s.log.ErrorContext(ctx, "settlement approval: stamp provenance seq",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	batch.ProvenanceSeq = ev.Seq
+
+	s.log.InfoContext(ctx, "settlement batch approved",
+		slog.String("batch_id", batch.ID.Hex()),
+		slog.String("dcs_id", batch.DCSID.Hex()),
+		slog.Float64("total_amount", batch.TotalAmount),
+		slog.String("actor_party_id", actor.PartyID))
 	return batch, nil
 }
 
 // Reject declines a pending batch and returns its invoices to ISSUED so they
 // can be re-settled.
-func (s *service) Reject(ctx context.Context, actor auth.Actor, batchID, reason string) (*domain.SettlementBatch, error) {
+func (s *service) Reject(ctx context.Context, actor auth.Actor, batchID primitive.ObjectID, reason string) (*domain.SettlementBatch, error) {
+	actorID, err := actorObjectID(actor)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, httpx.BadRequest("MISSING_FIELD", "reason is required")
 	}
@@ -245,29 +321,50 @@ func (s *service) Reject(ctx context.Context, actor auth.Actor, batchID, reason 
 		return nil, err
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, batch.DCSID); err != nil {
+		s.log.WarnContext(ctx, "settlement rejection denied: out of scope",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("dcs_id", batch.DCSID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 	if batch.Status != domain.SettlementStatusPendingApproval {
+		s.log.WarnContext(ctx, "settlement rejection refused: invalid status",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("status", batch.Status),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_STATUS", "settlement batch is "+batch.Status+", expected "+domain.SettlementStatusPendingApproval)
 	}
 
 	ok, err := s.repo.transitionBatch(ctx, batch.ID, domain.SettlementStatusPendingApproval, bson.D{
 		{Key: "status", Value: domain.SettlementStatusRejected},
-		{Key: "rejected_by", Value: actor.PartyID},
+		{Key: "rejected_by", Value: actorID},
 		{Key: "reject_reason", Value: reason},
 	})
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement rejection: transition batch",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	if !ok {
+		s.log.WarnContext(ctx, "settlement rejection refused: batch left PENDING_APPROVAL concurrently",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_STATUS", "settlement batch already left "+domain.SettlementStatusPendingApproval)
 	}
 	if err := s.repo.releaseInvoices(ctx, batch.ID); err != nil {
+		s.log.ErrorContext(ctx, "settlement rejection: release invoices",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	batch.Status = domain.SettlementStatusRejected
-	batch.RejectedBy = actor.PartyID
+	batch.RejectedBy = &actorID
 	batch.RejectReason = reason
+
+	s.log.InfoContext(ctx, "settlement batch rejected",
+		slog.String("batch_id", batch.ID.Hex()),
+		slog.String("dcs_id", batch.DCSID.Hex()),
+		slog.String("reason", reason),
+		slog.String("actor_party_id", actor.PartyID))
 	return batch, nil
 }
 
@@ -281,15 +378,23 @@ func (s *service) Reject(ctx context.Context, actor auth.Actor, batchID, reason 
 // webhook. Saathi itself never touches funds. The mock credits every payout
 // instantly with a synthetic UTR so the downstream flow (invoice→PAID,
 // provenance, farmer SMS) is exercised end to end.
-func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string) (*SettlementDetail, error) {
+func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID primitive.ObjectID) (*SettlementDetail, error) {
 	batch, err := s.repo.batchByID(ctx, batchID)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, batch.DCSID); err != nil {
+		s.log.WarnContext(ctx, "settlement execution denied: out of scope",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("dcs_id", batch.DCSID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 	if err := validateExecution(*batch); err != nil {
+		s.log.WarnContext(ctx, "settlement execution refused: invalid status",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("status", batch.Status),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 
@@ -299,17 +404,25 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string)
 	now := time.Now().UTC()
 	claimed, err := s.repo.claimExecution(ctx, batch.ID, now, now.Add(-executionLease))
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement execution: claim",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	if !claimed {
+		s.log.WarnContext(ctx, "settlement execution refused: live execution lease held elsewhere",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_STATUS", "settlement batch is already being executed")
 	}
 
 	// From here on, any error must not strand the batch in EXECUTING forever:
 	// flip it to FAILED (best-effort) so a retry can claim FAILED→EXECUTING.
 	failExecution := func(cause error) error {
+		s.log.ErrorContext(ctx, "settlement execution failed mid-run",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", cause))
 		if ferr := s.repo.markExecutionFailed(ctx, batch.ID, cause.Error()); ferr != nil {
-			s.log.Error("settlement: mark execution failed", slog.String("batch_id", batch.ID), slog.Any("err", ferr))
+			s.log.ErrorContext(ctx, "settlement: mark execution failed",
+				slog.String("batch_id", batch.ID.Hex()), slog.Any("err", ferr))
 		}
 		return cause
 	}
@@ -327,7 +440,7 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string)
 		}
 		creditedAt := now
 		payout := &domain.PayoutInstruction{
-			ID:                uuid.NewString(),
+			ID:                primitive.NewObjectID(),
 			SettlementBatchID: batch.ID,
 			InvoiceID:         inv.ID,
 			FarmerPartyID:     inv.FarmerPartyID,
@@ -344,6 +457,9 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string)
 		}
 		if exists {
 			// Retry of an interrupted run — reuse the payout already credited.
+			s.log.WarnContext(ctx, "settlement execution: payout already credited, reusing (idempotent replay)",
+				slog.String("batch_id", batch.ID.Hex()),
+				slog.String("invoice_id", inv.ID.Hex()))
 			existing, err := s.repo.payoutByInvoice(ctx, inv.ID)
 			if err != nil {
 				return nil, failExecution(err)
@@ -364,9 +480,13 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string)
 		{Key: "executed_at", Value: now},
 	})
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement execution: transition to EXECUTED",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	if !ok {
+		s.log.WarnContext(ctx, "settlement execution: batch left EXECUTING unexpectedly",
+			slog.String("batch_id", batch.ID.Hex()))
 		return nil, httpx.Conflict("INVALID_STATUS", "settlement batch left EXECUTING unexpectedly")
 	}
 	batch.Status = domain.SettlementStatusExecuted
@@ -376,9 +496,9 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string)
 	ev, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventSettlementExecuted,
 		EntityType: domain.EntitySettlement,
-		EntityID:   batch.ID,
+		EntityID:   batch.ID.Hex(),
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-		OrgUnitID:  batch.DCSID,
+		OrgUnitID:  batch.DCSID.Hex(),
 		Payload: map[string]any{
 			"pa_ref":       paRef,
 			"payout_count": len(payouts),
@@ -386,12 +506,24 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string)
 		},
 	})
 	if err != nil {
+		s.log.ErrorContext(ctx, "settlement execution: ledger append",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, httpx.Internal(err)
 	}
 	if err := s.repo.setBatchProvenanceSeq(ctx, batch.ID, ev.Seq); err != nil {
+		s.log.ErrorContext(ctx, "settlement execution: stamp provenance seq",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	batch.ProvenanceSeq = ev.Seq
+
+	s.log.InfoContext(ctx, "settlement batch executed",
+		slog.String("batch_id", batch.ID.Hex()),
+		slog.String("dcs_id", batch.DCSID.Hex()),
+		slog.String("pa_ref", paRef),
+		slog.Int("payout_count", len(payouts)),
+		slog.Float64("total_amount", batch.TotalAmount),
+		slog.String("actor_party_id", actor.PartyID))
 
 	// One payout.credited ledger event per invoice, then the SMS fan-out.
 	// Per-payout ledger/lookup failures are logged, not fatal: the money
@@ -400,24 +532,26 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID string)
 		if _, err := s.ledger.Append(ctx, provenance.AppendInput{
 			Type:       domain.EventPayoutCredited,
 			EntityType: domain.EntityInvoice,
-			EntityID:   p.InvoiceID,
+			EntityID:   p.InvoiceID.Hex(),
 			Refs: []provenance.Ref{
-				{EntityType: domain.EntitySettlement, EntityID: batch.ID, Relation: "paid_by"},
+				{EntityType: domain.EntitySettlement, EntityID: batch.ID.Hex(), Relation: "paid_by"},
 			},
 			Actor:     provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
-			OrgUnitID: batch.DCSID,
+			OrgUnitID: batch.DCSID.Hex(),
 			Payload:   map[string]any{"utr": p.UTR, "amount": p.Amount},
 		}); err != nil {
-			s.log.Error("settlement: payout.credited ledger append", slog.String("invoice_id", p.InvoiceID), slog.Any("err", err))
+			s.log.ErrorContext(ctx, "settlement: payout.credited ledger append",
+				slog.String("invoice_id", p.InvoiceID.Hex()), slog.Any("err", err))
 		}
 
 		phone, err := s.repo.partyPhone(ctx, p.FarmerPartyID)
 		if err != nil {
-			s.log.Error("settlement: farmer phone lookup for payout SMS", slog.String("farmer_party_id", p.FarmerPartyID), slog.Any("err", err))
+			s.log.ErrorContext(ctx, "settlement: farmer phone lookup for payout SMS",
+				slog.String("farmer_party_id", p.FarmerPartyID.Hex()), slog.Any("err", err))
 			continue
 		}
 		s.bus.Publish(eventbus.TopicPayoutCredited, PayoutCreditedEvent{
-			FarmerPartyID: p.FarmerPartyID,
+			FarmerPartyID: p.FarmerPartyID.Hex(),
 			Phone:         phone,
 			Amount:        p.Amount,
 			UTR:           p.UTR,
@@ -443,10 +577,17 @@ func (s *service) List(ctx context.Context, actor auth.Actor, dcsID, date, statu
 	}
 	filter := bson.D{}
 	if dcsID != "" {
-		if err := s.orgs.RequireInScope(ctx, actor, dcsID); err != nil {
+		dcsOID, err := httpx.ParseID(dcsID, "dcs_id")
+		if err != nil {
 			return nil, 0, err
 		}
-		filter = append(filter, bson.E{Key: "dcs_id", Value: dcsID})
+		if err := s.orgs.RequireInScope(ctx, actor, dcsOID); err != nil {
+			s.log.WarnContext(ctx, "settlement list denied: out of scope",
+				slog.String("dcs_id", dcsOID.Hex()),
+				slog.String("actor_party_id", actor.PartyID))
+			return nil, 0, err
+		}
+		filter = append(filter, bson.E{Key: "dcs_id", Value: dcsOID})
 	}
 	if date != "" {
 		filter = append(filter, bson.E{Key: "date", Value: date})
@@ -458,12 +599,16 @@ func (s *service) List(ctx context.Context, actor auth.Actor, dcsID, date, statu
 }
 
 // Detail returns one batch plus its payout instructions.
-func (s *service) Detail(ctx context.Context, actor auth.Actor, batchID string) (*SettlementDetail, error) {
+func (s *service) Detail(ctx context.Context, actor auth.Actor, batchID primitive.ObjectID) (*SettlementDetail, error) {
 	batch, err := s.repo.batchByID(ctx, batchID)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, batch.DCSID); err != nil {
+		s.log.WarnContext(ctx, "settlement detail denied: out of scope",
+			slog.String("batch_id", batch.ID.Hex()),
+			slog.String("dcs_id", batch.DCSID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 	payouts, err := s.repo.payoutsByBatch(ctx, batch.ID)
@@ -485,9 +630,13 @@ func (s *service) PayoutHistory(ctx context.Context, actor auth.Actor, farmerPar
 	if farmerPartyID == "" {
 		return nil, 0, httpx.BadRequest("MISSING_FIELD", "farmer_party_id is required")
 	}
+	farmerOID, err := httpx.ParseID(farmerPartyID, "farmer_party_id")
+	if err != nil {
+		return nil, 0, err
+	}
 	if actor.RoleCode != domain.RoleFarmer &&
 		actor.RoleCode != domain.RoleSuperAdmin && actor.RoleCode != domain.RoleStateAuditor {
-		dcsIDs, err := s.repo.farmerDCSIDs(ctx, farmerPartyID)
+		dcsIDs, err := s.repo.farmerDCSIDs(ctx, farmerOID)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -499,10 +648,13 @@ func (s *service) PayoutHistory(ctx context.Context, actor auth.Actor, farmerPar
 			}
 		}
 		if !inScope {
+			s.log.WarnContext(ctx, "payout history denied: farmer out of scope",
+				slog.String("farmer_party_id", farmerOID.Hex()),
+				slog.String("actor_party_id", actor.PartyID))
 			return nil, 0, httpx.Forbidden("farmer is outside your organisational scope")
 		}
 	}
-	return s.repo.payoutsByFarmer(ctx, farmerPartyID, page)
+	return s.repo.payoutsByFarmer(ctx, farmerOID, page)
 }
 
 // ---- DBT subsidy rail (§13) — strictly separate from milk payments ----
@@ -511,7 +663,11 @@ func (s *service) PayoutHistory(ctx context.Context, actor auth.Actor, farmerPar
 // Saathi only tracks the request; the subsidy is disbursed by PFMS/DBT,
 // never by Saathi and never through the milk-payment rail.
 func (s *service) CreateDBT(ctx context.Context, actor auth.Actor, in CreateDBTRequestInput) (*domain.DBTRequest, error) {
-	if in.SchemeCode == "" || in.FarmerPartyID == "" {
+	actorID, err := actorObjectID(actor)
+	if err != nil {
+		return nil, err
+	}
+	if in.SchemeCode == "" || in.FarmerPartyID.IsZero() {
 		return nil, httpx.BadRequest("MISSING_FIELD", "scheme_code and farmer_party_id are required")
 	}
 	if in.Amount <= 0 {
@@ -524,24 +680,35 @@ func (s *service) CreateDBT(ctx context.Context, actor auth.Actor, in CreateDBTR
 	// MOCK PFMS — real integration files the beneficiary+amount with PFMS
 	// and receives an acknowledgement reference (§13).
 	req := &domain.DBTRequest{
-		ID:            uuid.NewString(),
+		ID:            primitive.NewObjectID(),
 		SchemeCode:    in.SchemeCode,
 		FarmerPartyID: in.FarmerPartyID,
 		Amount:        in.Amount,
 		PFMSRef:       mockPFMSRef(),
 		Status:        domain.DBTStatusSubmitted,
-		SubmittedBy:   actor.PartyID,
+		SubmittedBy:   actorID,
 		CreatedAt:     time.Now().UTC(),
 	}
 	if err := s.repo.insertDBT(ctx, req); err != nil {
+		s.log.ErrorContext(ctx, "dbt request insert",
+			slog.String("farmer_party_id", in.FarmerPartyID.Hex()),
+			slog.String("scheme_code", in.SchemeCode), slog.Any("err", err))
 		return nil, err
 	}
+
+	s.log.InfoContext(ctx, "dbt request submitted",
+		slog.String("dbt_request_id", req.ID.Hex()),
+		slog.String("scheme_code", req.SchemeCode),
+		slog.String("farmer_party_id", req.FarmerPartyID.Hex()),
+		slog.Float64("amount", req.Amount),
+		slog.String("pfms_ref", req.PFMSRef),
+		slog.String("actor_party_id", actor.PartyID))
 	return req, nil
 }
 
 // UpdateDBTStatus records the DBT rail's progress for a request. CREDITED
 // stamps credited_at; CREDITED/REJECTED are terminal.
-func (s *service) UpdateDBTStatus(ctx context.Context, actor auth.Actor, id, status string) (*domain.DBTRequest, error) {
+func (s *service) UpdateDBTStatus(ctx context.Context, actor auth.Actor, id primitive.ObjectID, status string) (*domain.DBTRequest, error) {
 	switch status {
 	case domain.DBTStatusAccepted, domain.DBTStatusCredited, domain.DBTStatusRejected:
 	default:
@@ -552,6 +719,10 @@ func (s *service) UpdateDBTStatus(ctx context.Context, actor auth.Actor, id, sta
 		return nil, err
 	}
 	if req.Status == domain.DBTStatusCredited || req.Status == domain.DBTStatusRejected {
+		s.log.WarnContext(ctx, "dbt status update refused: terminal status",
+			slog.String("dbt_request_id", req.ID.Hex()),
+			slog.String("status", req.Status),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("TERMINAL_STATUS", "dbt request is already "+req.Status)
 	}
 
@@ -562,14 +733,25 @@ func (s *service) UpdateDBTStatus(ctx context.Context, actor auth.Actor, id, sta
 	}
 	ok, err := s.repo.transitionDBT(ctx, req.ID, req.Status, status, creditedAt)
 	if err != nil {
+		s.log.ErrorContext(ctx, "dbt status transition",
+			slog.String("dbt_request_id", req.ID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
 	if !ok {
+		s.log.WarnContext(ctx, "dbt status update refused: concurrent change",
+			slog.String("dbt_request_id", req.ID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("INVALID_STATUS", "dbt request changed concurrently, retry")
 	}
+	fromStatus := req.Status
 	req.Status = status
 	req.CreditedAt = creditedAt
-	_ = actor // status updates carry no extra actor fields today
+
+	s.log.InfoContext(ctx, "dbt request status updated",
+		slog.String("dbt_request_id", req.ID.Hex()),
+		slog.String("from_status", fromStatus),
+		slog.String("to_status", status),
+		slog.String("actor_party_id", actor.PartyID))
 	return req, nil
 }
 
@@ -581,7 +763,11 @@ func (s *service) ListDBT(ctx context.Context, actor auth.Actor, farmerPartyID, 
 	}
 	filter := bson.D{}
 	if farmerPartyID != "" {
-		filter = append(filter, bson.E{Key: "farmer_party_id", Value: farmerPartyID})
+		farmerOID, err := httpx.ParseID(farmerPartyID, "farmer_party_id")
+		if err != nil {
+			return nil, 0, err
+		}
+		filter = append(filter, bson.E{Key: "farmer_party_id", Value: farmerOID})
 	}
 	if status != "" {
 		filter = append(filter, bson.E{Key: "status", Value: status})

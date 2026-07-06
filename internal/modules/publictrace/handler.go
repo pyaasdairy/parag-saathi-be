@@ -40,10 +40,16 @@ func (h *Handler) VerifyLedger(w http.ResponseWriter, r *http.Request) {
 }
 
 // TraceGraph handles GET /trace/{entity_type}/{entity_id} — the official
-// upstream+downstream event-graph walk.
+// upstream+downstream event-graph walk. entity_id is an ObjectID hex; it is
+// validated here and passed to the ledger as its canonical hex form.
 func (h *Handler) TraceGraph(w http.ResponseWriter, r *http.Request) {
+	entityID, err := httpx.PathID(r, "entity_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	resp, err := h.service.TraceGraph(r.Context(),
-		chi.URLParam(r, "entity_type"), chi.URLParam(r, "entity_id"))
+		chi.URLParam(r, "entity_type"), entityID.Hex())
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -52,11 +58,16 @@ func (h *Handler) TraceGraph(w http.ResponseWriter, r *http.Request) {
 }
 
 // Timeline handles GET /trace/{entity_type}/{entity_id}/timeline — one
-// entity's own events in chain order.
+// entity's own events in chain order. entity_id is an ObjectID hex.
 func (h *Handler) Timeline(w http.ResponseWriter, r *http.Request) {
+	entityID, err := httpx.PathID(r, "entity_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	page := httpx.ParsePage(r)
 	events, total, err := h.service.Timeline(r.Context(),
-		chi.URLParam(r, "entity_type"), chi.URLParam(r, "entity_id"), page)
+		chi.URLParam(r, "entity_type"), entityID.Hex(), page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

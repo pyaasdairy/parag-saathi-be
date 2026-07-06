@@ -23,8 +23,9 @@ import (
 // Register wires the platformops module and mounts /admin, /audit,
 // /notifications and /support (the router hands us the /api/v1 subtree).
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "platformops"))
 	repo := newRepository(d.DB)
-	svc := newService(d, repo)
+	svc := newService(d, repo, log)
 	h := newHandler(svc)
 
 	r.Route("/admin", func(r chi.Router) {
@@ -71,18 +72,18 @@ func Register(r chi.Router, d *deps.Deps) {
 	// other). The bus already runs each handler on its own goroutine with a
 	// bounded context and panic recovery; the wrapper below adds an explicit
 	// second belt at this module's boundary.
-	d.Bus.Subscribe(eventbus.TopicPayoutCredited, safeHandler(d, svc.onPayoutCredited))
-	d.Bus.Subscribe(eventbus.TopicGateBlocked, safeHandler(d, svc.onGateBlocked))
-	d.Bus.Subscribe(eventbus.TopicMVUDispatched, safeHandler(d, svc.onMVUDispatched))
+	d.Bus.Subscribe(eventbus.TopicPayoutCredited, safeHandler(log, svc.onPayoutCredited))
+	d.Bus.Subscribe(eventbus.TopicGateBlocked, safeHandler(log, svc.onGateBlocked))
+	d.Bus.Subscribe(eventbus.TopicMVUDispatched, safeHandler(log, svc.onMVUDispatched))
 }
 
 // safeHandler wraps a bus reaction so a programming error in notification
 // fan-out can never disturb the publishing flow.
-func safeHandler(d *deps.Deps, reaction func(ctx context.Context, payload any)) eventbus.Handler {
+func safeHandler(log *slog.Logger, reaction func(ctx context.Context, payload any)) eventbus.Handler {
 	return func(ctx context.Context, topic string, payload any) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				d.Log.Error("platformops bus handler panic",
+				log.Error("platformops bus handler panic",
 					slog.String("topic", topic), slog.Any("panic", rec))
 			}
 		}()

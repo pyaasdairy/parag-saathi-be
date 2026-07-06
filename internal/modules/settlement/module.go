@@ -7,6 +7,8 @@
 package settlement
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -17,12 +19,13 @@ import (
 // Register wires the settlement module and mounts /settlements and /dbt
 // under the /api/v1 subtree it receives.
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "settlement"))
 	svc := &service{
 		repo:   newRepo(d.DB),
 		ledger: d.Ledger,
 		orgs:   d.Orgs,
 		bus:    d.Bus,
-		log:    d.Log,
+		log:    log,
 	}
 	h := &handler{svc: svc}
 

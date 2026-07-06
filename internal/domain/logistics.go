@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
 
 // DCS consignment statuses — a day+shift's pooled cans travelling to a BMC.
 const (
@@ -16,22 +20,22 @@ const (
 // the van picks up. It is the pooling boundary: past this point milk traces
 // to a *set* of contributors (blueprint §7.4).
 type DCSConsignment struct {
-	ID                  string     `bson:"_id"     json:"id"`
-	DCSID               string     `bson:"dcs_id"  json:"dcs_id"`
-	Date                string     `bson:"date"    json:"date"` // YYYY-MM-DD
-	Shift               string     `bson:"shift"   json:"shift"`
-	PourIDs             []string   `bson:"pour_ids" json:"pour_ids"`
-	TotalQuantityLitres float64    `bson:"total_quantity_litres" json:"total_quantity_litres"`
-	CanCount            int        `bson:"can_count,omitempty" json:"can_count,omitempty"`
-	AvgFatPct           float64    `bson:"avg_fat_pct,omitempty" json:"avg_fat_pct,omitempty"`
-	AvgSNFPct           float64    `bson:"avg_snf_pct,omitempty" json:"avg_snf_pct,omitempty"`
-	Status              string     `bson:"status"  json:"status"`
-	CreatedBy           string     `bson:"created_by"   json:"created_by"`
-	DispatchedAt        *time.Time `bson:"dispatched_at,omitempty" json:"dispatched_at,omitempty"`
-	RouteTripID         string     `bson:"route_trip_id,omitempty" json:"route_trip_id,omitempty"`
-	BMCLotID            string     `bson:"bmc_lot_id,omitempty"    json:"bmc_lot_id,omitempty"`
-	ProvenanceSeq       int64      `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
-	CreatedAt           time.Time  `bson:"created_at" json:"created_at"`
+	ID                  primitive.ObjectID   `bson:"_id,omitempty" json:"id"`
+	DCSID               primitive.ObjectID   `bson:"dcs_id"    json:"dcs_id"`
+	Date                string               `bson:"date"      json:"date"` // YYYY-MM-DD
+	Shift               string               `bson:"shift"     json:"shift"`
+	PourIDs             []primitive.ObjectID `bson:"pour_ids"  json:"pour_ids"`
+	TotalQuantityLitres float64              `bson:"total_quantity_litres" json:"total_quantity_litres"`
+	CanCount            int                  `bson:"can_count,omitempty"   json:"can_count,omitempty"`
+	AvgFatPct           float64              `bson:"avg_fat_pct,omitempty" json:"avg_fat_pct,omitempty"`
+	AvgSNFPct           float64              `bson:"avg_snf_pct,omitempty" json:"avg_snf_pct,omitempty"`
+	Status              string               `bson:"status"    json:"status"`
+	CreatedBy           primitive.ObjectID   `bson:"created_by"    json:"created_by"`
+	DispatchedAt        *time.Time           `bson:"dispatched_at,omitempty" json:"dispatched_at,omitempty"`
+	RouteTripID         *primitive.ObjectID  `bson:"route_trip_id,omitempty" json:"route_trip_id,omitempty"`
+	BMCLotID            *primitive.ObjectID  `bson:"bmc_lot_id,omitempty"    json:"bmc_lot_id,omitempty"`
+	ProvenanceSeq       int64                `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
+	CreatedAt           time.Time            `bson:"created_at" json:"created_at"`
 }
 
 // Route trip statuses.
@@ -44,11 +48,11 @@ const (
 // RouteStop is one DCS pickup on a trip, with the cold-chain temperature
 // captured at pickup time.
 type RouteStop struct {
-	DCSID         string     `bson:"dcs_id"         json:"dcs_id"`
-	ConsignmentID string     `bson:"consignment_id" json:"consignment_id"`
-	PickedUpAt    *time.Time `bson:"picked_up_at,omitempty" json:"picked_up_at,omitempty"`
-	TempC         float64    `bson:"temp_c,omitempty"       json:"temp_c,omitempty"`
-	Notes         string     `bson:"notes,omitempty"        json:"notes,omitempty"`
+	DCSID         primitive.ObjectID `bson:"dcs_id"         json:"dcs_id"`
+	ConsignmentID primitive.ObjectID `bson:"consignment_id" json:"consignment_id"`
+	PickedUpAt    *time.Time         `bson:"picked_up_at,omitempty" json:"picked_up_at,omitempty"`
+	TempC         float64            `bson:"temp_c,omitempty"       json:"temp_c,omitempty"`
+	Notes         string             `bson:"notes,omitempty"        json:"notes,omitempty"`
 }
 
 // ColdChainEntry is a timestamped temperature+location sample during transit.
@@ -62,17 +66,17 @@ type ColdChainEntry struct {
 // RouteTrip is one van run: pick up consignments across DCS stops, log
 // cold-chain, deliver to a BMC.
 type RouteTrip struct {
-	ID               string           `bson:"_id"        json:"id"`
-	RouteName        string           `bson:"route_name" json:"route_name"`
-	UnionID          string           `bson:"union_id"   json:"union_id"`
-	VanRiderPartyID  string           `bson:"van_rider_party_id" json:"van_rider_party_id"`
-	Date             string           `bson:"date"       json:"date"` // YYYY-MM-DD
-	Shift            string           `bson:"shift"      json:"shift"`
-	Stops            []RouteStop      `bson:"stops"      json:"stops"`
-	ColdChain        []ColdChainEntry `bson:"cold_chain,omitempty" json:"cold_chain,omitempty"`
-	Status           string           `bson:"status"     json:"status"`
-	DeliveredToBMCID string           `bson:"delivered_to_bmc_id,omitempty" json:"delivered_to_bmc_id,omitempty"`
-	DeliveredAt      *time.Time       `bson:"delivered_at,omitempty"        json:"delivered_at,omitempty"`
-	ProvenanceSeq    int64            `bson:"provenance_seq,omitempty"      json:"provenance_seq,omitempty"`
-	CreatedAt        time.Time        `bson:"created_at" json:"created_at"`
+	ID               primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
+	RouteName        string              `bson:"route_name"    json:"route_name"`
+	UnionID          primitive.ObjectID  `bson:"union_id"      json:"union_id"`
+	VanRiderPartyID  primitive.ObjectID  `bson:"van_rider_party_id" json:"van_rider_party_id"`
+	Date             string              `bson:"date"          json:"date"` // YYYY-MM-DD
+	Shift            string              `bson:"shift"         json:"shift"`
+	Stops            []RouteStop         `bson:"stops"         json:"stops"`
+	ColdChain        []ColdChainEntry    `bson:"cold_chain,omitempty" json:"cold_chain,omitempty"`
+	Status           string              `bson:"status"        json:"status"`
+	DeliveredToBMCID *primitive.ObjectID `bson:"delivered_to_bmc_id,omitempty" json:"delivered_to_bmc_id,omitempty"`
+	DeliveredAt      *time.Time          `bson:"delivered_at,omitempty"        json:"delivered_at,omitempty"`
+	ProvenanceSeq    int64               `bson:"provenance_seq,omitempty"      json:"provenance_seq,omitempty"`
+	CreatedAt        time.Time           `bson:"created_at"    json:"created_at"`
 }

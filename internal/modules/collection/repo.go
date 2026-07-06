@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -19,7 +20,9 @@ import (
 // repo owns every MongoDB access of the collection module. It maps
 // mongo.ErrNoDocuments to httpx.NotFound and wraps everything unexpected in
 // httpx.Internal, so the service layer only ever sees AppError-compatible
-// errors.
+// errors. All _id and cross-collection reference filters use
+// primitive.ObjectID values; client_event_id and counter keys stay strings
+// (business keys, never joins).
 type repo struct {
 	rateCharts      *mongo.Collection
 	readings        *mongo.Collection
@@ -51,7 +54,7 @@ func newRepo(d *deps.Deps) *repo {
 
 // deactivateActiveCharts flips every active chart of an org unit to inactive
 // (a new chart supersedes the old ones).
-func (r *repo) deactivateActiveCharts(ctx context.Context, orgUnitID string) error {
+func (r *repo) deactivateActiveCharts(ctx context.Context, orgUnitID primitive.ObjectID) error {
 	_, err := r.rateCharts.UpdateMany(ctx,
 		bson.D{{Key: "org_unit_id", Value: orgUnitID}, {Key: "active", Value: true}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "active", Value: false}}}},
@@ -72,7 +75,7 @@ func (r *repo) insertRateChart(ctx context.Context, rc *domain.RateChart) error 
 
 // activeChartsForOrgs returns active charts already effective at `now` for
 // any of the given org units (a DCS plus its ancestor chain — a small set).
-func (r *repo) activeChartsForOrgs(ctx context.Context, orgUnitIDs []string, now time.Time) ([]domain.RateChart, error) {
+func (r *repo) activeChartsForOrgs(ctx context.Context, orgUnitIDs []primitive.ObjectID, now time.Time) ([]domain.RateChart, error) {
 	cur, err := r.rateCharts.Find(ctx, bson.D{
 		{Key: "org_unit_id", Value: bson.D{{Key: "$in", Value: orgUnitIDs}}},
 		{Key: "active", Value: true},
@@ -100,7 +103,7 @@ func (r *repo) insertReading(ctx context.Context, rd *domain.AnalyzerReading) er
 
 // listReadings pages a DCS's readings, optionally restricted to the
 // [dayStart, dayEnd) window, newest first.
-func (r *repo) listReadings(ctx context.Context, dcsID string, dayStart, dayEnd *time.Time, page httpx.Page) ([]domain.AnalyzerReading, int64, error) {
+func (r *repo) listReadings(ctx context.Context, dcsID primitive.ObjectID, dayStart, dayEnd *time.Time, page httpx.Page) ([]domain.AnalyzerReading, int64, error) {
 	filter := bson.D{{Key: "dcs_id", Value: dcsID}}
 	if dayStart != nil && dayEnd != nil {
 		filter = append(filter, bson.E{Key: "created_at", Value: bson.D{
@@ -131,7 +134,7 @@ func (r *repo) listReadings(ctx context.Context, dcsID string, dayStart, dayEnd 
 
 // farmerIsActiveMember reports whether the party holds a usable ACTIVE FARMER
 // assignment at the DCS at instant `now`.
-func (r *repo) farmerIsActiveMember(ctx context.Context, farmerPartyID, dcsID string, now time.Time) (bool, error) {
+func (r *repo) farmerIsActiveMember(ctx context.Context, farmerPartyID, dcsID primitive.ObjectID, now time.Time) (bool, error) {
 	cur, err := r.roleAssignments.Find(ctx, bson.D{
 		{Key: "party_id", Value: farmerPartyID},
 		{Key: "org_unit_id", Value: dcsID},
@@ -154,11 +157,11 @@ func (r *repo) farmerIsActiveMember(ctx context.Context, farmerPartyID, dcsID st
 }
 
 // getParty loads a party (for notification phone/language).
-func (r *repo) getParty(ctx context.Context, partyID string) (*domain.Party, error) {
+func (r *repo) getParty(ctx context.Context, partyID primitive.ObjectID) (*domain.Party, error) {
 	var p domain.Party
 	err := r.parties.FindOne(ctx, bson.D{{Key: "_id", Value: partyID}}).Decode(&p)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("party " + partyID)
+		return nil, httpx.NotFound("party " + partyID.Hex())
 	}
 	if err != nil {
 		return nil, httpx.Internal(fmt.Errorf("get party: %w", err))
@@ -180,7 +183,8 @@ func (r *repo) insertPour(ctx context.Context, p *domain.MilkPour) (duplicate bo
 	return false, nil
 }
 
-// pourByClientEventID fetches a pour by its idempotency key.
+// pourByClientEventID fetches a pour by its idempotency key (a device-minted
+// STRING business key — never an ObjectID).
 func (r *repo) pourByClientEventID(ctx context.Context, clientEventID string) (*domain.MilkPour, error) {
 	var p domain.MilkPour
 	err := r.pours.FindOne(ctx, bson.D{{Key: "client_event_id", Value: clientEventID}}).Decode(&p)
@@ -194,11 +198,11 @@ func (r *repo) pourByClientEventID(ctx context.Context, clientEventID string) (*
 }
 
 // pourByID fetches a pour by ID.
-func (r *repo) pourByID(ctx context.Context, id string) (*domain.MilkPour, error) {
+func (r *repo) pourByID(ctx context.Context, id primitive.ObjectID) (*domain.MilkPour, error) {
 	var p domain.MilkPour
 	err := r.pours.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&p)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("pour " + id)
+		return nil, httpx.NotFound("pour " + id.Hex())
 	}
 	if err != nil {
 		return nil, httpx.Internal(fmt.Errorf("get pour: %w", err))
@@ -209,7 +213,7 @@ func (r *repo) pourByID(ctx context.Context, id string) (*domain.MilkPour, error
 // markPourSuperseded flips a RECORDED pour to SUPERSEDED. The status guard in
 // the filter makes concurrent supersedes lose cleanly (optimistic, no
 // transactions on a standalone server).
-func (r *repo) markPourSuperseded(ctx context.Context, id string) (bool, error) {
+func (r *repo) markPourSuperseded(ctx context.Context, id primitive.ObjectID) (bool, error) {
 	res, err := r.pours.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: domain.PourStatusRecorded}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: domain.PourStatusSuperseded}}}},
@@ -221,7 +225,7 @@ func (r *repo) markPourSuperseded(ctx context.Context, id string) (bool, error) 
 }
 
 // setPourProvenanceSeq stamps the ledger sequence onto the pour document.
-func (r *repo) setPourProvenanceSeq(ctx context.Context, id string, seq int64) error {
+func (r *repo) setPourProvenanceSeq(ctx context.Context, id primitive.ObjectID, seq int64) error {
 	_, err := r.pours.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "provenance_seq", Value: seq}}}},
@@ -232,19 +236,19 @@ func (r *repo) setPourProvenanceSeq(ctx context.Context, id string, seq int64) e
 	return nil
 }
 
-// pourListFilter narrows a pour listing.
+// pourListFilter narrows a pour listing. Zero ObjectIDs mean "no filter".
 type pourListFilter struct {
-	DCSID         string
+	DCSID         primitive.ObjectID
 	Date          string
 	Shift         string
-	FarmerPartyID string
+	FarmerPartyID primitive.ObjectID
 }
 
 // listPours pages pours matching the filter, newest first, plus the total
 // matching count for pagination meta.
 func (r *repo) listPours(ctx context.Context, f pourListFilter, page httpx.Page) ([]domain.MilkPour, int64, error) {
 	filter := bson.D{}
-	if f.DCSID != "" {
+	if !f.DCSID.IsZero() {
 		filter = append(filter, bson.E{Key: "dcs_id", Value: f.DCSID})
 	}
 	if f.Date != "" {
@@ -253,7 +257,7 @@ func (r *repo) listPours(ctx context.Context, f pourListFilter, page httpx.Page)
 	if f.Shift != "" {
 		filter = append(filter, bson.E{Key: "shift", Value: f.Shift})
 	}
-	if f.FarmerPartyID != "" {
+	if !f.FarmerPartyID.IsZero() {
 		filter = append(filter, bson.E{Key: "farmer_party_id", Value: f.FarmerPartyID})
 	}
 	total, err := r.pours.CountDocuments(ctx, filter)
@@ -277,7 +281,7 @@ func (r *repo) listPours(ctx context.Context, f pourListFilter, page httpx.Page)
 
 // recordedPoursForDay returns a DCS's RECORDED pours for one settlement day
 // (internal aggregation input for invoice generation).
-func (r *repo) recordedPoursForDay(ctx context.Context, dcsID, dateKey string) ([]domain.MilkPour, error) {
+func (r *repo) recordedPoursForDay(ctx context.Context, dcsID primitive.ObjectID, dateKey string) ([]domain.MilkPour, error) {
 	cur, err := r.pours.Find(ctx, bson.D{
 		{Key: "dcs_id", Value: dcsID},
 		{Key: "pour_date", Value: dateKey},
@@ -297,7 +301,7 @@ func (r *repo) recordedPoursForDay(ctx context.Context, dcsID, dateKey string) (
 
 // pourIsInvoiced reports whether a non-HOLD invoice already aggregates the
 // pour (such pours are frozen — corrections must go through settlement).
-func (r *repo) pourIsInvoiced(ctx context.Context, pourID string) (bool, error) {
+func (r *repo) pourIsInvoiced(ctx context.Context, pourID primitive.ObjectID) (bool, error) {
 	n, err := r.invoices.CountDocuments(ctx, bson.D{
 		{Key: "pour_ids", Value: pourID},
 		{Key: "status", Value: bson.D{{Key: "$ne", Value: domain.InvoiceStatusHold}}},
@@ -310,7 +314,7 @@ func (r *repo) pourIsInvoiced(ctx context.Context, pourID string) (bool, error) 
 
 // invoicedPourIDs returns the set of pour IDs already aggregated by any
 // invoice of the DCS on the given day.
-func (r *repo) invoicedPourIDs(ctx context.Context, dcsID, dateKey string) (map[string]bool, error) {
+func (r *repo) invoicedPourIDs(ctx context.Context, dcsID primitive.ObjectID, dateKey string) (map[primitive.ObjectID]bool, error) {
 	cur, err := r.invoices.Find(ctx, bson.D{
 		{Key: "dcs_id", Value: dcsID},
 		{Key: "invoice_date", Value: dateKey},
@@ -319,12 +323,12 @@ func (r *repo) invoicedPourIDs(ctx context.Context, dcsID, dateKey string) (map[
 		return nil, httpx.Internal(fmt.Errorf("find day invoices: %w", err))
 	}
 	var docs []struct {
-		PourIDs []string `bson:"pour_ids"`
+		PourIDs []primitive.ObjectID `bson:"pour_ids"`
 	}
 	if err := cur.All(ctx, &docs); err != nil {
 		return nil, httpx.Internal(fmt.Errorf("decode day invoices: %w", err))
 	}
-	set := make(map[string]bool)
+	set := make(map[primitive.ObjectID]bool)
 	for _, d := range docs {
 		for _, id := range d.PourIDs {
 			set[id] = true
@@ -346,7 +350,7 @@ func (r *repo) insertInvoice(ctx context.Context, inv *domain.Invoice) (duplicat
 }
 
 // setInvoiceProvenanceSeq stamps the ledger sequence onto the invoice document.
-func (r *repo) setInvoiceProvenanceSeq(ctx context.Context, id string, seq int64) error {
+func (r *repo) setInvoiceProvenanceSeq(ctx context.Context, id primitive.ObjectID, seq int64) error {
 	_, err := r.invoices.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "provenance_seq", Value: seq}}}},
@@ -358,11 +362,11 @@ func (r *repo) setInvoiceProvenanceSeq(ctx context.Context, id string, seq int64
 }
 
 // invoiceByID fetches one invoice.
-func (r *repo) invoiceByID(ctx context.Context, id string) (*domain.Invoice, error) {
+func (r *repo) invoiceByID(ctx context.Context, id primitive.ObjectID) (*domain.Invoice, error) {
 	var inv domain.Invoice
 	err := r.invoices.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&inv)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("invoice " + id)
+		return nil, httpx.NotFound("invoice " + id.Hex())
 	}
 	if err != nil {
 		return nil, httpx.Internal(fmt.Errorf("get invoice: %w", err))
@@ -370,11 +374,11 @@ func (r *repo) invoiceByID(ctx context.Context, id string) (*domain.Invoice, err
 	return &inv, nil
 }
 
-// invoiceListFilter narrows an invoice listing.
+// invoiceListFilter narrows an invoice listing. Zero ObjectIDs mean "no filter".
 type invoiceListFilter struct {
-	DCSID         string
+	DCSID         primitive.ObjectID
 	Date          string
-	FarmerPartyID string
+	FarmerPartyID primitive.ObjectID
 	Status        string
 }
 
@@ -382,13 +386,13 @@ type invoiceListFilter struct {
 // total matching count for pagination meta.
 func (r *repo) listInvoices(ctx context.Context, f invoiceListFilter, page httpx.Page) ([]domain.Invoice, int64, error) {
 	filter := bson.D{}
-	if f.DCSID != "" {
+	if !f.DCSID.IsZero() {
 		filter = append(filter, bson.E{Key: "dcs_id", Value: f.DCSID})
 	}
 	if f.Date != "" {
 		filter = append(filter, bson.E{Key: "invoice_date", Value: f.Date})
 	}
-	if f.FarmerPartyID != "" {
+	if !f.FarmerPartyID.IsZero() {
 		filter = append(filter, bson.E{Key: "farmer_party_id", Value: f.FarmerPartyID})
 	}
 	if f.Status != "" {
@@ -414,7 +418,7 @@ func (r *repo) listInvoices(ctx context.Context, f invoiceListFilter, page httpx
 }
 
 // invoiceByFarmerDay loads the unique (farmer, DCS, day) invoice.
-func (r *repo) invoiceByFarmerDay(ctx context.Context, farmerPartyID, dcsID, dateKey string) (*domain.Invoice, error) {
+func (r *repo) invoiceByFarmerDay(ctx context.Context, farmerPartyID, dcsID primitive.ObjectID, dateKey string) (*domain.Invoice, error) {
 	var inv domain.Invoice
 	err := r.invoices.FindOne(ctx, bson.D{
 		{Key: "farmer_party_id", Value: farmerPartyID},
@@ -422,7 +426,7 @@ func (r *repo) invoiceByFarmerDay(ctx context.Context, farmerPartyID, dcsID, dat
 		{Key: "invoice_date", Value: dateKey},
 	}).Decode(&inv)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("invoice for farmer " + farmerPartyID + " on " + dateKey)
+		return nil, httpx.NotFound("invoice for farmer " + farmerPartyID.Hex() + " on " + dateKey)
 	}
 	if err != nil {
 		return nil, httpx.Internal(fmt.Errorf("get farmer day invoice: %w", err))
@@ -433,7 +437,7 @@ func (r *repo) invoiceByFarmerDay(ctx context.Context, farmerPartyID, dcsID, dat
 // appendPoursToInvoice merges late pours into a still-ISSUED invoice: the
 // status guard in the filter makes the merge atomic against a concurrent
 // settlement claim. Returns false when the invoice already left ISSUED.
-func (r *repo) appendPoursToInvoice(ctx context.Context, invoiceID string, pourIDs []string, addQty, addAmount float64) (bool, error) {
+func (r *repo) appendPoursToInvoice(ctx context.Context, invoiceID primitive.ObjectID, pourIDs []primitive.ObjectID, addQty, addAmount float64) (bool, error) {
 	res, err := r.invoices.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: invoiceID}, {Key: "status", Value: domain.InvoiceStatusIssued}},
 		bson.D{
@@ -451,7 +455,7 @@ func (r *repo) appendPoursToInvoice(ctx context.Context, invoiceID string, pourI
 }
 
 // setInvoiceTotals stamps rounded totals after a float $inc merge.
-func (r *repo) setInvoiceTotals(ctx context.Context, invoiceID string, qty, amount float64) error {
+func (r *repo) setInvoiceTotals(ctx context.Context, invoiceID primitive.ObjectID, qty, amount float64) error {
 	_, err := r.invoices.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: invoiceID}},
 		bson.D{{Key: "$set", Value: bson.D{
@@ -469,7 +473,7 @@ func (r *repo) setInvoiceTotals(ctx context.Context, invoiceID string, qty, amou
 // DCS's date+shift — once it exists the shift's pour set is frozen: new pours
 // and corrections would silently diverge from the consignment's totals and
 // trace refs.
-func (r *repo) shiftConsigned(ctx context.Context, dcsID, dateKey, shift string) (bool, error) {
+func (r *repo) shiftConsigned(ctx context.Context, dcsID primitive.ObjectID, dateKey, shift string) (bool, error) {
 	n, err := r.consignments.CountDocuments(ctx, bson.D{
 		{Key: "dcs_id", Value: dcsID},
 		{Key: "date", Value: dateKey},
@@ -486,6 +490,7 @@ func (r *repo) shiftConsigned(ctx context.Context, dcsID, dateKey, shift string)
 
 // nextInvoiceSeq atomically increments and returns the per-DCS-per-day
 // invoice counter (findOneAndUpdate upsert — safe without transactions).
+// Counter keys are internal strings ("invoice:"+dcsCode+":"+date).
 func (r *repo) nextInvoiceSeq(ctx context.Context, key string) (int, error) {
 	var doc struct {
 		Seq int `bson:"seq"`

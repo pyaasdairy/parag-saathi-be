@@ -47,9 +47,10 @@ func NewJWTManager(secret string, ttl time.Duration) *JWTManager {
 }
 
 // IssueSessionToken returns a SESSION-kind access token for a logged-in party.
+// ObjectIDs travel in claims as hex strings (JWTs are JSON).
 func (m *JWTManager) IssueSessionToken(p domain.Party) (string, error) {
 	return m.sign(Claims{
-		PartyID: p.ID,
+		PartyID: p.ID.Hex(),
 		Phone:   p.Phone,
 		KYCTier: p.KYCTier,
 		Kind:    TokenKindSession,
@@ -59,13 +60,13 @@ func (m *JWTManager) IssueSessionToken(p domain.Party) (string, error) {
 // IssueRoleToken returns a ROLE-kind access token pinned to one assignment.
 func (m *JWTManager) IssueRoleToken(p domain.Party, ra domain.RoleAssignment, orgType string) (string, error) {
 	return m.sign(Claims{
-		PartyID:          p.ID,
+		PartyID:          p.ID.Hex(),
 		Phone:            p.Phone,
 		KYCTier:          p.KYCTier,
 		Kind:             TokenKindRole,
-		RoleAssignmentID: ra.ID,
+		RoleAssignmentID: ra.ID.Hex(),
 		RoleCode:         ra.RoleCode,
-		OrgUnitID:        ra.OrgUnitID,
+		OrgUnitID:        ra.OrgUnitID.Hex(),
 		OrgType:          orgType,
 	})
 }

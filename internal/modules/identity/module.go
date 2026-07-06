@@ -1,13 +1,19 @@
 // Package identity owns authentication (OTP login, refresh-token rotation,
-// role selection), the Party registry, org-scoped role assignments and KYC
-// verification — blueprint §4 (identity) and §5 (roles & RBAC).
+// role selection), the Party registry, org-scoped role assignments and the
+// KYC approval workflow — blueprint §4 (identity) and §5 (roles & RBAC).
+//
+// The KYC flow is: login → submit KYC (PENDING) → an authorised reviewer
+// (Organising Manager / District Verifier / PCDF Admin / Super Admin)
+// approves or rejects → only a VERIFIED tier unlocks the matching role token.
 //
 // Route prefixes (mounted under /api/v1): /auth, /parties, /roles, /kyc.
 // This module emits no provenance events; identity changes are covered by
-// the audit middleware.
+// the audit middleware and explicit audit records on KYC review.
 package identity
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -17,8 +23,9 @@ import (
 
 // Register wires repo → service → handler and mounts the identity routes.
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "identity"))
 	repo := newRepository(d.DB)
-	svc := newService(d, repo)
+	svc := newService(d, repo, log)
 	h := newHandler(svc)
 
 	r.Route("/auth", func(r chi.Router) {
@@ -43,10 +50,28 @@ func Register(r chi.Router, d *deps.Deps) {
 	})
 
 	r.Route("/kyc", func(r chi.Router) {
-		r.Use(middleware.Authenticate(d.JWT), middleware.RequireSession)
-		r.Post("/aadhaar", h.verifyAadhaar)
-		r.Post("/bank", h.verifyBank)
-		r.Get("/me", h.listMyKYC)
+		r.Use(middleware.Authenticate(d.JWT))
+
+		// Self-service KYC: any logged-in party submits evidence.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireSession)
+			r.Post("/aadhaar", h.verifyAadhaar)
+			r.Post("/bank", h.verifyBank)
+			r.Get("/me", h.listMyKYC)
+		})
+
+		// Review console: ground staff and admins approve/reject PENDING KYC.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireRoles(
+				domain.RoleOrganisingManager,
+				domain.RoleDistrictVerifier,
+				domain.RolePCDFAdmin,
+				domain.RoleSuperAdmin,
+			))
+			r.Get("/pending", h.listPendingKYC)
+			r.Post("/{id}/approve", h.approveKYC)
+			r.Post("/{id}/reject", h.rejectKYC)
+		})
 	})
 
 	r.Route("/roles", func(r chi.Router) {
@@ -57,6 +82,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			domain.RolePCDFAdmin,
 			domain.RoleUnionPresident,
 			domain.RoleSamitiAdhyaksh,
+			domain.RoleOrganisingManager,
 		))
 		r.Post("/assignments", h.createAssignment)
 		r.Delete("/assignments/{id}", h.revokeAssignment)

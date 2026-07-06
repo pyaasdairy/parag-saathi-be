@@ -5,14 +5,19 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/pyaas/saathi-backend/internal/domain"
 )
 
 func TestQRTokenRoundTrip(t *testing.T) {
 	const secret = "test-qr-secret"
 	issuedAt := time.Date(2026, 7, 6, 9, 30, 0, 0, time.UTC)
+	// The HMAC material carries the product lot ObjectID's hex form:
+	// "qr_code|lot hex|unix" — the exact shape publictrace verifies.
+	lotHex := primitive.NewObjectID().Hex()
 
-	token := signQRToken(secret, "PRG-7F3K9QX2", "lot-123", issuedAt)
+	token := signQRToken(secret, "PRG-7F3K9QX2", lotHex, issuedAt)
 
 	code, lotID, ts, err := parseQRToken(secret, token)
 	if err != nil {
@@ -21,8 +26,8 @@ func TestQRTokenRoundTrip(t *testing.T) {
 	if code != "PRG-7F3K9QX2" {
 		t.Errorf("qr code: got %q, want %q", code, "PRG-7F3K9QX2")
 	}
-	if lotID != "lot-123" {
-		t.Errorf("product lot id: got %q, want %q", lotID, "lot-123")
+	if lotID != lotHex {
+		t.Errorf("product lot id: got %q, want %q", lotID, lotHex)
 	}
 	if !ts.Equal(issuedAt) {
 		t.Errorf("issued at: got %v, want %v", ts, issuedAt)
@@ -32,7 +37,7 @@ func TestQRTokenRoundTrip(t *testing.T) {
 func TestQRTokenRejectsForgery(t *testing.T) {
 	const secret = "test-qr-secret"
 	issuedAt := time.Now().UTC()
-	token := signQRToken(secret, "PRG-AAAA2222", "lot-legit", issuedAt)
+	token := signQRToken(secret, "PRG-AAAA2222", primitive.NewObjectID().Hex(), issuedAt)
 
 	cases := []struct {
 		name   string

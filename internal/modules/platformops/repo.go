@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -177,7 +178,7 @@ func (r *repository) claimQueuedNotification(ctx context.Context, providerRef st
 
 // setNotificationMeta stamps the rendered-message meta block onto a claimed
 // notification (visibility only — the claim has already succeeded).
-func (r *repository) setNotificationMeta(ctx context.Context, notificationID string, meta map[string]any) error {
+func (r *repository) setNotificationMeta(ctx context.Context, notificationID primitive.ObjectID, meta map[string]any) error {
 	_, err := r.notifications.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: notificationID}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "meta", Value: meta}}}},
@@ -202,7 +203,7 @@ func (r *repository) findPartyByPhone(ctx context.Context, phone string) (*domai
 }
 
 // findPartyByID returns one party, or NotFound.
-func (r *repository) findPartyByID(ctx context.Context, partyID string) (*domain.Party, error) {
+func (r *repository) findPartyByID(ctx context.Context, partyID primitive.ObjectID) (*domain.Party, error) {
 	var party domain.Party
 	err := r.parties.FindOne(ctx, bson.D{{Key: "_id", Value: partyID}}).Decode(&party)
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -216,7 +217,7 @@ func (r *repository) findPartyByID(ctx context.Context, partyID string) (*domain
 
 // listActiveAssignmentsForParty returns a party's ACTIVE role assignments
 // (bounded — a party holds at most a handful of roles).
-func (r *repository) listActiveAssignmentsForParty(ctx context.Context, partyID string) ([]domain.RoleAssignment, error) {
+func (r *repository) listActiveAssignmentsForParty(ctx context.Context, partyID primitive.ObjectID) ([]domain.RoleAssignment, error) {
 	cur, err := r.assignments.Find(ctx,
 		bson.D{
 			{Key: "party_id", Value: partyID},
@@ -236,7 +237,7 @@ func (r *repository) listActiveAssignmentsForParty(ctx context.Context, partyID 
 
 // listActiveRoleHolders returns the ACTIVE assignments of one role inside one
 // org unit (bounded — used to address supervisor safety alerts).
-func (r *repository) listActiveRoleHolders(ctx context.Context, orgUnitID, roleCode string) ([]domain.RoleAssignment, error) {
+func (r *repository) listActiveRoleHolders(ctx context.Context, orgUnitID primitive.ObjectID, roleCode string) ([]domain.RoleAssignment, error) {
 	cur, err := r.assignments.Find(ctx,
 		bson.D{
 			{Key: "org_unit_id", Value: orgUnitID},
@@ -256,8 +257,9 @@ func (r *repository) listActiveRoleHolders(ctx context.Context, orgUnitID, roleC
 }
 
 // subjectOrgUnit resolves a gate-blocked QC subject to the org unit that
-// holds it (BMC lot → bmc_id, processing batch → plant_id).
-func (r *repository) subjectOrgUnit(ctx context.Context, subjectType, subjectID string) (string, error) {
+// holds it (BMC lot → bmc_id, processing batch → plant_id). Both the subject
+// _id and the reference field are ObjectIDs.
+func (r *repository) subjectOrgUnit(ctx context.Context, subjectType string, subjectID primitive.ObjectID) (primitive.ObjectID, error) {
 	var coll *mongo.Collection
 	var field string
 	switch subjectType {
@@ -266,7 +268,7 @@ func (r *repository) subjectOrgUnit(ctx context.Context, subjectType, subjectID 
 	case domain.QCSubjectProcessingBatch:
 		coll, field = r.batches, "plant_id"
 	default:
-		return "", fmt.Errorf("gate-blocked subject type %q has no org resolution", subjectType)
+		return primitive.NilObjectID, fmt.Errorf("gate-blocked subject type %q has no org resolution", subjectType)
 	}
 
 	var doc bson.M
@@ -274,11 +276,11 @@ func (r *repository) subjectOrgUnit(ctx context.Context, subjectType, subjectID 
 		options.FindOne().SetProjection(bson.D{{Key: field, Value: 1}}),
 	).Decode(&doc)
 	if err != nil {
-		return "", fmt.Errorf("resolve org of %s %s: %w", subjectType, subjectID, err)
+		return primitive.NilObjectID, fmt.Errorf("resolve org of %s %s: %w", subjectType, subjectID.Hex(), err)
 	}
-	orgUnitID, _ := doc[field].(string)
-	if orgUnitID == "" {
-		return "", fmt.Errorf("%s %s carries no %s", subjectType, subjectID, field)
+	orgUnitID, _ := doc[field].(primitive.ObjectID)
+	if orgUnitID.IsZero() {
+		return primitive.NilObjectID, fmt.Errorf("%s %s carries no %s", subjectType, subjectID.Hex(), field)
 	}
 	return orgUnitID, nil
 }

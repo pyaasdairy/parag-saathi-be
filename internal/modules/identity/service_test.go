@@ -90,6 +90,91 @@ func TestUpgradedKYCTier(t *testing.T) {
 	}
 }
 
+// TestCanApproveKYCTier pins the approver-role → approvable-tier authority
+// map that gates KYC approve/reject (blueprint §5.2). Ground staff clear the
+// field tiers, PCDF_ADMIN additionally clears HIGH, and SUPER_ADMIN clears
+// everything — but SUPER_ADMIN still passes *through* the map, it is not a
+// short-circuit.
+func TestCanApproveKYCTier(t *testing.T) {
+	cases := []struct {
+		name         string
+		approverRole string
+		tier         string
+		want         bool
+	}{
+		// ORGANISING_MANAGER: field tiers only, never HIGH/HIGHEST.
+		{"om approves farmer", domain.RoleOrganisingManager, domain.KYCTierFarmer, true},
+		{"om approves standard", domain.RoleOrganisingManager, domain.KYCTierStandard, true},
+		{"om approves rider", domain.RoleOrganisingManager, domain.KYCTierRider, true},
+		{"om cannot approve high", domain.RoleOrganisingManager, domain.KYCTierHigh, false},
+		{"om cannot approve highest", domain.RoleOrganisingManager, domain.KYCTierHighest, false},
+
+		// DISTRICT_VERIFIER: same field-tier ceiling as ground staff.
+		{"district verifier approves rider", domain.RoleDistrictVerifier, domain.KYCTierRider, true},
+		{"district verifier cannot approve high", domain.RoleDistrictVerifier, domain.KYCTierHigh, false},
+
+		// PCDF_ADMIN: field tiers + HIGH, never HIGHEST.
+		{"pcdf admin approves high", domain.RolePCDFAdmin, domain.KYCTierHigh, true},
+		{"pcdf admin approves farmer", domain.RolePCDFAdmin, domain.KYCTierFarmer, true},
+		{"pcdf admin cannot approve highest", domain.RolePCDFAdmin, domain.KYCTierHighest, false},
+
+		// SUPER_ADMIN: everything, but still via the map.
+		{"super admin approves high", domain.RoleSuperAdmin, domain.KYCTierHigh, true},
+		{"super admin approves highest", domain.RoleSuperAdmin, domain.KYCTierHighest, true},
+		{"super admin approves service", domain.RoleSuperAdmin, domain.KYCTierService, true},
+
+		// Roles outside the reviewer set approve nothing (defence in depth —
+		// the RBAC middleware already blocks them at the route).
+		{"farmer approves nothing", domain.RoleFarmer, domain.KYCTierFarmer, false},
+		{"union president approves nothing", domain.RoleUnionPresident, domain.KYCTierFarmer, false},
+
+		// An unknown tier is never approvable, even for SUPER_ADMIN.
+		{"unknown tier never approvable", domain.RoleSuperAdmin, "GALAXY", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := domain.CanApproveKYCTier(tc.approverRole, tc.tier); got != tc.want {
+				t.Errorf("CanApproveKYCTier(%q, %q) = %v, want %v", tc.approverRole, tc.tier, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestApproveTierUpgrade pins the PENDING→VERIFIED party-tier upgrade rule the
+// approve flow applies: the party's tier only ever moves UPWARD to the
+// approved requested tier, and parallel tier-1 proofs (FARMER vs STANDARD)
+// never overwrite one another. This mirrors the newTier computation in
+// service.approveKYC.
+func TestApproveTierUpgrade(t *testing.T) {
+	cases := []struct {
+		name        string
+		currentTier string // party.kyc_tier before approval
+		approved    string // record.requested_tier being approved
+		wantTier    string // party.kyc_tier after approval
+	}{
+		{"minimal party approved for farmer upgrades", domain.KYCTierMinimal, domain.KYCTierFarmer, domain.KYCTierFarmer},
+		{"minimal party approved for high upgrades", domain.KYCTierMinimal, domain.KYCTierHigh, domain.KYCTierHigh},
+		{"farmer party approved for rider upgrades", domain.KYCTierFarmer, domain.KYCTierRider, domain.KYCTierRider},
+		{"farmer re-approved for farmer stays", domain.KYCTierFarmer, domain.KYCTierFarmer, domain.KYCTierFarmer},
+		{"farmer approved for standard stays (parallel)", domain.KYCTierFarmer, domain.KYCTierStandard, domain.KYCTierFarmer},
+		{"high party approved for standard never downgrades", domain.KYCTierHigh, domain.KYCTierStandard, domain.KYCTierHigh},
+		{"rider party approved for farmer never downgrades", domain.KYCTierRider, domain.KYCTierFarmer, domain.KYCTierRider},
+		{"highest party approved for high never downgrades", domain.KYCTierHighest, domain.KYCTierHigh, domain.KYCTierHighest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := upgradedKYCTier(tc.currentTier, tc.approved)
+			if got != tc.wantTier {
+				t.Errorf("upgradedKYCTier(%q, %q) = %q, want %q", tc.currentTier, tc.approved, got, tc.wantTier)
+			}
+			// Upgrade is upward-only: the result must satisfy the prior tier.
+			if !domain.KYCTierSatisfies(got, tc.currentTier) {
+				t.Errorf("post-approval tier %q must still satisfy prior tier %q", got, tc.currentTier)
+			}
+		})
+	}
+}
+
 // TestMaskAccount pins the bank-account masking used before persistence.
 func TestMaskAccount(t *testing.T) {
 	cases := []struct {

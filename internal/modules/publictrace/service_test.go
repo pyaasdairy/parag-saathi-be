@@ -9,11 +9,15 @@ import (
 
 // TestVerifyQRToken covers the QR integrity gate: a token is
 // "base64url(payload)" + "." + hex HMAC-SHA256(secret, decoded payload) —
-// the exact format the plant module's signQRToken mints — and any bit flip
+// the exact format the plant module's signQRToken mints, where the payload
+// embeds the product lot's ObjectID as productLotID.Hex() — and any bit flip
 // in either part must fail verification.
 func TestVerifyQRToken(t *testing.T) {
 	const secret = "test-qr-signing-secret"
-	const payload = "PRG-7F3K9QX2|lot-42|1751700000"
+	// Product lot ObjectIDs rendered as hex, exactly as issuance signs them.
+	const lotHex = "665f1a2b3c4d5e6f70819202"
+	const otherLotHex = "665f1a2b3c4d5e6f70819203"
+	const payload = "PRG-7F3K9QX2|" + lotHex + "|1751700000"
 	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	validToken := b64(payload) + "." + auth.HMACHash(secret, payload)
 
@@ -29,7 +33,7 @@ func TestVerifyQRToken(t *testing.T) {
 		},
 		{
 			name:  "tampered payload fails",
-			token: b64("PRG-7F3K9QX2|lot-43|1751700000") + "." + auth.HMACHash(secret, payload),
+			token: b64("PRG-7F3K9QX2|"+otherLotHex+"|1751700000") + "." + auth.HMACHash(secret, payload),
 			want:  false,
 		},
 		{

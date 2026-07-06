@@ -6,6 +6,8 @@
 package orgs
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -15,8 +17,9 @@ import (
 
 // Register mounts the orgs module under /orgs on the /api/v1 subtree.
 func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "orgs"))
 	repo := newRepository(d.DB)
-	svc := newService(repo, d.Orgs)
+	svc := newService(repo, d.Orgs, log)
 	h := newHandler(svc)
 
 	r.Route("/orgs", func(r chi.Router) {

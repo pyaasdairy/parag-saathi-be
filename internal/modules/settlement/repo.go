@@ -3,9 +3,11 @@ package settlement
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -47,7 +49,7 @@ func newRepo(db *mongo.Database) *repo {
 // ---- invoices (read + settlement-lifecycle status flips only) ----
 
 // issuedInvoices returns the day's ISSUED invoices for a DCS.
-func (rp *repo) issuedInvoices(ctx context.Context, dcsID, date string) ([]domain.Invoice, error) {
+func (rp *repo) issuedInvoices(ctx context.Context, dcsID primitive.ObjectID, date string) ([]domain.Invoice, error) {
 	cur, err := rp.invoices.Find(ctx,
 		bson.D{
 			{Key: "dcs_id", Value: dcsID},
@@ -57,11 +59,11 @@ func (rp *repo) issuedInvoices(ctx context.Context, dcsID, date string) ([]domai
 		options.Find().SetSort(bson.D{{Key: "invoice_number", Value: 1}}).SetLimit(internalFetchCap),
 	)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find issued invoices: %w", err))
 	}
 	var out []domain.Invoice
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("decode issued invoices: %w", err))
 	}
 	return out, nil
 }
@@ -69,7 +71,7 @@ func (rp *repo) issuedInvoices(ctx context.Context, dcsID, date string) ([]domai
 // claimInvoices atomically flips still-ISSUED invoices to SETTLEMENT_PENDING
 // under the given batch. The status guard makes concurrent initiations safe
 // without transactions: each invoice is claimed by exactly one batch.
-func (rp *repo) claimInvoices(ctx context.Context, invoiceIDs []string, batchID string) (int64, error) {
+func (rp *repo) claimInvoices(ctx context.Context, invoiceIDs []primitive.ObjectID, batchID primitive.ObjectID) (int64, error) {
 	res, err := rp.invoices.UpdateMany(ctx,
 		bson.D{
 			{Key: "_id", Value: bson.D{{Key: "$in", Value: invoiceIDs}}},
@@ -81,30 +83,30 @@ func (rp *repo) claimInvoices(ctx context.Context, invoiceIDs []string, batchID 
 		}}},
 	)
 	if err != nil {
-		return 0, httpx.Internal(err)
+		return 0, httpx.Internal(fmt.Errorf("claim invoices for settlement: %w", err))
 	}
 	return res.ModifiedCount, nil
 }
 
 // invoicesByBatch returns every invoice claimed by a settlement batch.
-func (rp *repo) invoicesByBatch(ctx context.Context, batchID string) ([]domain.Invoice, error) {
+func (rp *repo) invoicesByBatch(ctx context.Context, batchID primitive.ObjectID) ([]domain.Invoice, error) {
 	cur, err := rp.invoices.Find(ctx,
 		bson.D{{Key: "settlement_batch_id", Value: batchID}},
 		options.Find().SetSort(bson.D{{Key: "invoice_number", Value: 1}}).SetLimit(internalFetchCap),
 	)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find invoices by batch: %w", err))
 	}
 	var out []domain.Invoice
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("decode invoices by batch: %w", err))
 	}
 	return out, nil
 }
 
 // releaseInvoices puts a rejected batch's invoices back to ISSUED and clears
 // the batch linkage, so a fresh initiation can pick them up.
-func (rp *repo) releaseInvoices(ctx context.Context, batchID string) error {
+func (rp *repo) releaseInvoices(ctx context.Context, batchID primitive.ObjectID) error {
 	_, err := rp.invoices.UpdateMany(ctx,
 		bson.D{
 			{Key: "settlement_batch_id", Value: batchID},
@@ -116,19 +118,19 @@ func (rp *repo) releaseInvoices(ctx context.Context, batchID string) error {
 		},
 	)
 	if err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("release settlement invoices: %w", err))
 	}
 	return nil
 }
 
 // markInvoicesPaid flips all of a batch's invoices to PAID after execution.
-func (rp *repo) markInvoicesPaid(ctx context.Context, batchID string) error {
+func (rp *repo) markInvoicesPaid(ctx context.Context, batchID primitive.ObjectID) error {
 	_, err := rp.invoices.UpdateMany(ctx,
 		bson.D{{Key: "settlement_batch_id", Value: batchID}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: domain.InvoiceStatusPaid}}}},
 	)
 	if err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("mark invoices paid: %w", err))
 	}
 	return nil
 }
@@ -138,20 +140,20 @@ func (rp *repo) markInvoicesPaid(ctx context.Context, batchID string) error {
 // insertBatch persists a new settlement batch.
 func (rp *repo) insertBatch(ctx context.Context, b *domain.SettlementBatch) error {
 	if _, err := rp.batches.InsertOne(ctx, b); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert settlement batch: %w", err))
 	}
 	return nil
 }
 
 // batchByID loads one settlement batch.
-func (rp *repo) batchByID(ctx context.Context, id string) (*domain.SettlementBatch, error) {
+func (rp *repo) batchByID(ctx context.Context, id primitive.ObjectID) (*domain.SettlementBatch, error) {
 	var b domain.SettlementBatch
 	err := rp.batches.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&b)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("settlement batch " + id)
+		return nil, httpx.NotFound("settlement batch " + id.Hex())
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find settlement batch: %w", err))
 	}
 	return &b, nil
 }
@@ -159,13 +161,13 @@ func (rp *repo) batchByID(ctx context.Context, id string) (*domain.SettlementBat
 // transitionBatch performs a status-guarded update (optimistic concurrency —
 // no transactions on a standalone server). Returns false when the batch was
 // not in fromStatus, i.e. another actor won the transition.
-func (rp *repo) transitionBatch(ctx context.Context, id, fromStatus string, set bson.D) (bool, error) {
+func (rp *repo) transitionBatch(ctx context.Context, id primitive.ObjectID, fromStatus string, set bson.D) (bool, error) {
 	res, err := rp.batches.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: fromStatus}},
 		bson.D{{Key: "$set", Value: set}},
 	)
 	if err != nil {
-		return false, httpx.Internal(err)
+		return false, httpx.Internal(fmt.Errorf("transition settlement batch: %w", err))
 	}
 	return res.MatchedCount > 0, nil
 }
@@ -179,7 +181,7 @@ func (rp *repo) transitionBatch(ctx context.Context, id, fromStatus string, set 
 //
 // Every claim stamps executing_at as the new lease. Returns false when no
 // claim matched — someone else holds a fresh lease or the batch is terminal.
-func (rp *repo) claimExecution(ctx context.Context, id string, now, staleBefore time.Time) (bool, error) {
+func (rp *repo) claimExecution(ctx context.Context, id primitive.ObjectID, now, staleBefore time.Time) (bool, error) {
 	for _, from := range []string{domain.SettlementStatusApproved, domain.SettlementStatusFailed} {
 		ok, err := rp.transitionBatch(ctx, id, from, bson.D{
 			{Key: "status", Value: domain.SettlementStatusExecuting},
@@ -198,14 +200,14 @@ func (rp *repo) claimExecution(ctx context.Context, id string, now, staleBefore 
 		bson.D{{Key: "$set", Value: bson.D{{Key: "executing_at", Value: now}}}},
 	)
 	if err != nil {
-		return false, httpx.Internal(err)
+		return false, httpx.Internal(fmt.Errorf("claim settlement execution: %w", err))
 	}
 	return res.MatchedCount > 0, nil
 }
 
 // markExecutionFailed best-effort flips EXECUTING→FAILED with the reason so a
 // mid-execution error leaves a re-executable batch, never a stuck one.
-func (rp *repo) markExecutionFailed(ctx context.Context, id, reason string) error {
+func (rp *repo) markExecutionFailed(ctx context.Context, id primitive.ObjectID, reason string) error {
 	_, err := rp.batches.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: domain.SettlementStatusExecuting}},
 		bson.D{{Key: "$set", Value: bson.D{
@@ -214,19 +216,19 @@ func (rp *repo) markExecutionFailed(ctx context.Context, id, reason string) erro
 		}}},
 	)
 	if err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("mark settlement execution failed: %w", err))
 	}
 	return nil
 }
 
 // setBatchProvenanceSeq stamps the batch with its latest ledger sequence.
-func (rp *repo) setBatchProvenanceSeq(ctx context.Context, id string, seq int64) error {
+func (rp *repo) setBatchProvenanceSeq(ctx context.Context, id primitive.ObjectID, seq int64) error {
 	_, err := rp.batches.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "provenance_seq", Value: seq}}}},
 	)
 	if err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("set settlement provenance seq: %w", err))
 	}
 	return nil
 }
@@ -235,18 +237,18 @@ func (rp *repo) setBatchProvenanceSeq(ctx context.Context, id string, seq int64)
 func (rp *repo) listBatches(ctx context.Context, filter bson.D, page httpx.Page) ([]domain.SettlementBatch, int64, error) {
 	total, err := rp.batches.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count settlement batches: %w", err))
 	}
 	cur, err := rp.batches.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "date", Value: -1}, {Key: "created_at", Value: -1}}).
 		SetSkip(page.Offset).SetLimit(page.Limit),
 	)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("find settlement batches: %w", err))
 	}
 	var out []domain.SettlementBatch
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode settlement batches: %w", err))
 	}
 	return out, total, nil
 }
@@ -261,57 +263,57 @@ func (rp *repo) insertPayout(ctx context.Context, p *domain.PayoutInstruction) (
 		if mongo.IsDuplicateKeyError(err) {
 			return true, nil
 		}
-		return false, httpx.Internal(err)
+		return false, httpx.Internal(fmt.Errorf("insert payout: %w", err))
 	}
 	return false, nil
 }
 
 // payoutByInvoice fetches the payout already recorded for an invoice.
-func (rp *repo) payoutByInvoice(ctx context.Context, invoiceID string) (*domain.PayoutInstruction, error) {
+func (rp *repo) payoutByInvoice(ctx context.Context, invoiceID primitive.ObjectID) (*domain.PayoutInstruction, error) {
 	var p domain.PayoutInstruction
 	err := rp.payouts.FindOne(ctx, bson.D{{Key: "invoice_id", Value: invoiceID}}).Decode(&p)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("payout for invoice " + invoiceID)
+		return nil, httpx.NotFound("payout for invoice " + invoiceID.Hex())
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find payout by invoice: %w", err))
 	}
 	return &p, nil
 }
 
 // payoutsByBatch returns a batch's payout instructions.
-func (rp *repo) payoutsByBatch(ctx context.Context, batchID string) ([]domain.PayoutInstruction, error) {
+func (rp *repo) payoutsByBatch(ctx context.Context, batchID primitive.ObjectID) ([]domain.PayoutInstruction, error) {
 	cur, err := rp.payouts.Find(ctx,
 		bson.D{{Key: "settlement_batch_id", Value: batchID}},
 		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetLimit(internalFetchCap),
 	)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find payouts by batch: %w", err))
 	}
 	var out []domain.PayoutInstruction
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("decode payouts by batch: %w", err))
 	}
 	return out, nil
 }
 
 // payoutsByFarmer pages one farmer's payment history, newest first.
-func (rp *repo) payoutsByFarmer(ctx context.Context, farmerPartyID string, page httpx.Page) ([]domain.PayoutInstruction, int64, error) {
+func (rp *repo) payoutsByFarmer(ctx context.Context, farmerPartyID primitive.ObjectID, page httpx.Page) ([]domain.PayoutInstruction, int64, error) {
 	filter := bson.D{{Key: "farmer_party_id", Value: farmerPartyID}}
 	total, err := rp.payouts.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count payouts by farmer: %w", err))
 	}
 	cur, err := rp.payouts.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: -1}}).
 		SetSkip(page.Offset).SetLimit(page.Limit),
 	)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("find payouts by farmer: %w", err))
 	}
 	var out []domain.PayoutInstruction
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode payouts by farmer: %w", err))
 	}
 	return out, total, nil
 }
@@ -319,12 +321,15 @@ func (rp *repo) payoutsByFarmer(ctx context.Context, farmerPartyID string, page 
 // ---- lookups in adjacent collections (read-only, per module spec) ----
 
 // latestBankMasked returns the masked bank account from the farmer's most
-// recent KYC record carrying one, or "" when none exists.
-func (rp *repo) latestBankMasked(ctx context.Context, partyID string) (string, error) {
+// recent VERIFIED KYC record carrying one, or "" when none exists. Payouts
+// must only ever be issued against a reviewer-approved bank account, so
+// PENDING/REJECTED (self-submitted, unreviewed) evidence is ignored.
+func (rp *repo) latestBankMasked(ctx context.Context, partyID primitive.ObjectID) (string, error) {
 	var rec domain.KYCRecord
 	err := rp.kyc.FindOne(ctx,
 		bson.D{
 			{Key: "party_id", Value: partyID},
+			{Key: "status", Value: domain.KYCStatusVerified},
 			{Key: "bank_account_masked", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}},
 		},
 		options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}}),
@@ -333,14 +338,14 @@ func (rp *repo) latestBankMasked(ctx context.Context, partyID string) (string, e
 		return "", nil
 	}
 	if err != nil {
-		return "", httpx.Internal(err)
+		return "", httpx.Internal(fmt.Errorf("find latest bank masked: %w", err))
 	}
 	return rec.BankAccountMasked, nil
 }
 
 // farmerDCSIDs returns the org units where the party holds an ACTIVE FARMER
 // assignment — the scope anchors for staff reads of the farmer's financials.
-func (rp *repo) farmerDCSIDs(ctx context.Context, farmerPartyID string) ([]string, error) {
+func (rp *repo) farmerDCSIDs(ctx context.Context, farmerPartyID primitive.ObjectID) ([]primitive.ObjectID, error) {
 	cur, err := rp.assignments.Find(ctx,
 		bson.D{
 			{Key: "party_id", Value: farmerPartyID},
@@ -350,17 +355,17 @@ func (rp *repo) farmerDCSIDs(ctx context.Context, farmerPartyID string) ([]strin
 		options.Find().SetProjection(bson.D{{Key: "org_unit_id", Value: 1}}).SetLimit(50),
 	)
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find farmer DCS assignments: %w", err))
 	}
 	var docs []struct {
-		OrgUnitID string `bson:"org_unit_id"`
+		OrgUnitID primitive.ObjectID `bson:"org_unit_id"`
 	}
 	if err := cur.All(ctx, &docs); err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("decode farmer DCS assignments: %w", err))
 	}
-	ids := make([]string, 0, len(docs))
+	ids := make([]primitive.ObjectID, 0, len(docs))
 	for _, d := range docs {
-		if d.OrgUnitID != "" {
+		if !d.OrgUnitID.IsZero() {
 			ids = append(ids, d.OrgUnitID)
 		}
 	}
@@ -368,14 +373,14 @@ func (rp *repo) farmerDCSIDs(ctx context.Context, farmerPartyID string) ([]strin
 }
 
 // partyPhone resolves a party's phone number (for the payout SMS event).
-func (rp *repo) partyPhone(ctx context.Context, partyID string) (string, error) {
+func (rp *repo) partyPhone(ctx context.Context, partyID primitive.ObjectID) (string, error) {
 	var p domain.Party
 	err := rp.parties.FindOne(ctx, bson.D{{Key: "_id", Value: partyID}}).Decode(&p)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return "", httpx.NotFound("party " + partyID)
+		return "", httpx.NotFound("party " + partyID.Hex())
 	}
 	if err != nil {
-		return "", httpx.Internal(err)
+		return "", httpx.Internal(fmt.Errorf("find party phone: %w", err))
 	}
 	return p.Phone, nil
 }
@@ -385,27 +390,27 @@ func (rp *repo) partyPhone(ctx context.Context, partyID string) (string, error) 
 // insertDBT persists a new subsidy request.
 func (rp *repo) insertDBT(ctx context.Context, r *domain.DBTRequest) error {
 	if _, err := rp.dbt.InsertOne(ctx, r); err != nil {
-		return httpx.Internal(err)
+		return httpx.Internal(fmt.Errorf("insert dbt request: %w", err))
 	}
 	return nil
 }
 
 // dbtByID loads one DBT request.
-func (rp *repo) dbtByID(ctx context.Context, id string) (*domain.DBTRequest, error) {
+func (rp *repo) dbtByID(ctx context.Context, id primitive.ObjectID) (*domain.DBTRequest, error) {
 	var d domain.DBTRequest
 	err := rp.dbt.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&d)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, httpx.NotFound("dbt request " + id)
+		return nil, httpx.NotFound("dbt request " + id.Hex())
 	}
 	if err != nil {
-		return nil, httpx.Internal(err)
+		return nil, httpx.Internal(fmt.Errorf("find dbt request: %w", err))
 	}
 	return &d, nil
 }
 
 // transitionDBT performs a status-guarded DBT update; false = lost the race
 // or the request already left fromStatus.
-func (rp *repo) transitionDBT(ctx context.Context, id, fromStatus, toStatus string, creditedAt *time.Time) (bool, error) {
+func (rp *repo) transitionDBT(ctx context.Context, id primitive.ObjectID, fromStatus, toStatus string, creditedAt *time.Time) (bool, error) {
 	set := bson.D{{Key: "status", Value: toStatus}}
 	if creditedAt != nil {
 		set = append(set, bson.E{Key: "credited_at", Value: creditedAt})
@@ -415,7 +420,7 @@ func (rp *repo) transitionDBT(ctx context.Context, id, fromStatus, toStatus stri
 		bson.D{{Key: "$set", Value: set}},
 	)
 	if err != nil {
-		return false, httpx.Internal(err)
+		return false, httpx.Internal(fmt.Errorf("transition dbt request: %w", err))
 	}
 	return res.MatchedCount > 0, nil
 }
@@ -424,18 +429,18 @@ func (rp *repo) transitionDBT(ctx context.Context, id, fromStatus, toStatus stri
 func (rp *repo) listDBT(ctx context.Context, filter bson.D, page httpx.Page) ([]domain.DBTRequest, int64, error) {
 	total, err := rp.dbt.CountDocuments(ctx, filter)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("count dbt requests: %w", err))
 	}
 	cur, err := rp.dbt.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: -1}}).
 		SetSkip(page.Offset).SetLimit(page.Limit),
 	)
 	if err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("find dbt requests: %w", err))
 	}
 	var out []domain.DBTRequest
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, 0, httpx.Internal(err)
+		return nil, 0, httpx.Internal(fmt.Errorf("decode dbt requests: %w", err))
 	}
 	return out, total, nil
 }

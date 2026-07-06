@@ -3,8 +3,6 @@ package orgs
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 )
@@ -46,12 +44,17 @@ func (h *handler) update(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
 		return
 	}
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	var req UpdateOrgRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	org, err := h.svc.Update(r.Context(), actor, chi.URLParam(r, "id"), req)
+	org, err := h.svc.Update(r.Context(), actor, id, req)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -61,7 +64,12 @@ func (h *handler) update(w http.ResponseWriter, r *http.Request) {
 
 // get handles GET /orgs/{id}.
 func (h *handler) get(w http.ResponseWriter, r *http.Request) {
-	org, err := h.svc.Get(r.Context(), chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	org, err := h.svc.Get(r.Context(), id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -71,8 +79,13 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 
 // children handles GET /orgs/{id}/children.
 func (h *handler) children(w http.ResponseWriter, r *http.Request) {
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	page := httpx.ParsePage(r)
-	units, total, err := h.svc.Children(r.Context(), chi.URLParam(r, "id"), page)
+	units, total, err := h.svc.Children(r.Context(), id, page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -87,7 +100,12 @@ func (h *handler) tree(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
 		return
 	}
-	nodes, truncated, err := h.svc.Tree(r.Context(), actor, chi.URLParam(r, "id"))
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	nodes, truncated, err := h.svc.Tree(r.Context(), actor, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -95,11 +113,12 @@ func (h *handler) tree(w http.ResponseWriter, r *http.Request) {
 	httpx.JSONMeta(w, http.StatusOK, nodes, TreeMeta{Count: len(nodes), Truncated: truncated})
 }
 
-// list handles GET /orgs?type=&district=.
+// list handles GET /orgs?type=&district=&code= (code is the unique business
+// key, exact match — e.g. ?code=DCS-01842 resolves a seeded org's ObjectID).
 func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ParsePage(r)
 	q := r.URL.Query()
-	units, total, err := h.svc.List(r.Context(), q.Get("type"), q.Get("district"), page)
+	units, total, err := h.svc.List(r.Context(), q.Get("type"), q.Get("district"), q.Get("code"), page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -114,8 +133,13 @@ func (h *handler) members(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
 		return
 	}
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	page := httpx.ParsePage(r)
-	members, total, err := h.svc.Members(r.Context(), actor, chi.URLParam(r, "id"), page)
+	members, total, err := h.svc.Members(r.Context(), actor, id, page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
