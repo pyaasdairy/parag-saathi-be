@@ -53,20 +53,24 @@ const (
 // ProcessingBatch pools BMC lots at a plant into one production run.
 // BatchNumber is the human-readable unique business key printed on packs.
 type ProcessingBatch struct {
-	ID            primitive.ObjectID   `bson:"_id,omitempty" json:"id"`
-	PlantID       primitive.ObjectID   `bson:"plant_id"      json:"plant_id"`
-	BatchNumber   string               `bson:"batch_number"  json:"batch_number"` // unique business key
-	BMCLotIDs     []primitive.ObjectID `bson:"bmc_lot_ids"   json:"bmc_lot_ids"`
-	ProductType   string               `bson:"product_type"  json:"product_type"` // TONED_MILK, FULL_CREAM, GHEE...
-	InputLitres   float64              `bson:"input_litres"  json:"input_litres"`
-	Status        string               `bson:"status"        json:"status"`
-	QCResultIDs   []primitive.ObjectID `bson:"qc_result_ids,omitempty" json:"qc_result_ids,omitempty"`
-	BlockReason   string               `bson:"block_reason,omitempty"  json:"block_reason,omitempty"`
-	StartedAt     time.Time            `bson:"started_at"    json:"started_at"`
-	CompletedAt   *time.Time           `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
-	CreatedBy     primitive.ObjectID   `bson:"created_by"    json:"created_by"`
-	ProvenanceSeq int64                `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
-	CreatedAt     time.Time            `bson:"created_at"    json:"created_at"`
+	ID          primitive.ObjectID   `bson:"_id,omitempty" json:"id"`
+	PlantID     primitive.ObjectID   `bson:"plant_id"      json:"plant_id"`
+	BatchNumber string               `bson:"batch_number"  json:"batch_number"` // unique business key
+	BMCLotIDs   []primitive.ObjectID `bson:"bmc_lot_ids"   json:"bmc_lot_ids"`
+	// ContributingDCSIDs is the denormalised SET of societies whose milk fed
+	// this batch (§7.4 honest pooling) — materialised at batch creation so the
+	// consumer trace resolves "made from N samitis" without walking the graph.
+	ContributingDCSIDs []primitive.ObjectID `bson:"contributing_dcs_ids,omitempty" json:"contributing_dcs_ids,omitempty"`
+	ProductType        string               `bson:"product_type"  json:"product_type"` // TONED_MILK, FULL_CREAM, GHEE...
+	InputLitres        float64              `bson:"input_litres"  json:"input_litres"`
+	Status             string               `bson:"status"        json:"status"`
+	QCResultIDs        []primitive.ObjectID `bson:"qc_result_ids,omitempty" json:"qc_result_ids,omitempty"`
+	BlockReason        string               `bson:"block_reason,omitempty"  json:"block_reason,omitempty"`
+	StartedAt          time.Time            `bson:"started_at"    json:"started_at"`
+	CompletedAt        *time.Time           `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	CreatedBy          primitive.ObjectID   `bson:"created_by"    json:"created_by"`
+	ProvenanceSeq      int64                `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
+	CreatedAt          time.Time            `bson:"created_at"    json:"created_at"`
 }
 
 // Product lot statuses.

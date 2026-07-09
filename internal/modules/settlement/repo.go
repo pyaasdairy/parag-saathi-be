@@ -135,6 +135,23 @@ func (rp *repo) markInvoicesPaid(ctx context.Context, batchID primitive.ObjectID
 	return nil
 }
 
+// markInvoicesPaidByIDs marks ONLY the given invoices PAID — used when some
+// payouts in a batch failed (no verified bank), so an unpaid farmer's invoice
+// is never falsely marked PAID.
+func (rp *repo) markInvoicesPaidByIDs(ctx context.Context, ids []primitive.ObjectID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := rp.invoices.UpdateMany(ctx,
+		bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: domain.InvoiceStatusPaid}}}},
+	)
+	if err != nil {
+		return httpx.Internal(fmt.Errorf("mark invoices paid by ids: %w", err))
+	}
+	return nil
+}
+
 // ---- settlement batches ----
 
 // insertBatch persists a new settlement batch.

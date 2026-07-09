@@ -126,6 +126,14 @@ func missingMandatoryTests(stage string, tests []QCTestInput) []string {
 // chains the provenance events. This is the only write path that moves a
 // subject out of QC_PENDING.
 func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req RecordQCResultRequest) (*domain.QCResult, error) {
+	// Canonicalise test names FIRST — before any gate guard runs — so an alias
+	// like "AFM1" resolves to "AFLATOXIN_M1" and can never dodge the aflatoxin
+	// gate (safety-critical §8.3). All three decision points below then key on
+	// the canonical name.
+	for i := range req.Tests {
+		req.Tests[i].Name = domain.NormalizeTestName(req.Tests[i].Name)
+	}
+
 	// Stage×role pairing — RequireRoles admits both analyst roles, the exact
 	// pairing is enforced here.
 	requiredRole, ok := requiredRoleForStage(req.Stage)
@@ -507,6 +515,241 @@ func toDomainTests(in []QCTestInput) []domain.QCTest {
 		out = append(out, domain.QCTest{Name: t.Name, Value: t.Value, Unit: t.Unit})
 	}
 	return out
+}
+
+// qcQueue lists every gate-eligible subject currently awaiting a verdict (BMC
+// lots at BMC_RAPID, processing batches at PLANT_LAB), each annotated with its
+// stage's mandatory tests split into recorded vs still-pending. The mandatory
+// set is derived from the SAME stage logic as missingMandatoryTests, so the
+// queue can never disagree with the gate about what a PASS requires.
+func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
+	lots, err := s.repo.listBMCLotsByStatus(ctx, domain.BMCLotStatusQCPending)
+	if err != nil {
+		s.log.ErrorContext(ctx, "qc queue: list bmc lots failed", slog.Any("err", err))
+		return nil, err
+	}
+	batches, err := s.repo.listBatchesByStatus(ctx, domain.BatchStatusQCPending)
+	if err != nil {
+		s.log.ErrorContext(ctx, "qc queue: list batches failed", slog.Any("err", err))
+		return nil, err
+	}
+
+	items := make([]QCQueueItem, 0, len(lots)+len(batches))
+	for _, lot := range lots {
+		item, err := s.queueItem(ctx, domain.QCSubjectBMCLot, lot.ID, domain.QCStageBMCRapid,
+			lot.Date+" "+lot.Shift, lot.BMCID, lot.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	for _, batch := range batches {
+		item, err := s.queueItem(ctx, domain.QCSubjectProcessingBatch, batch.ID, domain.QCStagePlantLab,
+			batch.BatchNumber, batch.PlantID, batch.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+
+	return &QCQueueResponse{Items: items, Total: len(items)}, nil
+}
+
+// queueItem builds one queue row: it derives the stage's mandatory tests and
+// splits them against the parameters already on file for the subject.
+func (s *service) queueItem(ctx context.Context, subjectType string, subjectID primitive.ObjectID, stage, reference string, orgUnitID primitive.ObjectID, createdAt time.Time) (QCQueueItem, error) {
+	recordedSet, err := s.repo.recordedTestNames(ctx, subjectType, subjectID)
+	if err != nil {
+		s.log.ErrorContext(ctx, "qc queue: recorded tests lookup failed",
+			slog.String("subject_type", subjectType),
+			slog.String("subject_id", subjectID.Hex()),
+			slog.Any("err", err))
+		return QCQueueItem{}, err
+	}
+	mandatory := mandatoryTestsForStage(stage)
+	recorded := make([]string, 0, len(mandatory))
+	pending := make([]string, 0, len(mandatory))
+	for _, name := range mandatory {
+		if recordedSet[name] {
+			recorded = append(recorded, name)
+		} else {
+			pending = append(pending, name)
+		}
+	}
+	return QCQueueItem{
+		SubjectType:    subjectType,
+		SubjectID:      subjectID,
+		Stage:          stage,
+		Reference:      reference,
+		OrgUnitID:      orgUnitID,
+		MandatoryTests: mandatory,
+		RecordedTests:  recorded,
+		PendingTests:   pending,
+		CreatedAt:      createdAt,
+	}, nil
+}
+
+// issueCertificate mints a first-class QC certificate for a processing batch
+// whose PLANT_LAB safety gate has already PASSED. The batch must be PASSED or
+// COMPLETED — issuing for a CREATED/QC_PENDING/BLOCKED batch is a 409, because
+// a certificate must never assert a verdict the gate has not reached. The
+// certificate rosters the batch's recorded QC results and carries the plant's
+// FSSAI licence for independent verification.
+func (s *service) issueCertificate(ctx context.Context, actor auth.Actor, batchID primitive.ObjectID) (*domain.QCCertificate, error) {
+	issuerID, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := s.repo.findBatch(ctx, batchID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.deps.Orgs.RequireInScope(ctx, actor, batch.PlantID); err != nil {
+		s.log.WarnContext(ctx, "qc certificate scope denied",
+			slog.String("batch_id", batchID.Hex()),
+			slog.String("plant_id", batch.PlantID.Hex()),
+			slog.String("actor_party_id", actor.PartyID),
+			slog.Any("err", err))
+		return nil, err
+	}
+	if batch.Status != domain.BatchStatusPassed && batch.Status != domain.BatchStatusCompleted {
+		s.log.WarnContext(ctx, "qc certificate rejected: batch not passed",
+			slog.String("batch_id", batchID.Hex()),
+			slog.String("status", batch.Status),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Conflict("BATCH_NOT_PASSED",
+			"batch is in status "+batch.Status+" — a certificate can only be issued for a PASSED or COMPLETED batch")
+	}
+
+	// FSSAI licence is best-effort enrichment: resolve the plant org unit but
+	// never fail issuance over the directory lookup. The OrgUnit model carries
+	// no licence field today, so this resolves to "" until one is populated.
+	fssaiLicNo := ""
+	if org, oerr := s.deps.Orgs.Get(ctx, batch.PlantID); oerr == nil && org != nil {
+		fssaiLicNo = plantFSSAILicNo(org)
+	}
+
+	seq, err := s.repo.nextCertificateSeq(ctx, "BATCH_CERT")
+	if err != nil {
+		s.log.ErrorContext(ctx, "qc certificate: seq failed",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", err))
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	cert := &domain.QCCertificate{
+		ID:                primitive.NewObjectID(),
+		BatchID:           batchID,
+		CertificateNumber: fmt.Sprintf("QCC-%06d", seq),
+		TestResultIDs:     batch.QCResultIDs,
+		FSSAILicNo:        fssaiLicNo,
+		IssuedByPartyID:   issuerID,
+		IssuedAt:          now,
+	}
+
+	// Detach from the request context: evidence (certificate doc) then
+	// provenance must complete even if the client disconnects mid-write.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+
+	if err := s.repo.insertCertificate(wctx, cert); err != nil {
+		var appErr *httpx.AppError
+		if !errors.As(err, &appErr) || appErr.Status != http.StatusConflict {
+			s.log.ErrorContext(ctx, "qc certificate: insert failed",
+				slog.String("batch_id", batchID.Hex()), slog.Any("err", err))
+		}
+		return nil, err
+	}
+
+	if _, err := s.deps.Ledger.Append(wctx, provenance.AppendInput{
+		Type:       "qc.certificate_issued",
+		EntityType: "QC_CERTIFICATE",
+		EntityID:   cert.ID.Hex(),
+		Refs: []provenance.Ref{
+			{EntityType: domain.EntityBatch, EntityID: batchID.Hex(), Relation: "certifies"},
+		},
+		Actor:     provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
+		OrgUnitID: batch.PlantID.Hex(),
+		Payload: map[string]any{
+			"certificate_number": cert.CertificateNumber,
+			"batch_number":       batch.BatchNumber,
+			"test_result_count":  len(cert.TestResultIDs),
+		},
+	}); err != nil {
+		s.log.ErrorContext(ctx, "qc certificate: append provenance failed",
+			slog.String("batch_id", batchID.Hex()),
+			slog.String("certificate_id", cert.ID.Hex()),
+			slog.Any("err", err))
+		return nil, httpx.Internal(err)
+	}
+
+	s.log.InfoContext(ctx, "qc certificate issued",
+		slog.String("certificate_id", cert.ID.Hex()),
+		slog.String("certificate_number", cert.CertificateNumber),
+		slog.String("batch_id", batchID.Hex()),
+		slog.String("actor_party_id", actor.PartyID))
+	return cert, nil
+}
+
+// plantFSSAILicNo extracts the plant's FSSAI licence number from the org unit.
+// The OrgUnit model has no licence field yet, so this returns "" — the seam is
+// here for when the directory carries it.
+func plantFSSAILicNo(_ *domain.OrgUnit) string {
+	return ""
+}
+
+// traceBack is the root-cause tool: for a (typically failed) batch it resolves
+// the SET of contributing societies from batch.ContributingDCSIDs (§7.4 honest
+// pooling, materialised by the plant module) enriched via the org directory,
+// plus every QC result recorded against the batch. A society whose org lookup
+// fails is still listed (Resolved=false) so the trace never silently drops a
+// contributor.
+func (s *service) traceBack(ctx context.Context, actor auth.Actor, batchID primitive.ObjectID) (*TraceBackResponse, error) {
+	batch, err := s.repo.findBatch(ctx, batchID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.deps.Orgs.RequireInScope(ctx, actor, batch.PlantID); err != nil {
+		s.log.WarnContext(ctx, "qc trace-back scope denied",
+			slog.String("batch_id", batchID.Hex()),
+			slog.String("plant_id", batch.PlantID.Hex()),
+			slog.String("actor_party_id", actor.PartyID),
+			slog.Any("err", err))
+		return nil, err
+	}
+
+	societies := make([]ContributingSociety, 0, len(batch.ContributingDCSIDs))
+	for _, dcsID := range batch.ContributingDCSIDs {
+		cs := ContributingSociety{OrgUnitID: dcsID}
+		if org, oerr := s.deps.Orgs.Get(ctx, dcsID); oerr == nil && org != nil {
+			cs.Code = org.Code
+			cs.Name = org.Name
+			cs.District = org.District
+			cs.Resolved = true
+		} else {
+			s.log.WarnContext(ctx, "qc trace-back: contributing dcs unresolved",
+				slog.String("batch_id", batchID.Hex()),
+				slog.String("dcs_id", dcsID.Hex()))
+		}
+		societies = append(societies, cs)
+	}
+
+	results, _, err := s.repo.listResults(ctx, domain.QCSubjectProcessingBatch, batchID, httpx.Page{Limit: 200, Offset: 0})
+	if err != nil {
+		s.log.ErrorContext(ctx, "qc trace-back: list results failed",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", err))
+		return nil, err
+	}
+
+	return &TraceBackResponse{
+		BatchID:               batchID,
+		BatchNumber:           batch.BatchNumber,
+		PlantID:               batch.PlantID,
+		Status:                batch.Status,
+		BlockReason:           batch.BlockReason,
+		ContributingSocieties: societies,
+		QCResults:             results,
+	}, nil
 }
 
 // limits returns the FSSAI gate constants (blueprint §8.3) as reference data.

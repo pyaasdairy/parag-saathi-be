@@ -200,7 +200,12 @@ func (h *handler) listMVUCases(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	cases, total, err := h.svc.ListMVUCases(r.Context(), actor, dcsID, r.URL.Query().Get("status"), page)
+	farmerPartyID, err := queryID(r, "farmer_party_id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	cases, total, err := h.svc.ListMVUCases(r.Context(), actor, dcsID, farmerPartyID, r.URL.Query().Get("status"), page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

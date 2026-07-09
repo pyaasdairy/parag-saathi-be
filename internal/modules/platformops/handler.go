@@ -59,6 +59,46 @@ func (h *handler) setFlag(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, flag)
 }
 
+// adminStats handles GET /admin/stats — the read-only control-tower aggregate.
+func (h *handler) adminStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.svc.adminStats(r.Context())
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, stats)
+}
+
+// listProducts handles GET /admin/products.
+func (h *handler) listProducts(w http.ResponseWriter, r *http.Request) {
+	products, err := h.svc.listProducts(r.Context())
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, products)
+}
+
+// upsertProduct handles PUT /admin/products — upsert by SKU.
+func (h *handler) upsertProduct(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	var req UpsertProductRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	product, err := h.svc.upsertProduct(r.Context(), actor, req)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, product)
+}
+
 // listAuditLogs handles GET /audit/logs?actor_party_id=&target_type=&action=&from=&to=.
 func (h *handler) listAuditLogs(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()

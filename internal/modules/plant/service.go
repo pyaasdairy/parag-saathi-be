@@ -160,9 +160,13 @@ func (s *Service) CreateBMCLot(ctx context.Context, actor auth.Actor, req Create
 		return nil, httpx.NotFound("consignment(s) " + strings.Join(missingIDs(ids, consignments), ", "))
 	}
 	var undelivered []string
+	deliveryTripIDs := make([]primitive.ObjectID, 0, len(consignments))
 	for _, c := range consignments {
 		if c.Status != domain.ConsignmentStatusDelivered {
 			undelivered = append(undelivered, c.ID.Hex())
+		}
+		if c.RouteTripID != nil {
+			deliveryTripIDs = append(deliveryTripIDs, *c.RouteTripID)
 		}
 	}
 	if len(undelivered) > 0 {
@@ -173,6 +177,32 @@ func (s *Service) CreateBMCLot(ctx context.Context, actor auth.Actor, req Create
 		return nil, httpx.Unprocessable("CONSIGNMENT_NOT_DELIVERED",
 			"only DELIVERED consignments can be pooled into a BMC lot").
 			WithDetails(map[string]any{"consignment_ids": undelivered})
+	}
+
+	// Integrity: every pooled consignment must have been physically delivered
+	// to THIS BMC (its trip's delivered_to_bmc_id == req.BMCID) — a BMC cannot
+	// pool milk that a van dropped at a different chilling centre.
+	tripBMC, err := s.repo.TripDeliveryBMCByIDs(ctx, deliveryTripIDs)
+	if err != nil {
+		return nil, s.fail(ctx, "load trip delivery destinations", err)
+	}
+	var wrongBMC []string
+	for _, c := range consignments {
+		if c.RouteTripID == nil {
+			continue // no trip recorded — cannot attribute a destination
+		}
+		if dest, ok := tripBMC[*c.RouteTripID]; !ok || dest != req.BMCID {
+			wrongBMC = append(wrongBMC, c.ID.Hex())
+		}
+	}
+	if len(wrongBMC) > 0 {
+		s.log.WarnContext(ctx, "bmc lot creation refused: consignment(s) delivered to a different BMC",
+			slog.String("bmc_id", req.BMCID.Hex()),
+			slog.String("consignment_ids", strings.Join(wrongBMC, ",")),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Unprocessable("WRONG_DELIVERY_BMC",
+			"one or more consignments were delivered to a different BMC and cannot be pooled here").
+			WithDetails(map[string]any{"consignment_ids": wrongBMC})
 	}
 
 	// Optimistic claim: flip DELIVERED→ACCEPTED stamped with the new lot ID.
@@ -436,11 +466,27 @@ func (s *Service) CreateBatch(ctx context.Context, actor auth.Actor, req CreateB
 	if len(lots) != len(ids) {
 		return nil, httpx.NotFound("BMC lot(s) " + strings.Join(missingLotIDs(ids, lots), ", "))
 	}
-	var offending []string
+	// Scope root the plant may pool from: its parent union (siblings' BMCs are
+	// legitimate), or the plant itself when it sits directly under the federation.
+	plantScopeRoot := org.ID
+	if org.ParentID != nil {
+		plantScopeRoot = *org.ParentID
+	}
+	var offending, foreign []string
 	var inputLitres float64
 	for _, lot := range lots {
 		if !canPoolBMCLot(lot.Status) {
 			offending = append(offending, lot.ID.Hex())
+			continue
+		}
+		// A plant may only pool BMC lots from within its own union subtree —
+		// never claim another union's foreign lot.
+		inScope, serr := s.orgs.InScope(ctx, plantScopeRoot, lot.BMCID)
+		if serr != nil {
+			return nil, serr
+		}
+		if !inScope {
+			foreign = append(foreign, lot.ID.Hex())
 			continue
 		}
 		inputLitres += lot.TotalQuantityLitres
@@ -453,6 +499,28 @@ func (s *Service) CreateBatch(ctx context.Context, actor auth.Actor, req CreateB
 		return nil, httpx.Unprocessable(codeSafetyGateBlocked,
 			"one or more BMC lots have not cleared the safety gate (must be PASSED and DISPATCHED)").
 			WithDetails(map[string]any{"blocked_lot_ids": offending})
+	}
+	if len(foreign) > 0 {
+		s.log.WarnContext(ctx, "batch creation refused: bmc lot(s) outside the plant's union scope",
+			slog.String("plant_id", req.PlantID.Hex()),
+			slog.String("foreign_lot_ids", strings.Join(foreign, ",")),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Forbidden("one or more BMC lots are outside this plant's organisational scope").
+			WithDetails(map[string]any{"foreign_lot_ids": foreign})
+	}
+
+	// §7.4 honest set-valued pooling: past the consignment boundary milk no
+	// longer traces to a single society, so materialise the DISTINCT set of
+	// contributing DCS at creation. Walk every poolable lot's consignments and
+	// collapse to unique dcs_id — the consumer trace reads "made from N samitis"
+	// without re-walking the graph.
+	var consignmentIDs []primitive.ObjectID
+	for _, lot := range lots {
+		consignmentIDs = append(consignmentIDs, lot.ConsignmentIDs...)
+	}
+	contributingDCSIDs, err := s.repo.DistinctDCSIDsForConsignments(ctx, dedupe(consignmentIDs))
+	if err != nil {
+		return nil, s.fail(ctx, "resolve contributing societies", err)
 	}
 
 	now := time.Now().UTC()
@@ -488,16 +556,17 @@ func (s *Service) CreateBatch(ctx context.Context, actor auth.Actor, req CreateB
 	// CREATED is a transient birth state: the plant lab must clear every
 	// batch, so it is persisted straight into QC_PENDING.
 	batch := &domain.ProcessingBatch{
-		ID:          batchID,
-		PlantID:     req.PlantID,
-		BatchNumber: batchNumber,
-		BMCLotIDs:   ids,
-		ProductType: req.ProductType,
-		InputLitres: inputLitres,
-		Status:      domain.BatchStatusQCPending,
-		StartedAt:   now,
-		CreatedBy:   actID,
-		CreatedAt:   now,
+		ID:                 batchID,
+		PlantID:            req.PlantID,
+		BatchNumber:        batchNumber,
+		BMCLotIDs:          ids,
+		ContributingDCSIDs: contributingDCSIDs,
+		ProductType:        req.ProductType,
+		InputLitres:        inputLitres,
+		Status:             domain.BatchStatusQCPending,
+		StartedAt:          now,
+		CreatedBy:          actID,
+		CreatedAt:          now,
 	}
 	if err := s.repo.InsertBatch(ctx, batch); err != nil {
 		_ = s.repo.ReleaseBMCLots(ctx, batchID)
@@ -519,6 +588,7 @@ func (s *Service) CreateBatch(ctx context.Context, actor auth.Actor, req CreateB
 		OrgUnitID:  req.PlantID.Hex(),
 		Payload: map[string]any{
 			"batch_number": batchNumber, "product_type": req.ProductType, "input_litres": inputLitres,
+			"contributing_society_count": len(contributingDCSIDs),
 		},
 	})
 	if err != nil {
@@ -534,6 +604,7 @@ func (s *Service) CreateBatch(ctx context.Context, actor auth.Actor, req CreateB
 		slog.String("plant_id", req.PlantID.Hex()),
 		slog.String("product_type", req.ProductType),
 		slog.Int("bmc_lots", len(ids)),
+		slog.Int("contributing_societies", len(contributingDCSIDs)),
 		slog.Float64("input_litres", inputLitres),
 		slog.String("actor_party_id", actor.PartyID))
 	return batch, nil

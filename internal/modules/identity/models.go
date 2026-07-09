@@ -151,11 +151,13 @@ type meResponse struct {
 type patchMeRequest struct {
 	FullName          *string `json:"full_name,omitempty"`
 	PreferredLanguage *string `json:"preferred_language,omitempty"`
+	// PublicConsent toggles the §6.7 opt-in to be named on the public QR trace.
+	PublicConsent *bool `json:"public_consent,omitempty"`
 }
 
 func (r patchMeRequest) validate() error {
-	if r.FullName == nil && r.PreferredLanguage == nil {
-		return httpx.BadRequest("EMPTY_PATCH", "provide at least one of full_name, preferred_language")
+	if r.FullName == nil && r.PreferredLanguage == nil && r.PublicConsent == nil {
+		return httpx.BadRequest("EMPTY_PATCH", "provide at least one of full_name, preferred_language, public_consent")
 	}
 	if r.FullName != nil {
 		name := strings.TrimSpace(*r.FullName)

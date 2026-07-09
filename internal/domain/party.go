@@ -23,8 +23,12 @@ type Party struct {
 	PreferredLanguage string             `bson:"preferred_language,omitempty" json:"preferred_language,omitempty"` // "hi", "en", ...
 	KYCTier           string             `bson:"kyc_tier"      json:"kyc_tier"`
 	Status            string             `bson:"status"        json:"status"`
-	CreatedAt         time.Time          `bson:"created_at"    json:"created_at"`
-	UpdatedAt         time.Time          `bson:"updated_at"    json:"updated_at"`
+	// PublicConsent is the DPDP §6.7 opt-in: when true the farmer agrees to be
+	// NAMED on the public QR trace roster; when false they are counted but never
+	// named. Defaults false (privacy-preserving).
+	PublicConsent bool      `bson:"public_consent" json:"public_consent"`
+	CreatedAt     time.Time `bson:"created_at"    json:"created_at"`
+	UpdatedAt     time.Time `bson:"updated_at"    json:"updated_at"`
 }
 
 // RoleAssignment statuses.

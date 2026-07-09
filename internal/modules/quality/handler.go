@@ -126,3 +126,57 @@ func (h *handler) getQCResult(w http.ResponseWriter, r *http.Request) {
 func (h *handler) getLimits(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, h.svc.limits())
 }
+
+// getQCQueue handles GET /quality/qc-queue.
+func (h *handler) getQCQueue(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.ActorFrom(r.Context()); !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	queue, err := h.svc.qcQueue(r.Context())
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, queue)
+}
+
+// issueCertificate handles POST /quality/batches/{id}/certificate.
+func (h *handler) issueCertificate(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	batchID, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	cert, err := h.svc.issueCertificate(r.Context(), actor, batchID)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, cert)
+}
+
+// traceBack handles GET /quality/batches/{id}/trace-back.
+func (h *handler) traceBack(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	batchID, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	trace, err := h.svc.traceBack(r.Context(), actor, batchID)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, trace)
+}

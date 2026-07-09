@@ -28,9 +28,13 @@ type repo struct {
 	batches      *mongo.Collection
 	qcResults    *mongo.Collection
 	consignments *mongo.Collection
+	milkPours    *mongo.Collection
+	parties      *mongo.Collection
 }
 
-// newRepo binds the repo to the shared database.
+// newRepo binds the repo to the shared database. milk_pours and parties are
+// read strictly read-only here — the §7.4 sourcing view needs them to resolve
+// per-society volume and the consent-gated farmer roster.
 func newRepo(db *mongo.Database) *repo {
 	return &repo{
 		batchQRs:     db.Collection(mongodb.CollBatchQRs),
@@ -38,6 +42,8 @@ func newRepo(db *mongo.Database) *repo {
 		batches:      db.Collection(mongodb.CollBatches),
 		qcResults:    db.Collection(mongodb.CollQCResults),
 		consignments: db.Collection(mongodb.CollConsignments),
+		milkPours:    db.Collection(mongodb.CollMilkPours),
+		parties:      db.Collection(mongodb.CollParties),
 	}
 }
 
@@ -136,6 +142,54 @@ func (r *repo) consignmentsByIDs(ctx context.Context, ids []primitive.ObjectID) 
 	var out []domain.DCSConsignment
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, fmt.Errorf("decode consignments by ids: %w", err)
+	}
+	return out, nil
+}
+
+// distinctFarmerPartyIDs returns the DISTINCT farmer party ids that poured
+// into the given pour set — the roster of contributing farmers behind the
+// pooled consignments. Sanctioned read-only access to milk_pours. Input is
+// bounded by the traced consignments' pour ids.
+func (r *repo) distinctFarmerPartyIDs(ctx context.Context, pourIDs []primitive.ObjectID) ([]primitive.ObjectID, error) {
+	if len(pourIDs) == 0 {
+		return nil, nil
+	}
+	raw, err := r.milkPours.Distinct(ctx, "farmer_party_id",
+		bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: pourIDs}}}},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("distinct farmer party ids: %w", err)
+	}
+	out := make([]primitive.ObjectID, 0, len(raw))
+	for _, v := range raw {
+		if oid, ok := v.(primitive.ObjectID); ok && !oid.IsZero() {
+			out = append(out, oid)
+		}
+	}
+	return out, nil
+}
+
+// consentingPartiesByIDs loads, among the given parties, ONLY those whose
+// public_consent is true (§6.7), capped at limit. Sanctioned read-only access
+// to parties. The consent filter is a hard privacy gate: a non-consenting
+// farmer can never be returned by this query.
+func (r *repo) consentingPartiesByIDs(ctx context.Context, ids []primitive.ObjectID, limit int64) ([]domain.Party, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	cur, err := r.parties.Find(ctx,
+		bson.D{
+			{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}},
+			{Key: "public_consent", Value: true},
+		},
+		options.Find().SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find consenting parties by ids: %w", err)
+	}
+	var out []domain.Party
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, fmt.Errorf("decode consenting parties by ids: %w", err)
 	}
 	return out, nil
 }

@@ -44,9 +44,21 @@ func Register(r chi.Router, d *deps.Deps) {
 	})
 
 	r.Route("/parties", func(r chi.Router) {
-		r.Use(middleware.Authenticate(d.JWT), middleware.RequireSession)
-		r.Get("/me", h.getMe)
-		r.Patch("/me", h.patchMe)
+		r.Use(middleware.Authenticate(d.JWT))
+
+		// Self-service: any logged-in party reads/updates their own profile.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireSession)
+			r.Get("/me", h.getMe)
+			r.Patch("/me", h.patchMe)
+		})
+
+		// Reviewer directory: parties holding a role in an org unit (backs the
+		// FE listSachivs picker). Reviewer roles only.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireRoles(domain.OnboardingReviewerRoles...))
+			r.Get("/", h.listPartiesByRole)
+		})
 	})
 
 	r.Route("/kyc", func(r chi.Router) {
@@ -61,13 +73,9 @@ func Register(r chi.Router, d *deps.Deps) {
 		})
 
 		// Review console: ground staff and admins approve/reject PENDING KYC.
+		// Both ORGANISING_MANAGER and the app-coded ONBOARDING_EXECUTIVE qualify.
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.RequireRoles(
-				domain.RoleOrganisingManager,
-				domain.RoleDistrictVerifier,
-				domain.RolePCDFAdmin,
-				domain.RoleSuperAdmin,
-			))
+			r.Use(middleware.RequireRoles(domain.OnboardingReviewerRoles...))
 			r.Get("/pending", h.listPendingKYC)
 			r.Get("/pending/count", h.pendingKYCCount) // live badge value
 			r.Post("/{id}/approve", h.approveKYC)
@@ -84,6 +92,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			domain.RoleUnionPresident,
 			domain.RoleSamitiAdhyaksh,
 			domain.RoleOrganisingManager,
+			domain.RoleOnboardingExecutive,
 		))
 		r.Post("/assignments", h.createAssignment)
 		r.Delete("/assignments/{id}", h.revokeAssignment)

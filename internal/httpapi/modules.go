@@ -4,9 +4,12 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/pyaas/saathi-backend/internal/modules/cattle"
+	"github.com/pyaas/saathi-backend/internal/modules/cms"
 	"github.com/pyaas/saathi-backend/internal/modules/collection"
+	"github.com/pyaas/saathi-backend/internal/modules/dashboards"
 	"github.com/pyaas/saathi-backend/internal/modules/identity"
 	"github.com/pyaas/saathi-backend/internal/modules/logistics"
+	"github.com/pyaas/saathi-backend/internal/modules/onboarding"
 	"github.com/pyaas/saathi-backend/internal/modules/orgs"
 	"github.com/pyaas/saathi-backend/internal/modules/plant"
 	"github.com/pyaas/saathi-backend/internal/modules/platformops"
@@ -39,4 +42,7 @@ func RegisterModules(api chi.Router, d *deps.Deps) {
 	quality.Register(api, d)
 	settlement.Register(api, d)
 	platformops.Register(api, d)
+	dashboards.Register(api, d)
+	onboarding.Register(api, d)
+	cms.Register(api, d)
 }

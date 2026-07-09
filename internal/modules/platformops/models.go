@@ -31,6 +31,41 @@ type AuditExport struct {
 	Entries    []audit.Entry `json:"entries"`
 }
 
+// OrgUnitCounts breaks the cooperative backbone down by node type for the
+// control-tower stats card (blueprint §5.1).
+type OrgUnitCounts struct {
+	DCS   int64 `json:"dcs"`
+	BMC   int64 `json:"bmc"`
+	Plant int64 `json:"plant"`
+}
+
+// AdminStats is the GET /admin/stats control-tower aggregate (blueprint §12):
+// a read-only snapshot of the platform's key operational counters. Every
+// figure comes from a CountDocuments over the shared collections (today's
+// litres is the one summed figure); nothing here mutates state.
+type AdminStats struct {
+	Parties               int64         `json:"parties"`
+	ActiveRoleAssignments int64         `json:"active_role_assignments"`
+	OrgUnits              OrgUnitCounts `json:"org_units"`
+	TodayPours            int64         `json:"today_pours"`
+	TodayLitres           float64       `json:"today_litres"`
+	PendingKYC            int64         `json:"pending_kyc"`
+	PendingInvoices       int64         `json:"pending_invoices"`
+	BlockedQCSubjects     int64         `json:"blocked_qc_subjects"`
+	GeneratedAt           time.Time     `json:"generated_at"`
+}
+
+// UpsertProductRequest is the PUT /admin/products body. SKU is the upsert key;
+// Active is a pointer so an absent field is distinguishable from an explicit
+// false (default on insert is active=true).
+type UpsertProductRequest struct {
+	SKU      string  `json:"sku"`
+	Name     string  `json:"name"`
+	MRP      float64 `json:"mrp"`
+	UnitSize string  `json:"unit_size"`
+	Active   *bool   `json:"active"`
+}
+
 // StoredNotification is a notifications document as this module reads and
 // writes it: the shared domain shape plus the worker-written meta block
 // (rendered SMS text kept for demo/ops visibility).

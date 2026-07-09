@@ -63,8 +63,9 @@ func Register(r chi.Router, d *deps.Deps) {
 		r.Route("/mvu-cases", func(r chi.Router) {
 			r.With(middleware.RequireRoles(domain.RoleFarmer)).Post("/", h.createMVUCase)
 			r.With(middleware.RequireRoles(
+				domain.RoleFarmer, // may list their OWN cases (forced to self in the service)
 				domain.RoleVeterinarian, domain.RoleMVUDriver,
-				domain.RoleSamitiSacheev, domain.RoleMissionOfficial,
+				domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh, domain.RoleMissionOfficial,
 			)).Get("/", h.listMVUCases)
 			r.With(middleware.RequireRoles(domain.RoleVeterinarian, domain.RoleMVUDriver)).
 				Post("/{caseID}/dispatch", h.dispatchMVUCase)

@@ -3,6 +3,8 @@ package identity
 import (
 	"net/http"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -184,6 +186,43 @@ func (h *handler) patchMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, party)
+}
+
+// listPartiesByRole handles GET /parties?role=<CODE>&org_unit_id=<id> — the
+// reviewer directory of parties holding an active role in an org unit (backs
+// the FE listSachivs picker). Both query params are required.
+func (h *handler) listPartiesByRole(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	roleCode := r.URL.Query().Get("role")
+	if roleCode == "" {
+		httpx.Error(w, r, httpx.BadRequest("MISSING_ROLE", "role query parameter is required"))
+		return
+	}
+	if !domain.IsValidRole(roleCode) {
+		httpx.Error(w, r, httpx.BadRequest("INVALID_ROLE", "role is not in the role catalog"))
+		return
+	}
+	// org_unit_id is OPTIONAL: omitted → the service scopes to the caller's own
+	// org (or federation-wide for admins), so a bare ?role= call works.
+	var orgUnitID primitive.ObjectID
+	if raw := r.URL.Query().Get("org_unit_id"); raw != "" {
+		id, err := httpx.ParseID(raw, "org_unit_id")
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		orgUnitID = id
+	}
+	page := httpx.ParsePage(r)
+	parties, total, err := h.svc.listPartiesByRole(r.Context(), actor, roleCode, orgUnitID, page)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSONMeta(w, http.StatusOK, parties, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
 }
 
 // --- /kyc ---

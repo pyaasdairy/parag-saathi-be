@@ -1,0 +1,33 @@
+# Air — live-reload daemon for the Saathi API (the Go equivalent of nodemon).
+# On every save under cmd/ or internal/, Air rebuilds ./cmd/server and restarts
+# it, so local changes reflect immediately. Run with `make dev`.
+#
+# The server does a graceful shutdown on SIGINT, so `send_interrupt = true`
+# lets Air close MongoDB/Redis cleanly between reloads instead of hard-killing.
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # Build only the server (not the seed binary) into the temp dir.
+  cmd = "go build -o ./tmp/saathi-server ./cmd/server"
+  bin = "./tmp/saathi-server"
+  # The binary runs from the repo root, so it picks up .env automatically.
+  full_bin = ""
+  include_ext = ["go", "toml", "env"]
+  include_dir = ["cmd", "internal"]
+  exclude_dir = ["bin", "tmp", "vendor", "docs", "scripts", ".git"]
+  # Tests don't affect the running server — don't restart on them.
+  exclude_regex = ["_test\\.go"]
+  # Debounce rapid saves; wait for the build before restarting.
+  delay = 800
+  stop_on_error = true
+  # Graceful restart: SIGINT → our server's shutdown path → then kill if it lingers.
+  send_interrupt = true
+  kill_delay = "3s"
+
+[log]
+  time = true
+
+[misc]
+  # Remove ./tmp on exit so the workspace stays clean.
+  clean_on_exit = true

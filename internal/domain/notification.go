@@ -31,6 +31,7 @@ const (
 	TemplateMVUDispatched  = "MVU_DISPATCHED"
 	TemplateKYCApproved    = "KYC_APPROVED" // "your KYC was approved — you can now use your role"
 	TemplateKYCRejected    = "KYC_REJECTED"
+	TemplateKYCPending     = "KYC_PENDING" // reviewer alert: "a KYC verification is pending your review"
 )
 
 // Notification is one queued vernacular message to a party.

@@ -20,19 +20,21 @@ import (
 // documented cross-collection status write onto bmc_lots and
 // processing_batches. No other module may flip those gate statuses.
 type repository struct {
-	results  *mongo.Collection
-	bmcLots  *mongo.Collection
-	batches  *mongo.Collection
-	counters *mongo.Collection
+	results      *mongo.Collection
+	bmcLots      *mongo.Collection
+	batches      *mongo.Collection
+	counters     *mongo.Collection
+	certificates *mongo.Collection
 }
 
 // newRepository binds the repository to its collections.
 func newRepository(db *mongo.Database) *repository {
 	return &repository{
-		results:  db.Collection(mongodb.CollQCResults),
-		bmcLots:  db.Collection(mongodb.CollBMCLots),
-		batches:  db.Collection(mongodb.CollBatches),
-		counters: db.Collection(mongodb.CollCounters),
+		results:      db.Collection(mongodb.CollQCResults),
+		bmcLots:      db.Collection(mongodb.CollBMCLots),
+		batches:      db.Collection(mongodb.CollBatches),
+		counters:     db.Collection(mongodb.CollCounters),
+		certificates: db.Collection(mongodb.CollQCCertificates),
 	}
 }
 
@@ -172,6 +174,78 @@ func gateSubjectDoc(ctx context.Context, coll *mongo.Collection, subjectID primi
 		return false, httpx.Internal(fmt.Errorf("gate %s subject %s: %w", coll.Name(), subjectID.Hex(), err))
 	}
 	return res.MatchedCount == 1, nil
+}
+
+// listBMCLotsByStatus returns every BMC lot in the given status, newest first.
+func (r *repository) listBMCLotsByStatus(ctx context.Context, status string) ([]domain.BMCLot, error) {
+	cur, err := r.bmcLots.Find(ctx,
+		bson.D{{Key: "status", Value: status}},
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}),
+	)
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("list bmc lots by status %s: %w", status, err))
+	}
+	lots := []domain.BMCLot{}
+	if err := cur.All(ctx, &lots); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode bmc lots: %w", err))
+	}
+	return lots, nil
+}
+
+// listBatchesByStatus returns every processing batch in the given status,
+// oldest first (a QC queue is worked front-to-back).
+func (r *repository) listBatchesByStatus(ctx context.Context, status string) ([]domain.ProcessingBatch, error) {
+	cur, err := r.batches.Find(ctx,
+		bson.D{{Key: "status", Value: status}},
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}),
+	)
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("list batches by status %s: %w", status, err))
+	}
+	batches := []domain.ProcessingBatch{}
+	if err := cur.All(ctx, &batches); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode batches: %w", err))
+	}
+	return batches, nil
+}
+
+// recordedTestNames returns the set of canonical test names already recorded
+// for a subject across its non-superseded QC results. For a QC_PENDING subject
+// this is typically empty, but it stays correct if a partial/superseded result
+// exists — the queue then honestly reports which parameters are on file.
+func (r *repository) recordedTestNames(ctx context.Context, subjectType string, subjectID primitive.ObjectID) (map[string]bool, error) {
+	cur, err := r.results.Find(ctx, bson.D{
+		{Key: "subject_type", Value: subjectType},
+		{Key: "subject_id", Value: subjectID},
+		{Key: "superseded", Value: bson.D{{Key: "$ne", Value: true}}},
+	})
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find qc results for subject %s: %w", subjectID.Hex(), err))
+	}
+	var results []domain.QCResult
+	if err := cur.All(ctx, &results); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode qc results for subject: %w", err))
+	}
+	names := map[string]bool{}
+	for _, res := range results {
+		for _, t := range res.Tests {
+			names[t.Name] = true
+		}
+	}
+	return names, nil
+}
+
+// insertCertificate persists a new QC certificate document. A duplicate
+// certificate_number (unique index) surfaces as a 409 so a retry storm cannot
+// mint colliding certificates.
+func (r *repository) insertCertificate(ctx context.Context, cert *domain.QCCertificate) error {
+	if _, err := r.certificates.InsertOne(ctx, cert); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return httpx.Conflict("CERTIFICATE_NUMBER_TAKEN", "certificate number "+cert.CertificateNumber+" already issued")
+		}
+		return httpx.Internal(fmt.Errorf("insert qc certificate: %w", err))
+	}
+	return nil
 }
 
 // nextCertificateSeq atomically increments and returns the per-stage QC

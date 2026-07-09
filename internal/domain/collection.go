@@ -29,9 +29,13 @@ const (
 // RateChart prices milk from fat/SNF, scoped to an org unit (union or
 // federation). rate/L = BaseRatePerLitre + Fat%*FatRatePerPoint + SNF%*SNFRatePerPoint.
 type RateChart struct {
-	ID               primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	OrgUnitID        primitive.ObjectID `bson:"org_unit_id"   json:"org_unit_id"`
-	Name             string             `bson:"name"          json:"name"`
+	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	OrgUnitID primitive.ObjectID `bson:"org_unit_id"   json:"org_unit_id"`
+	Name      string             `bson:"name"          json:"name"`
+	// Version is the immutable version string a pour pins so pricing is
+	// reproducible and a mid-cycle chart change never rewrites history
+	// (Developer Note §6.3, Appendix C). Human-readable, e.g. "GON-2026-06".
+	Version          string             `bson:"version"       json:"version"`
 	BaseRatePerLitre float64            `bson:"base_rate_per_litre" json:"base_rate_per_litre"`
 	FatRatePerPoint  float64            `bson:"fat_rate_per_point"  json:"fat_rate_per_point"`
 	SNFRatePerPoint  float64            `bson:"snf_rate_per_point"  json:"snf_rate_per_point"`
@@ -39,6 +43,44 @@ type RateChart struct {
 	Active           bool               `bson:"active"        json:"active"`
 	CreatedBy        primitive.ObjectID `bson:"created_by"    json:"created_by"`
 	CreatedAt        time.Time          `bson:"created_at"    json:"created_at"`
+}
+
+// Assurance levels (Developer Note §6.2) — how fat/SNF was captured. Every
+// pour carries one; every downstream aggregate (consignment, batch, lot)
+// inherits the WEAKEST assurance in its set, so capture quality is measurable
+// and drives societies toward instrument-linked capture.
+const (
+	AssuranceInstrument = "A" // analyzer streamed the reading (RS-232/BLE) — strongest
+	AssuranceOCRPhoto   = "B" // OCR of an analyzer-screen photo, photo retained as evidence
+	AssuranceManual     = "C" // keyed by hand — weakest, drives supervisor sampling
+)
+
+// AssuranceForSource maps a reading/pour capture mode to its assurance level.
+func AssuranceForSource(source string) string {
+	switch source {
+	case ReadingModeDirect:
+		return AssuranceInstrument
+	case ReadingModePhotoOCR:
+		return AssuranceOCRPhoto
+	default:
+		return AssuranceManual
+	}
+}
+
+// assuranceRank orders assurance so "weakest in a set" is a max-rank pick
+// (higher rank = weaker).
+var assuranceRank = map[string]int{AssuranceInstrument: 0, AssuranceOCRPhoto: 1, AssuranceManual: 2}
+
+// WeakestAssurance returns the weakest (lowest-trust) assurance among the
+// given levels — the value an aggregate inherits (§6.2). Empty input → "".
+func WeakestAssurance(levels ...string) string {
+	weakest, seen := "", -1
+	for _, l := range levels {
+		if r, ok := assuranceRank[l]; ok && r > seen {
+			weakest, seen = l, r
+		}
+	}
+	return weakest
 }
 
 // PricePour computes (ratePerLitre, amount) for a pour, rounded to paise.
@@ -134,8 +176,10 @@ type MilkPour struct {
 	RatePerLitre      float64             `bson:"rate_per_litre" json:"rate_per_litre"`
 	Amount            float64             `bson:"amount"        json:"amount"`
 	RateChartID       primitive.ObjectID  `bson:"rate_chart_id" json:"rate_chart_id"`
+	RateChartVersion  string              `bson:"rate_chart_version" json:"rate_chart_version"` // §6.3 pinned pricing version
 	AnalyzerReadingID *primitive.ObjectID `bson:"analyzer_reading_id,omitempty" json:"analyzer_reading_id,omitempty"`
-	Source            string              `bson:"source"        json:"source"` // reading mode that produced the values
+	Source            string              `bson:"source"        json:"source"`    // reading mode that produced the values
+	Assurance         string              `bson:"assurance"     json:"assurance"` // §6.2 capture assurance A|B|C
 	Status            string              `bson:"status"        json:"status"`
 	SupersedesPourID  *primitive.ObjectID `bson:"supersedes_pour_id,omitempty" json:"supersedes_pour_id,omitempty"`
 	PouredAt          time.Time           `bson:"poured_at"     json:"poured_at"`
