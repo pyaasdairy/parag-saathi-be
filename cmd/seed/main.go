@@ -125,7 +125,7 @@ func run() error {
 		{"9000000051", "Arjun Mehta", "en", domain.KYCTierMinimal, domain.RoleConsumer, federation.ID},
 	}
 
-	var mahesh, geeta primitive.ObjectID
+	var mahesh, geeta, sacheev primitive.ObjectID
 	for _, sp := range seeds {
 		party, err := upsertParty(ctx, db, domain.Party{
 			Phone: sp.phone, FullName: sp.name, PreferredLanguage: sp.lang,
@@ -141,12 +141,45 @@ func run() error {
 			return fmt.Errorf("role %s→%s: %w", sp.name, sp.role, err)
 		}
 		switch sp.phone {
+		case "9000000001":
+			sacheev = party.ID
 		case "9000000011":
 			mahesh = party.ID
 		case "9000000012":
 			geeta = party.ID
 		}
 		fmt.Printf("  party %-16s %-22s %s\n", sp.phone, sp.role, party.ID.Hex())
+	}
+
+	// Multi-role reality: the Sacheev IS ALSO a farmer of the same society
+	// (blueprint §4.1 — one phone, many roles). Grant Ramesh an additional
+	// FARMER assignment so the login role-picker (farmer + sachiv) is exercised.
+	if !sacheev.IsZero() {
+		if err := upsertRoleAssignment(ctx, db, domain.RoleAssignment{
+			PartyID: sacheev, RoleCode: domain.RoleFarmer, OrgUnitID: dcs1.ID,
+			ValidFrom: now.Add(-24 * time.Hour), Status: domain.RoleAssignmentActive, CreatedAt: now,
+		}); err != nil {
+			return fmt.Errorf("multi-role farmer grant to sacheev: %w", err)
+		}
+		fmt.Println("  multi-role: 9000000001 (Ramesh) is SAMITI_SACHEEV + FARMER @ DCS-01842 → login shows role picker")
+	}
+
+	// Verified bank accounts for the producing farmers so settlement can
+	// actually pay them (payouts require a reviewer-VERIFIED bank; §18-B).
+	for _, farmer := range []primitive.ObjectID{mahesh, geeta} {
+		if farmer.IsZero() {
+			continue
+		}
+		last4 := farmer.Hex()[len(farmer.Hex())-4:]
+		if err := upsertByFilter(ctx, db.Collection(mongodb.CollKYCRecords),
+			bson.D{{Key: "party_id", Value: farmer}, {Key: "bank_verified", Value: true}},
+			domain.KYCRecord{
+				PartyID: farmer, RequestedTier: domain.KYCTierFarmer, Status: domain.KYCStatusVerified,
+				BankAccountMasked: "****" + last4, BankIFSC: "SBIN0001234", BankVerified: true,
+				BankNameMatch: 0.95, VerifiedAt: &now, CreatedAt: now, UpdatedAt: now,
+			}); err != nil {
+			return fmt.Errorf("verified bank KYC for farmer %s: %w", farmer.Hex(), err)
+		}
 	}
 
 	// ── Rate chart (find-or-insert by org+name) ─────────────────────────────
@@ -157,7 +190,7 @@ func run() error {
 	if err := upsertByFilter(ctx, db.Collection(mongodb.CollRateCharts),
 		bson.D{{Key: "org_unit_id", Value: union.ID}, {Key: "name", Value: "Union LKO standard 2026"}},
 		domain.RateChart{
-			OrgUnitID: union.ID, Name: "Union LKO standard 2026",
+			OrgUnitID: union.ID, Name: "Union LKO standard 2026", Version: "LKO-2026-06",
 			BaseRatePerLitre: 8.0, FatRatePerPoint: 5.5, SNFRatePerPoint: 1.0,
 			EffectiveFrom: now.Add(-30 * 24 * time.Hour), Active: true,
 			CreatedBy: admin.ID, CreatedAt: now,

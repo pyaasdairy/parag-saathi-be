@@ -205,10 +205,13 @@ func (r *repository) CloseMVUCase(ctx context.Context, id primitive.ObjectID, vi
 
 // ListMVUCases returns a page of cases filtered by DCS (zero ObjectID = no
 // filter) and/or status, most recently requested first, plus the total count.
-func (r *repository) ListMVUCases(ctx context.Context, dcsID primitive.ObjectID, status string, page httpx.Page) ([]domain.MVUCase, int64, error) {
+func (r *repository) ListMVUCases(ctx context.Context, dcsID, farmerPartyID primitive.ObjectID, status string, page httpx.Page) ([]domain.MVUCase, int64, error) {
 	filter := bson.D{}
 	if !dcsID.IsZero() {
 		filter = append(filter, bson.E{Key: "dcs_id", Value: dcsID})
+	}
+	if !farmerPartyID.IsZero() {
+		filter = append(filter, bson.E{Key: "farmer_party_id", Value: farmerPartyID})
 	}
 	if status != "" {
 		filter = append(filter, bson.E{Key: "status", Value: status})

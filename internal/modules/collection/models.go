@@ -14,6 +14,7 @@ import (
 type CreateRateChartRequest struct {
 	OrgUnitID        primitive.ObjectID `json:"org_unit_id"`
 	Name             string             `json:"name"`
+	Version          string             `json:"version,omitempty"` // §6.3 pricing version; auto-derived if empty
 	BaseRatePerLitre float64            `json:"base_rate_per_litre"`
 	FatRatePerPoint  float64            `json:"fat_rate_per_point"`
 	SNFRatePerPoint  float64            `json:"snf_rate_per_point"`

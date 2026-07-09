@@ -433,12 +433,13 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID primiti
 	}
 
 	payouts := make([]domain.PayoutInstruction, 0, len(invoices))
+	paidInvoiceIDs := make([]primitive.ObjectID, 0, len(invoices))
+	failedCount := 0
 	for _, inv := range invoices {
 		masked, err := s.repo.latestBankMasked(ctx, inv.FarmerPartyID)
 		if err != nil {
 			return nil, failExecution(err)
 		}
-		creditedAt := now
 		payout := &domain.PayoutInstruction{
 			ID:                primitive.NewObjectID(),
 			SettlementBatchID: batch.ID,
@@ -446,18 +447,33 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID primiti
 			FarmerPartyID:     inv.FarmerPartyID,
 			Amount:            inv.TotalAmount,
 			BankAccountMasked: masked,
-			UTR:               mockUTR(),
-			Status:            domain.PayoutStatusSuccess,
-			CreditedAt:        &creditedAt,
 			CreatedAt:         now,
+		}
+		if masked == "" {
+			// No verified bank account → money cannot move. Record a FAILED
+			// payout (no UTR, no credited_at) and DO NOT mark the invoice PAID.
+			// The farmer's dues stay outstanding until a bank is verified and
+			// the batch is re-executed (Execute is re-entrant).
+			payout.Status = domain.PayoutStatusFailed
+			payout.FailureReason = "no verified bank account on file"
+			failedCount++
+			s.log.WarnContext(ctx, "settlement payout failed: farmer has no verified bank account",
+				slog.String("batch_id", batch.ID.Hex()),
+				slog.String("invoice_id", inv.ID.Hex()),
+				slog.String("farmer_party_id", inv.FarmerPartyID.Hex()))
+		} else {
+			creditedAt := now
+			payout.UTR = mockUTR()
+			payout.Status = domain.PayoutStatusSuccess
+			payout.CreditedAt = &creditedAt
 		}
 		exists, err := s.repo.insertPayout(ctx, payout)
 		if err != nil {
 			return nil, failExecution(err)
 		}
 		if exists {
-			// Retry of an interrupted run — reuse the payout already credited.
-			s.log.WarnContext(ctx, "settlement execution: payout already credited, reusing (idempotent replay)",
+			// Retry of an interrupted run — reuse the payout already recorded.
+			s.log.WarnContext(ctx, "settlement execution: payout already recorded, reusing (idempotent replay)",
 				slog.String("batch_id", batch.ID.Hex()),
 				slog.String("invoice_id", inv.ID.Hex()))
 			existing, err := s.repo.payoutByInvoice(ctx, inv.ID)
@@ -465,17 +481,30 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID primiti
 				return nil, failExecution(err)
 			}
 			payout = existing
+			if payout.Status == domain.PayoutStatusFailed {
+				failedCount++
+			}
+		}
+		if payout.Status == domain.PayoutStatusSuccess {
+			paidInvoiceIDs = append(paidInvoiceIDs, inv.ID)
 		}
 		payouts = append(payouts, *payout)
 	}
 
-	if err := s.repo.markInvoicesPaid(ctx, batch.ID); err != nil {
+	// Mark ONLY the successfully-paid invoices PAID; failed ones stay ISSUED.
+	if err := s.repo.markInvoicesPaidByIDs(ctx, paidInvoiceIDs); err != nil {
 		return nil, failExecution(err)
 	}
 
+	// A batch with any failed payout ends PARTIAL, not EXECUTED — re-executable
+	// once the missing bank details are verified.
+	finalStatus := domain.SettlementStatusExecuted
+	if failedCount > 0 {
+		finalStatus = domain.SettlementStatusPartial
+	}
 	paRef := mockPARef()
 	ok, err := s.repo.transitionBatch(ctx, batch.ID, domain.SettlementStatusExecuting, bson.D{
-		{Key: "status", Value: domain.SettlementStatusExecuted},
+		{Key: "status", Value: finalStatus},
 		{Key: "pa_ref", Value: paRef},
 		{Key: "executed_at", Value: now},
 	})
@@ -489,7 +518,7 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID primiti
 			slog.String("batch_id", batch.ID.Hex()))
 		return nil, httpx.Conflict("INVALID_STATUS", "settlement batch left EXECUTING unexpectedly")
 	}
-	batch.Status = domain.SettlementStatusExecuted
+	batch.Status = finalStatus
 	batch.PARef = paRef
 	batch.ExecutedAt = &now
 
@@ -502,7 +531,9 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID primiti
 		Payload: map[string]any{
 			"pa_ref":       paRef,
 			"payout_count": len(payouts),
+			"failed_count": failedCount,
 			"total_amount": batch.TotalAmount,
+			"final_status": finalStatus,
 		},
 	})
 	if err != nil {
@@ -529,6 +560,11 @@ func (s *service) Execute(ctx context.Context, actor auth.Actor, batchID primiti
 	// Per-payout ledger/lookup failures are logged, not fatal: the money
 	// outcome is already anchored by settlement.executed above.
 	for _, p := range payouts {
+		// Only SUCCESSful payouts produce a credited event + SMS — a FAILED
+		// (no-bank) payout must never tell the farmer money was credited.
+		if p.Status != domain.PayoutStatusSuccess {
+			continue
+		}
 		if _, err := s.ledger.Append(ctx, provenance.AppendInput{
 			Type:       domain.EventPayoutCredited,
 			EntityType: domain.EntityInvoice,

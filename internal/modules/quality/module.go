@@ -50,5 +50,19 @@ func Register(r chi.Router, d *deps.Deps) {
 		)
 		r.With(readRoles).Get("/qc-results", h.listQCResults)
 		r.With(readRoles).Get("/qc-results/{id}", h.getQCResult)
+
+		// QC work queue: gate-eligible subjects awaiting a verdict, annotated
+		// with mandatory-test progress. Oversight + supply-chain reads
+		// (readRoles already admits STATE_AUDITOR).
+		r.With(readRoles).Get("/qc-queue", h.getQCQueue)
+
+		// First-class certificate issuance for a PASSED/COMPLETED batch —
+		// plant lab analyst only.
+		r.With(middleware.RequireRoles(domain.RolePlantLabAnalyst)).
+			Post("/batches/{id}/certificate", h.issueCertificate)
+
+		// Root-cause trace-back: contributing societies + QC results of a
+		// batch. Supervisor/mission/auditor reads (all in readRoles).
+		r.With(readRoles).Get("/batches/{id}/trace-back", h.traceBack)
 	})
 }

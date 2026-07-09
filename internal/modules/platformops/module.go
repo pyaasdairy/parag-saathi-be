@@ -37,6 +37,18 @@ func Register(r chi.Router, d *deps.Deps) {
 			Get("/flags", h.listFlags)
 		r.With(middleware.RequireRoles(domain.RoleSuperAdmin)).
 			Put("/flags/{key}", h.setFlag)
+
+		// Control-tower stats: state/federation oversight roles read it;
+		// figures are platform-global (no org scope).
+		r.With(middleware.RequireRoles(domain.RoleSuperAdmin, domain.RolePCDFAdmin, domain.RoleMissionOfficial)).
+			Get("/stats", h.adminStats)
+
+		// Product master: support may read the catalogue; only SUPER_ADMIN /
+		// PCDF_ADMIN may upsert a row (capability gating is a deliberate act).
+		r.With(middleware.RequireRoles(domain.RoleSuperAdmin, domain.RolePCDFAdmin, domain.RoleSupportAgent)).
+			Get("/products", h.listProducts)
+		r.With(middleware.RequireRoles(domain.RoleSuperAdmin, domain.RolePCDFAdmin)).
+			Put("/products", h.upsertProduct)
 	})
 
 	r.Route("/audit", func(r chi.Router) {

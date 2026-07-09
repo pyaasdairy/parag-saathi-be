@@ -32,10 +32,29 @@ type QualityInfo struct {
 
 // SamitiInfo is one contributing village society (DCS) — the honest pooled
 // provenance grain (§7.4): the set of samitis, never individual farmers.
+// Litres/Share are this society's pooled volume contribution to the lot: the
+// honest set-valued view names the members of the pool AND how much each
+// contributed, but never de-anonymises which litres came from whom.
 type SamitiInfo struct {
 	Name     string `json:"name"`
 	Code     string `json:"code"`
 	District string `json:"district,omitempty"`
+	// Litres is the total litres this DCS contributed to the traced lot,
+	// summed over its contributing consignments' total_quantity_litres.
+	Litres float64 `json:"volume_litres"`
+	// Share is Litres / (sum of all contributing DCS litres), in [0,1].
+	Share float64 `json:"volume_share"`
+}
+
+// FarmerPublicInfo is one CONSENTED farmer on the public roster (§6.7): named
+// ONLY when Party.public_consent == true. Non-consenting contributors are
+// counted in SourcingInfo.FarmersTotal but NEVER appear here. Fields beyond
+// name are surfaced only where the Party record carries them.
+type FarmerPublicInfo struct {
+	Name        string `json:"name"`
+	Village     string `json:"village,omitempty"`
+	Cattle      int    `json:"cattle,omitempty"`
+	MemberSince string `json:"member_since,omitempty"`
 }
 
 // SourcingInfo summarises where and when the milk was collected.
@@ -43,6 +62,12 @@ type SourcingInfo struct {
 	Message         string       `json:"message"`
 	Samitis         []SamitiInfo `json:"samitis"`
 	CollectionDates []string     `json:"collection_dates"`
+	// FarmersTotal is the count of DISTINCT farmers who contributed pours to
+	// the traced lot — consenting and non-consenting alike.
+	FarmersTotal int `json:"farmers_total"`
+	// FarmersPublic is the bounded, consent-gated roster (§6.7): only farmers
+	// whose public_consent is true, capped at rosterCap. Never nil.
+	FarmersPublic []FarmerPublicInfo `json:"farmers_public"`
 }
 
 // LedgerInfo reports the tamper-evidence check over the traced events.

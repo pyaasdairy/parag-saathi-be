@@ -27,15 +27,23 @@ type DCSConsignment struct {
 	PourIDs             []primitive.ObjectID `bson:"pour_ids"  json:"pour_ids"`
 	TotalQuantityLitres float64              `bson:"total_quantity_litres" json:"total_quantity_litres"`
 	CanCount            int                  `bson:"can_count,omitempty"   json:"can_count,omitempty"`
-	AvgFatPct           float64              `bson:"avg_fat_pct,omitempty" json:"avg_fat_pct,omitempty"`
-	AvgSNFPct           float64              `bson:"avg_snf_pct,omitempty" json:"avg_snf_pct,omitempty"`
-	Status              string               `bson:"status"    json:"status"`
-	CreatedBy           primitive.ObjectID   `bson:"created_by"    json:"created_by"`
-	DispatchedAt        *time.Time           `bson:"dispatched_at,omitempty" json:"dispatched_at,omitempty"`
-	RouteTripID         *primitive.ObjectID  `bson:"route_trip_id,omitempty" json:"route_trip_id,omitempty"`
-	BMCLotID            *primitive.ObjectID  `bson:"bmc_lot_id,omitempty"    json:"bmc_lot_id,omitempty"`
-	ProvenanceSeq       int64                `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
-	CreatedAt           time.Time            `bson:"created_at" json:"created_at"`
+	// AvgFatPct/AvgSNFPct are the QUANTITY-WEIGHTED averages the Developer Note
+	// §6.4 calls wavg_fat / wavg_snf — computed over the sealed pour set.
+	AvgFatPct float64 `bson:"avg_fat_pct,omitempty" json:"avg_fat_pct,omitempty"`
+	AvgSNFPct float64 `bson:"avg_snf_pct,omitempty" json:"avg_snf_pct,omitempty"`
+	// Assurance is the WEAKEST capture assurance among the pooled pours (§6.2).
+	Assurance string `bson:"assurance,omitempty" json:"assurance,omitempty"`
+	// SealCode freezes the physical cans to this shift's pour set at dispatch
+	// (§6.4, Appendix A: SEAL-<consignment>-<checksum>); the van verifies it.
+	SealCode      string              `bson:"seal_code,omitempty" json:"seal_code,omitempty"`
+	SealedAt      *time.Time          `bson:"sealed_at,omitempty" json:"sealed_at,omitempty"`
+	Status        string              `bson:"status"    json:"status"`
+	CreatedBy     primitive.ObjectID  `bson:"created_by"    json:"created_by"`
+	DispatchedAt  *time.Time          `bson:"dispatched_at,omitempty" json:"dispatched_at,omitempty"`
+	RouteTripID   *primitive.ObjectID `bson:"route_trip_id,omitempty" json:"route_trip_id,omitempty"`
+	BMCLotID      *primitive.ObjectID `bson:"bmc_lot_id,omitempty"    json:"bmc_lot_id,omitempty"`
+	ProvenanceSeq int64               `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
+	CreatedAt     time.Time           `bson:"created_at" json:"created_at"`
 }
 
 // Route trip statuses.

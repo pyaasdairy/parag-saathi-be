@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -85,6 +86,82 @@ func (s *service) setFlag(ctx context.Context, actor auth.Actor, key string, ena
 		slog.String("key", key), slog.Bool("enabled", enabled),
 		slog.String("actor_party_id", actor.PartyID))
 	return &SetFlagResponse{Key: key, Enabled: enabled}, nil
+}
+
+// ---- Admin: control-tower stats (§12) ----
+
+// adminStats returns the read-only control-tower snapshot. Role gating
+// (SUPER_ADMIN / PCDF_ADMIN / MISSION_OFFICIAL) is enforced at the route; the
+// figures are platform-global, so there is no org scope to require here.
+func (s *service) adminStats(ctx context.Context) (*AdminStats, error) {
+	now := time.Now().UTC()
+	stats, err := s.repo.adminStats(ctx, domain.DateKeyIST(now))
+	if err != nil {
+		return nil, err
+	}
+	stats.GeneratedAt = now
+	return stats, nil
+}
+
+// ---- Admin: product master (§12) ----
+
+// listProducts returns the full admin product master.
+func (s *service) listProducts(ctx context.Context) ([]domain.Product, error) {
+	return s.repo.listProducts(ctx)
+}
+
+// upsertProduct creates or updates a product master row keyed by SKU and
+// writes the "admin.product_upsert" audit entry. An absent `active` defaults
+// to true on the (upserted) row.
+func (s *service) upsertProduct(ctx context.Context, actor auth.Actor, req UpsertProductRequest) (*domain.Product, error) {
+	sku := strings.TrimSpace(req.SKU)
+	if sku == "" {
+		s.log.WarnContext(ctx, "product upsert rejected: missing sku",
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.BadRequest("MISSING_SKU", "sku is required")
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		s.log.WarnContext(ctx, "product upsert rejected: missing name",
+			slog.String("sku", sku), slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.BadRequest("MISSING_NAME", "name is required")
+	}
+	if req.MRP < 0 {
+		s.log.WarnContext(ctx, "product upsert rejected: negative mrp",
+			slog.String("sku", sku), slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.BadRequest("INVALID_MRP", "mrp must not be negative")
+	}
+	active := true
+	if req.Active != nil {
+		active = *req.Active
+	}
+
+	now := time.Now().UTC()
+	set := bson.D{
+		{Key: "sku", Value: sku},
+		{Key: "name", Value: name},
+		{Key: "mrp", Value: req.MRP},
+		{Key: "unit_size", Value: strings.TrimSpace(req.UnitSize)},
+		{Key: "active", Value: active},
+		{Key: "updated_at", Value: now},
+	}
+	product, err := s.repo.upsertProduct(ctx, sku, set, now)
+	if err != nil {
+		s.log.ErrorContext(ctx, "product upsert failed",
+			slog.String("sku", sku), slog.Any("err", err))
+		return nil, err
+	}
+
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "admin.product_upsert",
+		TargetType: "PRODUCT",
+		TargetID:   product.ID.Hex(),
+		Meta:       map[string]any{"sku": sku, "name": name, "mrp": req.MRP, "active": active},
+	})
+	s.log.InfoContext(ctx, "product upserted",
+		slog.String("product_id", product.ID.Hex()), slog.String("sku", sku),
+		slog.Bool("active", active), slog.String("actor_party_id", actor.PartyID))
+	return product, nil
 }
 
 // ---- Auditor: read-only audit-log surface (§12) ----
@@ -246,6 +323,9 @@ func renderSMS(templateKey string, params map[string]string) (english, hindi str
 	case domain.TemplateKYCRejected:
 		return fmt.Sprintf("KYC rejected: %s. - Saathi", p("reason")),
 			fmt.Sprintf("KYC अस्वीकृत: %s। - साथी", p("reason"))
+	case domain.TemplateKYCPending:
+		return fmt.Sprintf("KYC verification pending for %s (tier %s) — review in Saathi.", p("subject"), p("tier")),
+			fmt.Sprintf("%s (टियर %s) का KYC सत्यापन लंबित — साथी में समीक्षा करें।", p("subject"), p("tier"))
 	case domain.TemplateOTP:
 		return fmt.Sprintf("Your Saathi OTP is %s. Do not share it with anyone.", p("otp")),
 			fmt.Sprintf("आपका साथी OTP %s है। इसे किसी से साझा न करें।", p("otp"))

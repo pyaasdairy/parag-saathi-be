@@ -68,6 +68,11 @@ var grantableRoles = map[string]map[string]bool{
 		domain.RoleFarmer:   true,
 		domain.RoleConsumer: true,
 	},
+	// The app-coded onboarding executive has the same enrolment scope.
+	domain.RoleOnboardingExecutive: {
+		domain.RoleFarmer:   true,
+		domain.RoleConsumer: true,
+	},
 }
 
 // granterMayGrant reports whether granterRole may grant (or revoke)
@@ -466,7 +471,40 @@ func (s *service) patchMe(ctx context.Context, actor auth.Actor, req patchMeRequ
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.updatePartyProfile(ctx, aid, req.FullName, req.PreferredLanguage, time.Now().UTC())
+	return s.repo.updatePartyProfile(ctx, aid, req.FullName, req.PreferredLanguage, req.PublicConsent, time.Now().UTC())
+}
+
+// listPartiesByRole returns the parties holding an ACTIVE assignment of
+// roleCode inside orgUnitID (paged) — the reviewer-facing directory backing
+// the FE listSachivs dropdown. The caller must be in scope for the org unit.
+func (s *service) listPartiesByRole(ctx context.Context, actor auth.Actor, roleCode string, orgUnitID primitive.ObjectID, page httpx.Page) ([]domain.Party, int64, error) {
+	// Resolve the scope when the caller omits org_unit_id:
+	//   • federation-wide roles (super admin / PCDF / mission / auditor) may
+	//     list the role platform-wide (orgUnitID stays zero → no org filter);
+	//   • everyone else is scoped to their OWN org token.
+	if orgUnitID.IsZero() {
+		switch actor.RoleCode {
+		case domain.RoleSuperAdmin, domain.RolePCDFAdmin, domain.RoleMissionOfficial, domain.RoleStateAuditor:
+			// federation-wide list; leave orgUnitID zero
+		default:
+			own, err := httpx.ParseID(actor.OrgUnitID, "actor org")
+			if err != nil {
+				return nil, 0, httpx.BadRequest("MISSING_ORG_UNIT", "org_unit_id is required for this role")
+			}
+			orgUnitID = own
+		}
+	}
+	// A named org must be within the caller's scope.
+	if !orgUnitID.IsZero() {
+		if err := s.deps.Orgs.RequireInScope(ctx, actor, orgUnitID); err != nil {
+			s.log.WarnContext(ctx, "list parties by role denied: out of scope",
+				slog.String("actor_party_id", actor.PartyID),
+				slog.String("org_unit_id", orgUnitID.Hex()),
+				slog.String("role_code", roleCode))
+			return nil, 0, err
+		}
+	}
+	return s.repo.listPartiesByRoleInOrg(ctx, roleCode, orgUnitID, page)
 }
 
 // --- KYC (mock DPI adapters — real UIDAI / penny-drop integration later) ---
@@ -548,13 +586,56 @@ func (s *service) verifyAadhaar(ctx context.Context, actor auth.Actor, req aadha
 		slog.String("kyc_id", record.ID.Hex()),
 		slog.String("party_id", party.ID.Hex()),
 		slog.String("requested_tier", req.RequestedTier))
-	// Nudge reviewer dashboards: a new record entered the PENDING queue.
+	// Nudge live reviewer dashboards (ephemeral SSE badge)…
 	s.publishKYCQueueChanged("submitted", record.ID, party.ID)
+	// …AND queue a PERSISTED notification to the reviewers (super admin +
+	// onboarding reviewers) so a pending verification reaches them even if no
+	// dashboard is open — the durable half of "notification + verification
+	// pending". Best-effort: a notify failure never fails the submission.
+	s.notifyReviewersKYCPending(ctx, party, req.RequestedTier)
 	return &aadhaarKYCResponse{
 		Record:  &record,
 		Status:  domain.KYCStatusPending,
 		Message: msgAwaitingVerification,
 	}, true, nil
+}
+
+// notifyReviewersKYCPending queues a KYC_PENDING notification to every party
+// holding a reviewer role, so the pending verification durably reaches the
+// super admin / onboarding reviewers (not just a live SSE badge).
+func (s *service) notifyReviewersKYCPending(ctx context.Context, subject *domain.Party, tier string) {
+	reviewers, err := s.repo.findPartiesByRoles(ctx, domain.OnboardingReviewerRoles, 200)
+	if err != nil {
+		s.log.ErrorContext(ctx, "kyc pending notify: reviewer lookup failed", slog.Any("err", err))
+		return
+	}
+	now := time.Now().UTC()
+	subjectName := subject.FullName
+	if subjectName == "" {
+		subjectName = subject.Phone
+	}
+	for _, rv := range reviewers {
+		rvID := rv.ID
+		lang := rv.PreferredLanguage
+		if lang == "" {
+			lang = defaultLanguage
+		}
+		if err := s.repo.insertNotification(ctx, domain.Notification{
+			PartyID:     &rvID,
+			Phone:       rv.Phone,
+			Channel:     domain.ChannelSMS,
+			TemplateKey: domain.TemplateKYCPending,
+			Language:    lang,
+			Params:      map[string]string{"subject": subjectName, "tier": tier},
+			Status:      domain.NotificationQueued,
+			QueuedAt:    now,
+		}); err != nil {
+			s.log.ErrorContext(ctx, "kyc pending notify: insert failed",
+				slog.String("reviewer_party_id", rvID.Hex()), slog.Any("err", err))
+		}
+	}
+	s.log.InfoContext(ctx, "kyc pending notifications queued",
+		slog.String("subject_party_id", subject.ID.Hex()), slog.Int("reviewers", len(reviewers)))
 }
 
 // publishKYCQueueChanged nudges the live "pending KYC" dashboard badge via the

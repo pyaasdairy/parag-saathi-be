@@ -230,12 +230,15 @@ func TestAggregatePours(t *testing.T) {
 	p1 := primitive.NewObjectID()
 	p2 := primitive.NewObjectID()
 	rows := []pourRow{
-		{ID: p1, QuantityLitres: 10, FatPct: 4.0, SNFPct: 8.0},
-		{ID: p2, QuantityLitres: 30, FatPct: 6.0, SNFPct: 9.0},
+		{ID: p1, QuantityLitres: 10, FatPct: 4.0, SNFPct: 8.0, Assurance: "A"},
+		{ID: p2, QuantityLitres: 30, FatPct: 6.0, SNFPct: 9.0, Assurance: "C"},
 	}
-	ids, total, fat, snf := aggregatePours(rows)
+	ids, total, fat, snf, assurance := aggregatePours(rows)
 	if len(ids) != 2 || ids[0] != p1 || ids[1] != p2 {
 		t.Fatalf("ids = %v", ids)
+	}
+	if assurance != "C" { // weakest of {A, C}
+		t.Fatalf("assurance = %v, want C (weakest)", assurance)
 	}
 	if total != 40 {
 		t.Fatalf("total = %v, want 40", total)

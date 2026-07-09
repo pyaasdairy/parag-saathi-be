@@ -1,6 +1,12 @@
 package quality
 
-import "go.mongodb.org/mongo-driver/bson/primitive"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/pyaas/saathi-backend/internal/domain"
+)
 
 // QCTestInput is one measurement submitted for gate evaluation. The Pass
 // verdict is computed server-side by domain.EvaluateQCTests — clients never
@@ -54,4 +60,51 @@ type listMeta struct {
 	Limit  int64 `json:"limit"`
 	Offset int64 `json:"offset"`
 	Total  int64 `json:"total"`
+}
+
+// QCQueueItem is one gate-eligible subject currently awaiting a verdict,
+// annotated with the stage's mandatory tests split into those already recorded
+// and those still pending. It is a lean projection — enough for the QC queue
+// screen without echoing full subject documents.
+type QCQueueItem struct {
+	SubjectType    string             `json:"subject_type"` // domain.QCSubject*
+	SubjectID      primitive.ObjectID `json:"subject_id"`
+	Stage          string             `json:"stage"`     // the QC stage this subject is gated at
+	Reference      string             `json:"reference"` // human label (lot date/shift or batch number)
+	OrgUnitID      primitive.ObjectID `json:"org_unit_id"`
+	MandatoryTests []string           `json:"mandatory_tests"`
+	RecordedTests  []string           `json:"recorded_tests"`
+	PendingTests   []string           `json:"pending_tests"`
+	CreatedAt      time.Time          `json:"created_at"`
+}
+
+// QCQueueResponse is the GET /quality/qc-queue body.
+type QCQueueResponse struct {
+	Items []QCQueueItem `json:"items"`
+	Total int           `json:"total"`
+}
+
+// TraceBackResponse is the GET /quality/batches/{id}/trace-back body — the
+// root-cause tool. It resolves the contributing societies of a batch (§7.4
+// honest set-valued pooling) enriched from the org directory, plus the batch's
+// recorded QC results.
+type TraceBackResponse struct {
+	BatchID               primitive.ObjectID    `json:"batch_id"`
+	BatchNumber           string                `json:"batch_number"`
+	PlantID               primitive.ObjectID    `json:"plant_id"`
+	Status                string                `json:"status"`
+	BlockReason           string                `json:"block_reason,omitempty"`
+	ContributingSocieties []ContributingSociety `json:"contributing_societies"`
+	QCResults             []domain.QCResult     `json:"qc_results"`
+}
+
+// ContributingSociety is one DCS whose milk fed a batch, enriched from the org
+// directory. UnresolvedID is set (and Name/Code empty) when the org lookup
+// fails — the trace stays honest rather than silently dropping a contributor.
+type ContributingSociety struct {
+	OrgUnitID primitive.ObjectID `json:"org_unit_id"`
+	Code      string             `json:"code,omitempty"`
+	Name      string             `json:"name,omitempty"`
+	District  string             `json:"district,omitempty"`
+	Resolved  bool               `json:"resolved"`
 }

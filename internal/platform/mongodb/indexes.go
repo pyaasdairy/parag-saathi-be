@@ -41,6 +41,10 @@ const (
 	CollAuditLogs        = "audit_logs"
 	CollFeatureFlags     = "feature_flags"
 	CollCounters         = "counters"
+	CollProducts         = "products"
+	CollOnboarding       = "onboarding_requests"
+	CollCMSContent       = "cms_content"
+	CollQCCertificates   = "qc_certificates"
 )
 
 // EnsureIndexes creates every index the query paths rely on. Idempotent —
@@ -198,6 +202,25 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		CollFeatureFlags: {
 			// `_id` is a generated ObjectID; `key` is the unique business key.
 			idx(bson.D{{Key: "key", Value: asc}}, options.Index().SetUnique(true)),
+		},
+		CollProducts: {
+			idx(bson.D{{Key: "sku", Value: asc}}, options.Index().SetUnique(true)),
+			idx(bson.D{{Key: "active", Value: asc}}, nil),
+		},
+		CollOnboarding: {
+			idx(bson.D{{Key: "status", Value: asc}, {Key: "created_at", Value: desc}}, nil),
+			idx(bson.D{{Key: "submitted_by", Value: asc}, {Key: "created_at", Value: desc}}, nil),
+			idx(bson.D{{Key: "org_unit_id", Value: asc}, {Key: "status", Value: asc}}, nil),
+		},
+		CollCMSContent: {
+			// Delta pull (§6.1): monotonic version cursor + type/region filters.
+			idx(bson.D{{Key: "version", Value: asc}}, nil),
+			idx(bson.D{{Key: "type", Value: asc}, {Key: "published", Value: asc}}, nil),
+			idx(bson.D{{Key: "region_scope", Value: asc}}, nil),
+		},
+		CollQCCertificates: {
+			idx(bson.D{{Key: "batch_id", Value: asc}}, nil),
+			idx(bson.D{{Key: "certificate_number", Value: asc}}, options.Index().SetUnique(true)),
 		},
 	}
 

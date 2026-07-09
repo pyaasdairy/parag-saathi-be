@@ -110,12 +110,9 @@ func run() error {
 			return
 		}
 		sseHub.Broadcast(sse.Event{
-			Type: "kyc.pending.changed",
-			Data: ev,
-			Roles: []string{
-				domain.RoleOrganisingManager, domain.RoleDistrictVerifier,
-				domain.RolePCDFAdmin, domain.RoleSuperAdmin,
-			},
+			Type:  "kyc.pending.changed",
+			Data:  ev,
+			Roles: domain.OnboardingReviewerRoles, // every reviewer incl. ONBOARDING_EXECUTIVE
 		})
 	})
 

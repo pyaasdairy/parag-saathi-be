@@ -32,7 +32,7 @@ func Register(r chi.Router, d *deps.Deps) {
 		pr.Route("/bmc-lots", func(lr chi.Router) {
 			lr.With(middleware.RequireRoles(
 				domain.RoleBMCOperator, domain.RolePlantOperator,
-				domain.RoleUnionFieldSupervisor, domain.RolePlantLabAnalyst,
+				domain.RoleUnionFieldSupervisor, domain.RolePlantLabAnalyst, domain.RoleStateAuditor,
 			)).Get("/", h.ListBMCLots)
 
 			lr.Group(func(wr chi.Router) {
@@ -48,7 +48,7 @@ func Register(r chi.Router, d *deps.Deps) {
 		pr.Route("/batches", func(br chi.Router) {
 			read := middleware.RequireRoles(
 				domain.RolePlantOperator, domain.RolePlantLabAnalyst,
-				domain.RoleUnionFieldSupervisor,
+				domain.RoleUnionFieldSupervisor, domain.RoleStateAuditor,
 			)
 			br.With(read).Get("/", h.ListBatches)
 			br.With(read).Get("/{id}", h.GetBatch)

@@ -43,6 +43,7 @@ func Register(r chi.Router, d *deps.Deps) {
 				Post("/", h.createReading)
 			r.With(middleware.RequireRoles(
 				domain.RoleSamitiSacheev, domain.RoleMilkTester, domain.RoleUnionFieldSupervisor,
+				domain.RoleStateAuditor,
 			)).Get("/", h.listReadings)
 		})
 
@@ -56,7 +57,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			})
 			r.With(middleware.RequireRoles(
 				domain.RoleSamitiSacheev, domain.RoleMilkTester,
-				domain.RoleUnionFieldSupervisor, domain.RoleFarmer,
+				domain.RoleUnionFieldSupervisor, domain.RoleFarmer, domain.RoleStateAuditor,
 			)).Get("/", h.listPours)
 		})
 
@@ -68,7 +69,7 @@ func Register(r chi.Router, d *deps.Deps) {
 				r.Use(middleware.RequireRoles(
 					domain.RoleFarmer, domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh,
 					domain.RoleMilkTester, domain.RoleUnionFieldSupervisor,
-					domain.RoleUnionPresident, domain.RolePCDFAdmin,
+					domain.RoleUnionPresident, domain.RolePCDFAdmin, domain.RoleStateAuditor,
 				))
 				r.Get("/", h.listInvoices)
 				r.Get("/{id}", h.getInvoice)

@@ -25,10 +25,19 @@ const (
 	// Department pattern: "promotes and organises new samitis") who performs
 	// doorstep KYC capture and first-level verification.
 	RoleOrganisingManager = "ORGANISING_MANAGER"
+	// ONBOARDING_EXECUTIVE is the mobile-app onboarding worker the field client
+	// uses for the same doorstep KYC / assisted-onboarding job as
+	// ORGANISING_MANAGER. Both are valid onboarding/review roles; the app codes
+	// this one, the backend historically coded the other.
+	RoleOnboardingExecutive = "ONBOARDING_EXECUTIVE"
 
 	// Logistics tier
 	RoleVanRider      = "VAN_RIDER"
 	RoleDeliveryRider = "DELIVERY_RIDER"
+
+	// Retail / commerce tier (Phase-3 store module; dormant behind a flag but a
+	// grantable role so the store console can be assigned).
+	RoleStoreManager = "STORE_MANAGER"
 
 	// Union tier
 	RoleBMCOperator          = "BMC_OPERATOR"
@@ -63,8 +72,8 @@ const (
 // AllRoles is the closed set of grantable role codes (extend here).
 var AllRoles = []string{
 	RoleFarmer, RoleSamitiSacheev, RoleSamitiAdhyaksh, RoleMilkTester, RoleLRP, RoleAITech,
-	RoleOrganisingManager,
-	RoleVanRider, RoleDeliveryRider,
+	RoleOrganisingManager, RoleOnboardingExecutive,
+	RoleVanRider, RoleDeliveryRider, RoleStoreManager,
 	RoleBMCOperator, RoleUnionFieldSupervisor, RoleUnionPresident,
 	RolePlantOperator, RolePlantLabAnalyst,
 	RolePCDFAdmin, RoleMissionOfficial, RoleDistrictVerifier,
@@ -72,6 +81,13 @@ var AllRoles = []string{
 	RoleConsumer,
 	RoleSupportAgent, RoleStateAuditor, RoleSuperAdmin,
 	RoleServiceAccount,
+}
+
+// OnboardingReviewerRoles are the roles authorised to run the KYC review /
+// assisted-onboarding console. Both the historical ORGANISING_MANAGER and the
+// app-coded ONBOARDING_EXECUTIVE qualify, plus the district/federation tiers.
+var OnboardingReviewerRoles = []string{
+	RoleOnboardingExecutive, RoleOrganisingManager, RoleDistrictVerifier, RolePCDFAdmin, RoleSuperAdmin,
 }
 
 var roleSet = func() map[string]struct{} {
@@ -97,6 +113,7 @@ const (
 	KYCTierHigh     = "HIGH"     // eKYC + org record / V-CIP for officials
 	KYCTierHighest  = "HIGHEST"  // platform admin: MFA + dual-control
 	KYCTierService  = "SERVICE"  // machine accounts: mTLS / scoped keys
+	KYCTierMTLS     = "MTLS"     // alias the field app uses for SERVICE-tier machine accounts
 )
 
 // RequiredKYCTier maps each role to the minimum KYC tier a party must hold
@@ -112,8 +129,10 @@ var RequiredKYCTier = map[string]string{
 	RoleLRP:                  KYCTierStandard,
 	RoleAITech:               KYCTierStandard,
 	RoleOrganisingManager:    KYCTierHigh,
+	RoleOnboardingExecutive:  KYCTierHigh,
 	RoleVanRider:             KYCTierRider,
 	RoleDeliveryRider:        KYCTierRider,
+	RoleStoreManager:         KYCTierStandard,
 	RoleBMCOperator:          KYCTierStandard,
 	RoleUnionFieldSupervisor: KYCTierHigh,
 	RoleUnionPresident:       KYCTierHigh,
@@ -140,6 +159,7 @@ var kycRank = map[string]int{
 	KYCTierHigh:     3,
 	KYCTierHighest:  4,
 	KYCTierService:  4,
+	KYCTierMTLS:     4, // alias of SERVICE
 }
 
 // KYCTierSatisfies reports whether a party at tier `have` meets `need`.
@@ -157,10 +177,11 @@ func KYCTierSatisfies(have, need string) bool {
 // Ground staff clear the field tiers; only federation admins clear HIGH;
 // only SUPER_ADMIN clears HIGHEST. Extend when new approver roles arrive.
 var KYCApprovableTiers = map[string][]string{
-	RoleOrganisingManager: {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider},
-	RoleDistrictVerifier:  {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider},
-	RolePCDFAdmin:         {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider, KYCTierHigh},
-	RoleSuperAdmin:        {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider, KYCTierHigh, KYCTierHighest, KYCTierService},
+	RoleOrganisingManager:   {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider},
+	RoleOnboardingExecutive: {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider},
+	RoleDistrictVerifier:    {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider},
+	RolePCDFAdmin:           {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider, KYCTierHigh},
+	RoleSuperAdmin:          {KYCTierMinimal, KYCTierFarmer, KYCTierStandard, KYCTierRider, KYCTierHigh, KYCTierHighest, KYCTierService},
 }
 
 // CanApproveKYCTier reports whether approverRole may approve a KYC record

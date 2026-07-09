@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"log/slog"
 	"math"
 	"time"
@@ -111,7 +112,7 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 		return nil, httpx.Unprocessable("NO_POURS_TO_CONSIGN",
 			fmt.Sprintf("no RECORDED pours for DCS %s on %s %s", req.DCSID.Hex(), date, req.Shift))
 	}
-	pourIDs, totalQty, avgFat, avgSNF := aggregatePours(rows)
+	pourIDs, totalQty, avgFat, avgSNF, assurance := aggregatePours(rows)
 
 	consignment := &domain.DCSConsignment{
 		ID:                  primitive.NewObjectID(), // pre-generated: insert + ledger refs stay consistent
@@ -123,6 +124,7 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 		CanCount:            int(math.Ceil(totalQty / canCapacityLitres)),
 		AvgFatPct:           avgFat,
 		AvgSNFPct:           avgSNF,
+		Assurance:           assurance,
 		Status:              domain.ConsignmentStatusOpen,
 		CreatedBy:           actorID,
 		CreatedAt:           now,
@@ -211,22 +213,34 @@ func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id 
 	}
 	extraSet := bson.D{}
 	if len(rows) > 0 {
-		pourIDs, totalQty, avgFat, avgSNF := aggregatePours(rows)
+		pourIDs, totalQty, avgFat, avgSNF, assurance := aggregatePours(rows)
 		consignment.PourIDs = pourIDs
 		consignment.TotalQuantityLitres = totalQty
 		consignment.CanCount = int(math.Ceil(totalQty / canCapacityLitres))
 		consignment.AvgFatPct = avgFat
 		consignment.AvgSNFPct = avgSNF
+		consignment.Assurance = assurance
 		extraSet = bson.D{
 			{Key: "pour_ids", Value: pourIDs},
 			{Key: "total_quantity_litres", Value: totalQty},
 			{Key: "can_count", Value: consignment.CanCount},
 			{Key: "avg_fat_pct", Value: avgFat},
 			{Key: "avg_snf_pct", Value: avgSNF},
+			{Key: "assurance", Value: assurance},
 		}
 	}
 
 	now := time.Now().UTC()
+	// §6.4: sealing freezes the pour set to the physical cans. The seal_code is
+	// an operational human-readable tamper marker (SEAL-<consignment>-<checksum>);
+	// the append-only hash chain is the cryptographic integrity anchor.
+	sealCode := mintSealCode(consignment.ID, consignment.PourIDs)
+	consignment.SealCode = sealCode
+	consignment.SealedAt = &now
+	extraSet = append(extraSet,
+		bson.E{Key: "seal_code", Value: sealCode},
+		bson.E{Key: "sealed_at", Value: now},
+	)
 	matched, err := s.repo.markConsignmentDispatched(ctx, id, now, extraSet)
 	if err != nil {
 		return nil, s.internal(ctx, "dispatch consignment: mark dispatched", err)
@@ -376,6 +390,14 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 		}
 		seen[stop.ConsignmentID] = struct{}{}
 
+		// Scope guard (IDOR): the stop's DCS must be within the actor's org
+		// scope, so one union's rider/supervisor cannot pull another union's
+		// consignment onto their trip (cross-union pooling / foreign mutation).
+		if err := s.orgs.RequireInScope(ctx, actor, stop.DCSID); err != nil {
+			s.log.WarnContext(ctx, "trip creation rejected: stop DCS out of scope",
+				slog.String("stop_dcs_id", stop.DCSID.Hex()), slog.String("actor_party_id", actor.PartyID))
+			return nil, err
+		}
 		consignment, err := s.loadConsignment(ctx, stop.ConsignmentID)
 		if err != nil {
 			return nil, err
@@ -574,6 +596,13 @@ func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID prim
 	if bmc.Type != domain.OrgTypeBMC {
 		return nil, httpx.BadRequest("NOT_A_BMC", "org unit "+req.BMCID.Hex()+" is not a BMC")
 	}
+	// Scope guard: the destination BMC must be within the actor's org scope so
+	// a trip cannot be delivered into an unrelated union's chilling centre.
+	if err := s.orgs.RequireInScope(ctx, actor, req.BMCID); err != nil {
+		s.log.WarnContext(ctx, "trip delivery rejected: BMC out of scope",
+			slog.String("bmc_id", req.BMCID.Hex()), slog.String("actor_party_id", actor.PartyID))
+		return nil, err
+	}
 
 	now := time.Now().UTC()
 	matched, err := s.repo.markTripDelivered(ctx, trip.ID, req.BMCID, now)
@@ -730,24 +759,39 @@ func (s *service) loadTrip(ctx context.Context, id primitive.ObjectID) (*domain.
 
 // aggregatePours reduces pour rows to (ids, total litres, quantity-weighted
 // average fat %, quantity-weighted average SNF %), rounded to 2 decimals.
-func aggregatePours(rows []pourRow) (pourIDs []primitive.ObjectID, totalQty, avgFat, avgSNF float64) {
+func aggregatePours(rows []pourRow) (pourIDs []primitive.ObjectID, totalQty, avgFat, avgSNF float64, assurance string) {
 	var fatWeighted, snfWeighted float64
+	levels := make([]string, 0, len(rows))
 	pourIDs = make([]primitive.ObjectID, 0, len(rows))
 	for _, row := range rows {
 		pourIDs = append(pourIDs, row.ID)
 		totalQty += row.QuantityLitres
 		fatWeighted += row.FatPct * row.QuantityLitres
 		snfWeighted += row.SNFPct * row.QuantityLitres
+		levels = append(levels, row.Assurance)
 	}
 	if totalQty > 0 {
 		avgFat = round2(fatWeighted / totalQty)
 		avgSNF = round2(snfWeighted / totalQty)
 	}
-	return pourIDs, round2(totalQty), avgFat, avgSNF
+	// §6.2: the consignment inherits the WEAKEST assurance of its pours.
+	return pourIDs, round2(totalQty), avgFat, avgSNF, domain.WeakestAssurance(levels...)
 }
 
 // round2 rounds to 2 decimal places (litres / percentage precision).
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// mintSealCode builds the §6.4 / Appendix-A seal code SEAL-<consignment>-<checksum>,
+// where the checksum is a CRC32 over the frozen pour set so a later silent
+// change to the pour list produces a different code.
+func mintSealCode(consignmentID primitive.ObjectID, pourIDs []primitive.ObjectID) string {
+	h := crc32.NewIEEE()
+	h.Write(consignmentID[:])
+	for _, id := range pourIDs {
+		h.Write(id[:])
+	}
+	return fmt.Sprintf("SEAL-%s-%04X", consignmentID.Hex()[18:24], h.Sum32()&0xFFFF)
+}
 
 // validateShift accepts only the two collection shifts.
 func validateShift(shift string) *httpx.AppError {

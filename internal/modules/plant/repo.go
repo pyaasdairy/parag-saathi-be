@@ -20,6 +20,7 @@ import (
 // reports a conflict instead of corrupting state.
 type Repo struct {
 	consignments *mongo.Collection
+	routeTrips   *mongo.Collection
 	bmcLots      *mongo.Collection
 	batches      *mongo.Collection
 	productLots  *mongo.Collection
@@ -31,12 +32,40 @@ type Repo struct {
 func NewRepo(db *mongo.Database) *Repo {
 	return &Repo{
 		consignments: db.Collection(mongodb.CollConsignments),
+		routeTrips:   db.Collection(mongodb.CollRouteTrips),
 		bmcLots:      db.Collection(mongodb.CollBMCLots),
 		batches:      db.Collection(mongodb.CollBatches),
 		productLots:  db.Collection(mongodb.CollProductLots),
 		qrs:          db.Collection(mongodb.CollBatchQRs),
 		counters:     db.Collection(mongodb.CollCounters),
 	}
+}
+
+// TripDeliveryBMCByIDs returns, for each given route-trip id, the BMC it was
+// delivered to (empty if the trip is not yet DELIVERED). Used to verify that a
+// consignment being pooled was actually delivered to THIS BMC. Read-only view
+// into the logistics module's route_trips (sanctioned cross-collection read).
+func (r *Repo) TripDeliveryBMCByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]primitive.ObjectID, error) {
+	cur, err := r.routeTrips.Find(ctx,
+		bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}}, {Key: "status", Value: domain.TripStatusDelivered}},
+		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}, {Key: "delivered_to_bmc_id", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ID    primitive.ObjectID  `bson:"_id"`
+		BMCID *primitive.ObjectID `bson:"delivered_to_bmc_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+	out := make(map[primitive.ObjectID]primitive.ObjectID, len(rows))
+	for _, row := range rows {
+		if row.BMCID != nil {
+			out[row.ID] = *row.BMCID
+		}
+	}
+	return out, nil
 }
 
 // --- consignments (read + claim; owned by the logistics module otherwise) ---
@@ -50,6 +79,27 @@ func (r *Repo) ConsignmentsByIDs(ctx context.Context, ids []primitive.ObjectID) 
 	out := []domain.DCSConsignment{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// DistinctDCSIDsForConsignments resolves the given consignments to the DISTINCT
+// set of societies (dcs_id) that fed them — the §7.4 honest-pooling contributor
+// set materialised onto a processing batch. Missing consignments simply drop
+// out; the result carries no zero-value ids.
+func (r *Repo) DistinctDCSIDsForConsignments(ctx context.Context, ids []primitive.ObjectID) ([]primitive.ObjectID, error) {
+	if len(ids) == 0 {
+		return []primitive.ObjectID{}, nil
+	}
+	raw, err := r.consignments.Distinct(ctx, "dcs_id", bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}}})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]primitive.ObjectID, 0, len(raw))
+	for _, v := range raw {
+		if oid, ok := v.(primitive.ObjectID); ok && !oid.IsZero() {
+			out = append(out, oid)
+		}
 	}
 	return out, nil
 }

@@ -32,7 +32,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			r.With(sacheevOnly).Post("/{consignmentID}/dispatch", h.dispatchConsignment)
 			r.With(middleware.RequireRoles(
 				domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh, domain.RoleVanRider,
-				domain.RoleUnionFieldSupervisor, domain.RoleBMCOperator,
+				domain.RoleUnionFieldSupervisor, domain.RoleBMCOperator, domain.RoleStateAuditor,
 			)).Get("/", h.listConsignments)
 		})
 
@@ -40,6 +40,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			riderOnly := middleware.RequireRoles(domain.RoleVanRider)
 			tripReaders := middleware.RequireRoles(
 				domain.RoleVanRider, domain.RoleUnionFieldSupervisor, domain.RoleUnionPresident,
+				domain.RoleStateAuditor,
 			)
 			r.With(middleware.RequireRoles(domain.RoleUnionFieldSupervisor, domain.RoleVanRider)).
 				Post("/", h.createTrip)

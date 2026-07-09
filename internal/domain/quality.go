@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -69,13 +70,40 @@ type QCResult struct {
 	ProvenanceSeq int64     `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
 }
 
-// EvaluateQCTests applies the FSSAI gate to a set of tests: it fills each
-// test's Pass verdict and returns the overall verdict plus human-readable
-// failure reasons. Unknown test names are recorded but do not gate.
+// NormalizeTestName maps common field aliases to the canonical FSSAI test
+// name so the safety gate can NEVER be bypassed by a spelling difference
+// (e.g. the app sends "AFM1"; the gate keys on "AFLATOXIN_M1"). A test whose
+// name still doesn't resolve to a gated parameter is recorded but not gated.
+func NormalizeTestName(name string) string {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "AFM1", "AFLATOXIN", "AFLATOXINM1", "AFLATOXIN_M1", "AFLATOXIN-M1":
+		return TestAflatoxinM1
+	case "COLIFORM", "COLIFORMS":
+		return TestColiform
+	case "TPC", "TOTAL_PLATE_COUNT":
+		return TestTPC
+	case "ANTIBIOTIC", "TETRACYCLINE", "ANTIBIOTIC_TETRACYCLINE":
+		return TestAntibiotic
+	case "PHOSPHATASE", "ALP":
+		return TestPhosphatase
+	case "FAT":
+		return TestFat
+	case "SNF":
+		return TestSNF
+	default:
+		return strings.ToUpper(strings.TrimSpace(name))
+	}
+}
+
+// EvaluateQCTests applies the FSSAI gate to a set of tests: it normalizes each
+// test name, fills its Pass verdict, and returns the overall verdict plus
+// human-readable failure reasons. Unknown test names are recorded but do not
+// gate. The returned tests carry the CANONICAL name so storage is consistent.
 func EvaluateQCTests(tests []QCTest) (overallPass bool, failures []string, evaluated []QCTest) {
 	overallPass = true
 	evaluated = make([]QCTest, 0, len(tests))
 	for _, t := range tests {
+		t.Name = NormalizeTestName(t.Name) // canonicalise so the gate cannot be dodged by alias
 		pass := true
 		switch t.Name {
 		case TestAflatoxinM1:

@@ -572,12 +572,33 @@ func (s *service) CloseMVUCase(ctx context.Context, actor auth.Actor, caseID pri
 
 // ListMVUCases returns a page of cases for the field roles. A dcs_id filter
 // is scope-checked against the caller's org.
-func (s *service) ListMVUCases(ctx context.Context, actor auth.Actor, dcsID primitive.ObjectID, status string, page httpx.Page) ([]domain.MVUCase, int64, error) {
+func (s *service) ListMVUCases(ctx context.Context, actor auth.Actor, dcsID, farmerPartyID primitive.ObjectID, status string, page httpx.Page) ([]domain.MVUCase, int64, error) {
 	if status != "" {
 		if _, ok := validMVUStatuses[status]; !ok {
 			return nil, 0, httpx.BadRequest("INVALID_MVU_STATUS", "status must be one of REQUESTED, DISPATCHED, ARRIVED, CLOSED, CANCELLED")
 		}
 	}
+
+	// A FARMER may only ever list their OWN cases — force the filter to self,
+	// ignoring any dcs_id/farmer_party_id they pass.
+	if actor.RoleCode == domain.RoleFarmer {
+		self, err := httpx.ParseID(actor.PartyID, "actor")
+		if err != nil {
+			return nil, 0, err
+		}
+		farmerPartyID = self
+		dcsID = primitive.NilObjectID
+	} else if actor.RoleCode != domain.RoleSuperAdmin &&
+		actor.RoleCode != domain.RoleStateAuditor &&
+		actor.RoleCode != domain.RoleMissionOfficial &&
+		actor.RoleCode != domain.RolePCDFAdmin {
+		// Scoped field roles (vet/driver/sacheev/adhyaksh) MUST name a DCS so
+		// they can never scan every farmer's cases (symptom PII) federation-wide.
+		if dcsID.IsZero() {
+			return nil, 0, httpx.BadRequest("DCS_REQUIRED", "dcs_id is required for this role")
+		}
+	}
+
 	if !dcsID.IsZero() {
 		if err := s.d.Orgs.RequireInScope(ctx, actor, dcsID); err != nil {
 			return nil, 0, s.logFailure(ctx, "list mvu cases scope check", err,
@@ -585,7 +606,7 @@ func (s *service) ListMVUCases(ctx context.Context, actor auth.Actor, dcsID prim
 				slog.String("dcs_id", dcsID.Hex()))
 		}
 	}
-	cases, total, err := s.repo.ListMVUCases(ctx, dcsID, status, page)
+	cases, total, err := s.repo.ListMVUCases(ctx, dcsID, farmerPartyID, status, page)
 	if err != nil {
 		return nil, 0, s.logFailure(ctx, "list mvu cases", err)
 	}

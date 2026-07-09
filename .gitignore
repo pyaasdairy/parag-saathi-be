@@ -33,6 +33,10 @@ vendor/
 coverage.out
 dist/
 
+# ---- Air hot-reload daemon (make dev) ----
+tmp/
+build-errors.log
+
 # ---- Infra / containers ----
 *.tfstate
 *.tfstate.*

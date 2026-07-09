@@ -40,6 +40,7 @@ type pourRow struct {
 	QuantityLitres float64            `bson:"quantity_litres"`
 	FatPct         float64            `bson:"fat_pct"`
 	SNFPct         float64            `bson:"snf_pct"`
+	Assurance      string             `bson:"assurance"`
 }
 
 // findRecordedPours returns the RECORDED pours of one DCS date+shift,
@@ -56,6 +57,7 @@ func (r *repo) findRecordedPours(ctx context.Context, dcsID primitive.ObjectID, 
 		{Key: "quantity_litres", Value: 1},
 		{Key: "fat_pct", Value: 1},
 		{Key: "snf_pct", Value: 1},
+		{Key: "assurance", Value: 1},
 	}
 	cur, err := r.pours.Find(ctx, filter,
 		options.Find().SetProjection(projection).SetSort(bson.D{{Key: "created_at", Value: 1}}))

@@ -23,6 +23,9 @@ import (
 // and reads parties / role_assignments for the support lookup and for
 // addressing safety alerts. bmc_lots / processing_batches are read solely to
 // resolve a gate-blocked subject back to its org unit.
+// The control-tower stats read (adminStats) additionally counts org_units,
+// milk_pours, kyc_records, invoices and qc_results strictly read-only, and the
+// product master owns the products collection.
 type repository struct {
 	auditLogs     *mongo.Collection
 	notifications *mongo.Collection
@@ -30,6 +33,12 @@ type repository struct {
 	assignments   *mongo.Collection
 	bmcLots       *mongo.Collection
 	batches       *mongo.Collection
+	orgUnits      *mongo.Collection
+	pours         *mongo.Collection
+	kyc           *mongo.Collection
+	invoices      *mongo.Collection
+	qcResults     *mongo.Collection
+	products      *mongo.Collection
 }
 
 // newRepository binds the repository to its collections.
@@ -41,6 +50,12 @@ func newRepository(db *mongo.Database) *repository {
 		assignments:   db.Collection(mongodb.CollRoleAssignments),
 		bmcLots:       db.Collection(mongodb.CollBMCLots),
 		batches:       db.Collection(mongodb.CollBatches),
+		orgUnits:      db.Collection(mongodb.CollOrgUnits),
+		pours:         db.Collection(mongodb.CollMilkPours),
+		kyc:           db.Collection(mongodb.CollKYCRecords),
+		invoices:      db.Collection(mongodb.CollInvoices),
+		qcResults:     db.Collection(mongodb.CollQCResults),
+		products:      db.Collection(mongodb.CollProducts),
 	}
 }
 
@@ -283,4 +298,134 @@ func (r *repository) subjectOrgUnit(ctx context.Context, subjectType string, sub
 		return primitive.NilObjectID, fmt.Errorf("%s %s carries no %s", subjectType, subjectID.Hex(), field)
 	}
 	return orgUnitID, nil
+}
+
+// ---- Admin: control-tower stats (§12) ----
+
+// count is a small read-only CountDocuments helper that wraps failures as 500s
+// with the collection/purpose named, so a broken counter is diagnosable.
+func (r *repository) count(ctx context.Context, coll *mongo.Collection, filter bson.D, what string) (int64, error) {
+	n, err := coll.CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("count %s: %w", what, err))
+	}
+	return n, nil
+}
+
+// adminStats assembles the control-tower snapshot from read-only counts over
+// the shared collections. Today's pour litres is the one summed figure (a
+// bounded $group over the day's pours); every other number is a CountDocuments.
+func (r *repository) adminStats(ctx context.Context, dayKey string) (*AdminStats, error) {
+	stats := &AdminStats{}
+	var err error
+
+	if stats.Parties, err = r.count(ctx, r.parties, bson.D{}, "parties"); err != nil {
+		return nil, err
+	}
+	if stats.ActiveRoleAssignments, err = r.count(ctx, r.assignments,
+		bson.D{{Key: "status", Value: domain.RoleAssignmentActive}}, "active role assignments"); err != nil {
+		return nil, err
+	}
+	if stats.OrgUnits.DCS, err = r.count(ctx, r.orgUnits,
+		bson.D{{Key: "type", Value: domain.OrgTypeDCS}}, "dcs org units"); err != nil {
+		return nil, err
+	}
+	if stats.OrgUnits.BMC, err = r.count(ctx, r.orgUnits,
+		bson.D{{Key: "type", Value: domain.OrgTypeBMC}}, "bmc org units"); err != nil {
+		return nil, err
+	}
+	if stats.OrgUnits.Plant, err = r.count(ctx, r.orgUnits,
+		bson.D{{Key: "type", Value: domain.OrgTypeProcessingPlant}}, "plant org units"); err != nil {
+		return nil, err
+	}
+	if stats.TodayPours, err = r.count(ctx, r.pours,
+		bson.D{{Key: "pour_date", Value: dayKey}}, "today pours"); err != nil {
+		return nil, err
+	}
+	if stats.PendingKYC, err = r.count(ctx, r.kyc,
+		bson.D{{Key: "status", Value: domain.KYCStatusPending}}, "pending kyc"); err != nil {
+		return nil, err
+	}
+	// "Pending" invoices = issued but not yet paid (awaiting settlement or held).
+	if stats.PendingInvoices, err = r.count(ctx, r.invoices,
+		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{
+			domain.InvoiceStatusIssued, domain.InvoiceStatusSettlementPending, domain.InvoiceStatusHold,
+		}}}}}, "pending invoices"); err != nil {
+		return nil, err
+	}
+	// Blocked QC subjects = failed verdicts that were not superseded by a later
+	// passing result (the safety-gate block still stands).
+	if stats.BlockedQCSubjects, err = r.count(ctx, r.qcResults,
+		bson.D{
+			{Key: "overall_pass", Value: false},
+			{Key: "superseded", Value: bson.D{{Key: "$ne", Value: true}}},
+		}, "blocked qc subjects"); err != nil {
+		return nil, err
+	}
+
+	litres, err := r.sumTodayLitres(ctx, dayKey)
+	if err != nil {
+		return nil, err
+	}
+	stats.TodayLitres = litres
+	return stats, nil
+}
+
+// sumTodayLitres sums quantity_litres over the day's pours in a single bounded
+// aggregation ($match on the indexed pour_date, then $group $sum).
+func (r *repository) sumTodayLitres(ctx context.Context, dayKey string) (float64, error) {
+	cur, err := r.pours.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "pour_date", Value: dayKey}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "litres", Value: bson.D{{Key: "$sum", Value: "$quantity_litres"}}},
+		}}},
+	})
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("sum today litres: %w", err))
+	}
+	var rows []struct {
+		Litres float64 `bson:"litres"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return 0, httpx.Internal(fmt.Errorf("decode today litres: %w", err))
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].Litres, nil
+}
+
+// ---- Admin: product master (§12) ----
+
+// listProducts returns the full product master, ordered by SKU. The catalogue
+// is small and admin-only, so it is returned unpaginated.
+func (r *repository) listProducts(ctx context.Context) ([]domain.Product, error) {
+	cur, err := r.products.Find(ctx, bson.D{}, options.Find().SetSort(bson.D{{Key: "sku", Value: 1}}))
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("list products: %w", err))
+	}
+	products := []domain.Product{}
+	if err := cur.All(ctx, &products); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode products: %w", err))
+	}
+	return products, nil
+}
+
+// upsertProduct inserts or updates the product master row keyed by SKU and
+// returns the persisted document. created_at is stamped only on insert.
+func (r *repository) upsertProduct(ctx context.Context, sku string, set bson.D, now time.Time) (*domain.Product, error) {
+	var product domain.Product
+	err := r.products.FindOneAndUpdate(ctx,
+		bson.D{{Key: "sku", Value: sku}},
+		bson.D{
+			{Key: "$set", Value: set},
+			{Key: "$setOnInsert", Value: bson.D{{Key: "created_at", Value: now}}},
+		},
+		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
+	).Decode(&product)
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("upsert product %s: %w", sku, err))
+	}
+	return &product, nil
 }

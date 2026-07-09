@@ -190,13 +190,16 @@ func (r *repository) upsertPartyByPhone(ctx context.Context, phone string, now t
 
 // updatePartyProfile sets the provided profile fields and returns the
 // updated party.
-func (r *repository) updatePartyProfile(ctx context.Context, id primitive.ObjectID, fullName, preferredLanguage *string, now time.Time) (*domain.Party, error) {
+func (r *repository) updatePartyProfile(ctx context.Context, id primitive.ObjectID, fullName, preferredLanguage *string, publicConsent *bool, now time.Time) (*domain.Party, error) {
 	set := bson.D{{Key: "updated_at", Value: now}}
 	if fullName != nil {
 		set = append(set, bson.E{Key: "full_name", Value: *fullName})
 	}
 	if preferredLanguage != nil {
 		set = append(set, bson.E{Key: "preferred_language", Value: *preferredLanguage})
+	}
+	if publicConsent != nil {
+		set = append(set, bson.E{Key: "public_consent", Value: *publicConsent})
 	}
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 	var p domain.Party
@@ -286,6 +289,113 @@ func (r *repository) listActiveAssignments(ctx context.Context, partyID primitiv
 		return nil, httpx.Internal(fmt.Errorf("decode active assignments: %w", err))
 	}
 	return out, nil
+}
+
+// findPartiesByRoles returns the distinct parties holding an ACTIVE assignment
+// for any of the given role codes — used to notify KYC reviewers that a
+// verification is pending. Capped so a broad role never floods the outbox.
+func (r *repository) findPartiesByRoles(ctx context.Context, roleCodes []string, limit int64) ([]domain.Party, error) {
+	assignFilter := bson.D{
+		{Key: "role_code", Value: bson.D{{Key: "$in", Value: roleCodes}}},
+		{Key: "status", Value: domain.RoleAssignmentActive},
+	}
+	cur, err := r.assignments.Find(ctx, assignFilter,
+		options.Find().SetProjection(bson.D{{Key: "party_id", Value: 1}}).SetLimit(limit))
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("find reviewer assignments: %w", err))
+	}
+	var rows []struct {
+		PartyID primitive.ObjectID `bson:"party_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode reviewer assignments: %w", err))
+	}
+	seen := make(map[primitive.ObjectID]struct{}, len(rows))
+	ids := make([]primitive.ObjectID, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := seen[row.PartyID]; ok {
+			continue
+		}
+		seen[row.PartyID] = struct{}{}
+		ids = append(ids, row.PartyID)
+	}
+	byID, err := r.findPartiesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Party, 0, len(byID))
+	for _, id := range ids {
+		if p, ok := byID[id]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// listPartiesByRoleInOrg pages the distinct parties holding an ACTIVE
+// assignment of roleCode inside orgUnitID — backing the reviewer's "sachivs in
+// this DCS" picker (FE listSachivs). It reuses the same active-assignment →
+// distinct-party-id → findPartiesByIDs shape as findPartiesByRoles, adding the
+// org-unit constraint and offset/limit paging over the distinct party set.
+// total is the count of distinct matching parties.
+func (r *repository) listPartiesByRoleInOrg(ctx context.Context, roleCode string, orgUnitID primitive.ObjectID, page httpx.Page) ([]domain.Party, int64, error) {
+	assignFilter := bson.D{
+		{Key: "role_code", Value: roleCode},
+		{Key: "status", Value: domain.RoleAssignmentActive},
+	}
+	// A zero org means "federation-wide" (already authorised in the service) —
+	// omit the org filter entirely rather than matching the zero ObjectID.
+	if !orgUnitID.IsZero() {
+		assignFilter = append(assignFilter, bson.E{Key: "org_unit_id", Value: orgUnitID})
+	}
+	// Newest assignment first so the picker surfaces recent grants at the top;
+	// dedupe preserves first-seen order.
+	cur, err := r.assignments.Find(ctx, assignFilter,
+		options.Find().
+			SetProjection(bson.D{{Key: "party_id", Value: 1}}).
+			SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("find role assignments by org: %w", err))
+	}
+	var rows []struct {
+		PartyID primitive.ObjectID `bson:"party_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("decode role assignments by org: %w", err))
+	}
+	seen := make(map[primitive.ObjectID]struct{}, len(rows))
+	ordered := make([]primitive.ObjectID, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := seen[row.PartyID]; ok {
+			continue
+		}
+		seen[row.PartyID] = struct{}{}
+		ordered = append(ordered, row.PartyID)
+	}
+	total := int64(len(ordered))
+
+	// Page over the distinct party ids.
+	lo := page.Offset
+	if lo > total {
+		lo = total
+	}
+	hi := lo + page.Limit
+	if hi > total {
+		hi = total
+	}
+	pageIDs := ordered[lo:hi]
+
+	byID, err := r.findPartiesByIDs(ctx, pageIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]domain.Party, 0, len(pageIDs))
+	for _, id := range pageIDs {
+		if p, ok := byID[id]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, total, nil
 }
 
 // findAssignmentByID loads one role assignment.

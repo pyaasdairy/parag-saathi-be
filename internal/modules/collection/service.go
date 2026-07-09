@@ -106,10 +106,17 @@ func (s *service) CreateRateChart(ctx context.Context, actor auth.Actor, req Cre
 	if err := s.repo.deactivateActiveCharts(ctx, req.OrgUnitID); err != nil {
 		return nil, err
 	}
+	version := req.Version
+	if version == "" {
+		// Auto-derive a stable, human-readable version so pricing is always
+		// pinnable even when the caller omits one (§6.3): YYYY-MM + short id.
+		version = effectiveFrom.Format("2006-01") + "-" + primitive.NewObjectID().Hex()[:6]
+	}
 	chart := &domain.RateChart{
 		ID:               primitive.NewObjectID(),
 		OrgUnitID:        req.OrgUnitID,
 		Name:             req.Name,
+		Version:          version,
 		BaseRatePerLitre: req.BaseRatePerLitre,
 		FatRatePerPoint:  req.FatRatePerPoint,
 		SNFRatePerPoint:  req.SNFRatePerPoint,
@@ -461,8 +468,10 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 		RatePerLitre:      rate,
 		Amount:            amount,
 		RateChartID:       chart.ID,
+		RateChartVersion:  chart.Version, // §6.3 pin the pricing version on the pour
 		AnalyzerReadingID: req.AnalyzerReadingID,
 		Source:            req.Source,
+		Assurance:         domain.AssuranceForSource(req.Source), // §6.2 capture assurance
 		Status:            domain.PourStatusRecorded,
 		PouredAt:          pouredAt,
 		RecordedBy:        recordedBy,
@@ -770,8 +779,10 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID pr
 		RatePerLitre:      rate,
 		Amount:            amount,
 		RateChartID:       chart.ID,
+		RateChartVersion:  chart.Version,
 		AnalyzerReadingID: old.AnalyzerReadingID,
 		Source:            old.Source,
+		Assurance:         old.Assurance, // a correction keeps the original capture assurance
 		Status:            domain.PourStatusRecorded,
 		SupersedesPourID:  &old.ID,
 		PouredAt:          old.PouredAt,

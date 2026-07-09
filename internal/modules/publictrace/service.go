@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +35,10 @@ const (
 	// downstreamEventCap keeps the official trace response bounded even for
 	// heavily referenced entities.
 	downstreamEventCap = 2000
+	// rosterCap bounds the consented farmer roster surfaced on a public scan
+	// (§6.7): non-consenting farmers are counted but never named, and even the
+	// consenting roster is capped so the response stays small.
+	rosterCap = 200
 )
 
 // validEntityTypes is the closed set of traceable entity types (domain.Entity*).
@@ -267,9 +272,14 @@ func (s *Service) buildSourcing(ctx context.Context, events []provenance.Event) 
 		}
 	}
 
-	// Fallback: if the events lacked DCS ids or dates, read the consignment
-	// docs themselves (still samiti-level — pour ids are never surfaced).
-	if len(consignmentIDs) > 0 && (len(dcsIDs) == 0 || len(dates) == 0) {
+	// Always load the consignment docs now: they are the authoritative source
+	// of per-DCS pooled VOLUME (total_quantity_litres) and the pour ids the
+	// consented-farmer roster walks. They also backfill DCS ids / dates when
+	// the ledger events did not carry them. Pour ids are aggregated here but
+	// NEVER surfaced — only the derived samiti-set and consent-gated roster.
+	litresByDCS := map[string]float64{}
+	var pourIDs []primitive.ObjectID
+	if len(consignmentIDs) > 0 {
 		ids := make([]primitive.ObjectID, 0, len(consignmentIDs))
 		for _, hexID := range sortedKeys(consignmentIDs) {
 			cid, err := primitive.ObjectIDFromHex(hexID)
@@ -288,11 +298,20 @@ func (s *Service) buildSourcing(ctx context.Context, events []provenance.Event) 
 		for _, c := range docs {
 			if !c.DCSID.IsZero() {
 				dcsIDs[c.DCSID.Hex()] = struct{}{}
+				litresByDCS[c.DCSID.Hex()] += c.TotalQuantityLitres
 			}
 			if c.Date != "" {
 				dates[c.Date] = struct{}{}
 			}
+			pourIDs = append(pourIDs, c.PourIDs...)
 		}
+	}
+
+	// Total pooled litres across every contributing DCS — the denominator for
+	// each society's volume share.
+	var totalLitres float64
+	for _, l := range litresByDCS {
+		totalLitres += l
 	}
 
 	samitis := make([]SamitiInfo, 0, len(dcsIDs))
@@ -318,20 +337,86 @@ func (s *Service) buildSourcing(ctx context.Context, events []provenance.Event) 
 				slog.String("org_id", hexID), slog.String("org_type", org.Type))
 			continue
 		}
-		samitis = append(samitis, SamitiInfo{Name: org.Name, Code: org.Code, District: org.District})
+		litres := litresByDCS[hexID]
+		var share float64
+		if totalLitres > 0 {
+			share = litres / totalLitres
+		}
+		samitis = append(samitis, SamitiInfo{
+			Name:     org.Name,
+			Code:     org.Code,
+			District: org.District,
+			Litres:   round2(litres),
+			Share:    round4(share),
+		})
 		if org.District != "" {
 			districts[org.District] = struct{}{}
 		}
 	}
 	sort.Slice(samitis, func(i, j int) bool { return samitis[i].Name < samitis[j].Name })
 
+	farmersTotal, farmersPublic, err := s.buildFarmerRoster(ctx, pourIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	collectionDates := sortedKeys(dates)
 	return &SourcingInfo{
 		Message:         sourcingMessage(collectionDates, len(samitis), sortedKeys(districts)),
 		Samitis:         samitis,
 		CollectionDates: collectionDates,
+		FarmersTotal:    farmersTotal,
+		FarmersPublic:   farmersPublic,
 	}, nil
 }
+
+// buildFarmerRoster resolves the contributing farmers behind the pooled pour
+// set into (total distinct count, consent-gated named roster). It walks the
+// pours to their distinct farmer parties (§7.4 grain), then names ONLY those
+// whose public_consent is true (§6.7) — everyone else is counted but never
+// identified. The named roster is capped at rosterCap. FarmersPublic is never
+// nil so the response shape is stable.
+func (s *Service) buildFarmerRoster(ctx context.Context, pourIDs []primitive.ObjectID) (int, []FarmerPublicInfo, error) {
+	roster := make([]FarmerPublicInfo, 0)
+	if len(pourIDs) == 0 {
+		return 0, roster, nil
+	}
+
+	farmerIDs, err := s.repo.distinctFarmerPartyIDs(ctx, pourIDs)
+	if err != nil {
+		return 0, nil, s.internalErr(ctx, "qr scan: distinct contributing farmers", err)
+	}
+	farmersTotal := len(farmerIDs)
+	if farmersTotal == 0 {
+		return 0, roster, nil
+	}
+
+	// Consent gate is enforced at the query (public_consent == true) AND bounded
+	// by rosterCap — a non-consenting farmer can never enter the roster.
+	consenting, err := s.repo.consentingPartiesByIDs(ctx, farmerIDs, rosterCap)
+	if err != nil {
+		return 0, nil, s.internalErr(ctx, "qr scan: load consenting farmers", err)
+	}
+	for _, p := range consenting {
+		f := FarmerPublicInfo{Name: p.FullName}
+		if !p.CreatedAt.IsZero() {
+			f.MemberSince = p.CreatedAt.UTC().Format("2006-01-02")
+		}
+		roster = append(roster, f)
+	}
+	sort.Slice(roster, func(i, j int) bool { return roster[i].Name < roster[j].Name })
+
+	s.log.InfoContext(ctx, "qr scan farmer roster resolved",
+		slog.Int("farmers_total", farmersTotal),
+		slog.Int("farmers_public", len(roster)))
+	return farmersTotal, roster, nil
+}
+
+// round2 rounds litres to two decimal places for a stable public display.
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// round4 rounds a share (0..1) to four decimal places.
+func round4(v float64) float64 { return math.Round(v*10000) / 10000 }
 
 // sourcingMessage renders the consumer-facing pooled-provenance sentence,
 // e.g. "Made from milk collected on 2026-07-05 from 3 samitis in Lucknow".
