@@ -1,6 +1,10 @@
 package logistics
 
-import "go.mongodb.org/mongo-driver/bson/primitive"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
 
 // createConsignmentRequest asks to pool one DCS shift's RECORDED pours.
 type createConsignmentRequest struct {
@@ -59,6 +63,32 @@ type tripListQuery struct {
 	UnionID         primitive.ObjectID
 	Date            string
 	VanRiderPartyID primitive.ObjectID
+}
+
+// consignmentInvoice is the DCS→Union B2B settlement document for one sealed
+// consignment. Fresh milk is GST-exempt (HSN 0401): the taxable value is the
+// pooled milk's worth (Σ pour amounts), tax is zero and total == taxable. The
+// "line item" is the single pooled consignment (qty + weighted fat/SNF), not a
+// per-SKU array. Seller is the DCS; buyer is its parent Union.
+type consignmentInvoice struct {
+	InvoiceNo       string              `json:"invoice_no"`
+	ConsignmentID   primitive.ObjectID  `json:"consignment_id"`
+	ConsignmentCode string              `json:"consignment_code"`
+	FromDCSID       primitive.ObjectID  `json:"from_dcs_id"`
+	ToUnionID       *primitive.ObjectID `json:"to_union_id,omitempty"`
+	Date            string              `json:"date"`
+	Shift           string              `json:"shift"`
+	HSNCode         string              `json:"hsn_code"` // 0401 — fresh milk
+	GSTNote         string              `json:"gst_note"`
+	TotalLitres     float64             `json:"total_litres"`
+	AvgFatPct       float64             `json:"avg_fat_pct"`
+	AvgSNFPct       float64             `json:"avg_snf_pct"`
+	FarmerCount     int                 `json:"farmer_count"`
+	TaxableAmount   float64             `json:"taxable_amount"`
+	TaxAmount       float64             `json:"tax_amount"`
+	TotalAmount     float64             `json:"total_amount"`
+	GeneratedByID   *primitive.ObjectID `json:"generated_by_id,omitempty"`
+	GeneratedAt     *time.Time          `json:"generated_at,omitempty"`
 }
 
 // listMeta is the pagination envelope for list responses.

@@ -12,8 +12,10 @@ import (
 type CreateOrgRequest struct {
 	Type     string              `json:"type"`
 	Name     string              `json:"name"`
+	NameHi   string              `json:"name_hi,omitempty"`
 	Code     string              `json:"code"`
 	ParentID *primitive.ObjectID `json:"parent_id,omitempty"`
+	Village  string              `json:"village,omitempty"` // the village a DCS serves
 	District string              `json:"district,omitempty"`
 	State    string              `json:"state,omitempty"`
 	GeoLat   *float64            `json:"geo_lat,omitempty"`
@@ -27,6 +29,8 @@ type CreateOrgRequest struct {
 // ORG_MOVE_UNSUPPORTED rejection rather than a decode error.
 type UpdateOrgRequest struct {
 	Name     *string  `json:"name"`
+	NameHi   *string  `json:"name_hi"`
+	Village  *string  `json:"village"`
 	District *string  `json:"district"`
 	Active   *bool    `json:"active"`
 	GeoLat   *float64 `json:"geo_lat"`

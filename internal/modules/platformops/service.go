@@ -105,9 +105,16 @@ func (s *service) adminStats(ctx context.Context) (*AdminStats, error) {
 
 // ---- Admin: product master (§12) ----
 
-// listProducts returns the full admin product master.
+// listProducts returns the full admin product master (active + inactive).
 func (s *service) listProducts(ctx context.Context) ([]domain.Product, error) {
-	return s.repo.listProducts(ctx)
+	return s.repo.listProducts(ctx, false)
+}
+
+// listActiveProducts returns only ACTIVE products — the session-readable
+// catalogue served on GET /products (e.g. a plant operator picking product
+// options for a lot; a store screen). Inactive/retired SKUs are hidden.
+func (s *service) listActiveProducts(ctx context.Context) ([]domain.Product, error) {
+	return s.repo.listProducts(ctx, true)
 }
 
 // upsertProduct creates or updates a product master row keyed by SKU and
@@ -136,12 +143,18 @@ func (s *service) upsertProduct(ctx context.Context, actor auth.Actor, req Upser
 		active = *req.Active
 	}
 
+	if req.ShelfLifeDays < 0 {
+		return nil, httpx.BadRequest("INVALID_SHELF_LIFE", "shelf_life_days must not be negative")
+	}
 	now := time.Now().UTC()
 	set := bson.D{
 		{Key: "sku", Value: sku},
 		{Key: "name", Value: name},
+		{Key: "name_hi", Value: strings.TrimSpace(req.NameHi)},
+		{Key: "category", Value: domain.NormalizeProductCategory(strings.TrimSpace(req.Category))},
 		{Key: "mrp", Value: req.MRP},
 		{Key: "unit_size", Value: strings.TrimSpace(req.UnitSize)},
+		{Key: "shelf_life_days", Value: req.ShelfLifeDays},
 		{Key: "active", Value: active},
 		{Key: "updated_at", Value: now},
 	}
@@ -162,6 +175,61 @@ func (s *service) upsertProduct(ctx context.Context, actor auth.Actor, req Upser
 		slog.String("product_id", product.ID.Hex()), slog.String("sku", sku),
 		slog.Bool("active", active), slog.String("actor_party_id", actor.PartyID))
 	return product, nil
+}
+
+// ---- Admin: Sachiv-cap governance knob ----
+
+// sachivCapKey is the app_settings key for the max-Sachivs-per-DCS ceiling.
+const sachivCapKey = "sachiv_cap"
+
+// defaultSachivCap is the ceiling applied until an admin sets one explicitly.
+const defaultSachivCap = 2
+
+// getSachivCap returns the current cap and the count of appointed (ACTIVE)
+// SAMITI_SACHEEV assignments, federation-wide.
+func (s *service) getSachivCap(ctx context.Context) (*SachivCapResponse, error) {
+	capValue, err := s.repo.getIntSetting(ctx, sachivCapKey, defaultSachivCap)
+	if err != nil {
+		return nil, err
+	}
+	appointed, err := s.repo.countActiveRoleHolders(ctx, domain.RoleSamitiSacheev)
+	if err != nil {
+		return nil, err
+	}
+	return &SachivCapResponse{Cap: capValue, Appointed: appointed}, nil
+}
+
+// setSachivCap updates the cap. A cap below the number already appointed is a
+// 409 (the knob can be raised freely but never dropped below live reality), and
+// the change is audited.
+func (s *service) setSachivCap(ctx context.Context, actor auth.Actor, capValue int) (*SachivCapResponse, error) {
+	if capValue < 0 {
+		return nil, httpx.BadRequest("INVALID_CAP", "cap must not be negative")
+	}
+	appointed, err := s.repo.countActiveRoleHolders(ctx, domain.RoleSamitiSacheev)
+	if err != nil {
+		return nil, err
+	}
+	if capValue < appointed {
+		s.log.WarnContext(ctx, "sachiv cap set rejected: below appointed",
+			slog.Int("cap", capValue), slog.Int("appointed", appointed),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Conflict("CAP_BELOW_APPOINTED",
+			fmt.Sprintf("cap %d is below the %d already-appointed Sachivs", capValue, appointed))
+	}
+	if err := s.repo.setIntSetting(ctx, sachivCapKey, capValue); err != nil {
+		return nil, err
+	}
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "admin.sachiv_cap_set",
+		TargetType: "SETTING",
+		TargetID:   sachivCapKey,
+		Meta:       map[string]any{"cap": capValue, "appointed": appointed},
+	})
+	s.log.InfoContext(ctx, "sachiv cap set",
+		slog.Int("cap", capValue), slog.Int("appointed", appointed),
+		slog.String("actor_party_id", actor.PartyID))
+	return &SachivCapResponse{Cap: capValue, Appointed: appointed}, nil
 }
 
 // ---- Auditor: read-only audit-log surface (§12) ----

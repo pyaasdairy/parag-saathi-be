@@ -24,14 +24,27 @@ const (
 // creates-or-finds the Party by phone, verifies KYC at RequestedTier and
 // grants RequestedRole@OrgUnitID — or rejects with a reason.
 type OnboardingRequest struct {
-	ID              primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
-	Phone           string              `bson:"phone"         json:"phone"`
-	FullName        string              `bson:"full_name"     json:"full_name"`
-	RequestedRole   string              `bson:"requested_role" json:"requested_role"`
-	OrgUnitID       primitive.ObjectID  `bson:"org_unit_id"   json:"org_unit_id"`
-	RequestedTier   string              `bson:"requested_tier" json:"requested_tier"`
-	Note            string              `bson:"note,omitempty" json:"note,omitempty"`
-	DocumentRefs    []string            `bson:"document_refs,omitempty" json:"document_refs,omitempty"`
+	ID            primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Phone         string             `bson:"phone"         json:"phone"`
+	FullName      string             `bson:"full_name"     json:"full_name"`
+	FullNameHi    string             `bson:"full_name_hi,omitempty" json:"full_name_hi,omitempty"`
+	RequestedRole string             `bson:"requested_role" json:"requested_role"`
+	OrgUnitID     primitive.ObjectID `bson:"org_unit_id"   json:"org_unit_id"`
+	RequestedTier string             `bson:"requested_tier" json:"requested_tier"`
+	Note          string             `bson:"note,omitempty" json:"note,omitempty"`
+	DocumentRefs  []string           `bson:"document_refs,omitempty" json:"document_refs,omitempty"`
+	// Rich field-capture carried from the doorstep enrolment form (blueprint §4).
+	// These are stored verbatim for the reviewer console; the approval saga still
+	// only needs phone/full_name/requested_role/org_unit_id/requested_tier.
+	Village         string              `bson:"village,omitempty"         json:"village,omitempty"`
+	DocumentType    string              `bson:"document_type,omitempty"   json:"document_type,omitempty"`
+	DocumentNumber  string              `bson:"document_number,omitempty" json:"document_number,omitempty"`
+	KYCPhotoURL     string              `bson:"kyc_photo_url,omitempty"     json:"kyc_photo_url,omitempty"`
+	ProfilePhotoURL string              `bson:"profile_photo_url,omitempty" json:"profile_photo_url,omitempty"`
+	CattleCount     int                 `bson:"cattle_count,omitempty"    json:"cattle_count,omitempty"`
+	CattleBreed     string              `bson:"cattle_breed,omitempty"    json:"cattle_breed,omitempty"`
+	VehicleNumber   string              `bson:"vehicle_number,omitempty"  json:"vehicle_number,omitempty"`
+	EmployeeID      string              `bson:"employee_id,omitempty"     json:"employee_id,omitempty"`
 	Status          string              `bson:"status"        json:"status"`
 	SubmittedBy     primitive.ObjectID  `bson:"submitted_by"  json:"submitted_by"`
 	ReviewedBy      *primitive.ObjectID `bson:"reviewed_by,omitempty"      json:"reviewed_by,omitempty"`

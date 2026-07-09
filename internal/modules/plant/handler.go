@@ -218,26 +218,33 @@ func (h *Handler) CreateProductLot(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	switch {
-	case req.BatchID.IsZero():
+	// When product_id is given the catalogue supplies sku/product_name/unit_size,
+	// so those are not required on the wire; otherwise they must be present.
+	if req.BatchID.IsZero() {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "batch_id is required"))
 		return
-	case req.SKU == "":
-		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "sku is required"))
-		return
-	case req.ProductName == "":
-		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "product_name is required"))
-		return
+	}
+	if req.ProductID.IsZero() {
+		switch {
+		case req.SKU == "":
+			httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "sku is required (or send product_id)"))
+			return
+		case req.ProductName == "":
+			httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "product_name is required (or send product_id)"))
+			return
+		case req.UnitSize == "":
+			httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "unit_size is required (or send product_id)"))
+			return
+		}
+	}
+	switch {
 	case req.Units <= 0:
 		httpx.Error(w, r, httpx.BadRequest("INVALID_UNITS", "units must be a positive integer"))
-		return
-	case req.UnitSize == "":
-		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "unit_size is required"))
 		return
 	case req.MRP < 0:
 		httpx.Error(w, r, httpx.BadRequest("INVALID_MRP", "mrp cannot be negative"))
 		return
-	case req.ExpiryDate == "" || !validDateKey(req.ExpiryDate):
+	case req.ExpiryDate != "" && !validDateKey(req.ExpiryDate):
 		httpx.Error(w, r, httpx.BadRequest("INVALID_DATE", "expiry_date must be YYYY-MM-DD"))
 		return
 	case req.MfgDate != "" && !validDateKey(req.MfgDate):

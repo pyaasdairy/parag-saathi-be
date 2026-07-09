@@ -74,7 +74,9 @@ func Register(r chi.Router, d *deps.Deps) {
 	r.Route("/dbt", func(dr chi.Router) {
 		dr.Use(middleware.Authenticate(d.JWT))
 
-		dr.With(middleware.RequireRoles(domain.RoleMissionOfficial, domain.RolePCDFAdmin)).
+		// A FARMER may apply for a scheme for THEMSELVES (the service forces
+		// farmer_party_id to the actor); officials may file for any beneficiary.
+		dr.With(middleware.RequireRoles(domain.RoleMissionOfficial, domain.RolePCDFAdmin, domain.RoleFarmer)).
 			Post("/requests", h.createDBT)
 		dr.With(middleware.RequireRoles(domain.RoleMissionOfficial, domain.RolePCDFAdmin)).
 			Post("/requests/{id}/status", h.updateDBTStatus)

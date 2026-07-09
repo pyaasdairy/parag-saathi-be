@@ -116,6 +116,26 @@ func run() error {
 		})
 	})
 
+	// Bridge the remaining cross-module bus topics to the live SSE dashboard
+	// nudges the FE useLiveSync listens for (settlement.changed / quality.changed
+	// / pour.recorded). Each is a nudge only — the client re-fetches the
+	// authoritative scoped value on receipt, so role-level targeting is enough.
+	bridgeSSE := func(topic, sseType string, roles []string) {
+		bus.Subscribe(topic, func(_ context.Context, _ string, payload any) {
+			sseHub.Broadcast(sse.Event{Type: sseType, Data: payload, Roles: roles})
+		})
+	}
+	bridgeSSE(eventbus.TopicPourRecorded, "pour.recorded",
+		[]string{domain.RoleSamitiSacheev, domain.RoleMilkTester, domain.RoleSamitiAdhyaksh, domain.RoleFarmer})
+	bridgeSSE(eventbus.TopicQCRecorded, "quality.changed",
+		[]string{domain.RolePlantLabAnalyst, domain.RoleBMCOperator, domain.RolePlantOperator, domain.RoleUnionFieldSupervisor})
+	bridgeSSE(eventbus.TopicGateBlocked, "quality.changed",
+		[]string{domain.RolePlantLabAnalyst, domain.RoleBMCOperator, domain.RolePlantOperator, domain.RoleUnionFieldSupervisor})
+	// settlement.changed fires off the payout-credited event (published per farmer
+	// as a batch executes) — the money-moving step the FE cares about.
+	bridgeSSE(eventbus.TopicPayoutCredited, "settlement.changed",
+		[]string{domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh, domain.RoleUnionPresident, domain.RoleFarmer})
+
 	d := &deps.Deps{
 		Cfg:         cfg,
 		Log:         log,

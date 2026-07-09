@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -321,6 +322,16 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 		return nil, httpx.Conflict("SUBJECT_ALREADY_GATED", "subject is no longer awaiting QC — a verdict was already recorded")
 	}
 
+	// A QC verdict (pass OR fail) removes the subject from the lab's live queue,
+	// so nudge any open quality dashboards to re-fetch. Fire-and-forget bus event
+	// bridged to the SSE "quality.changed" topic.
+	s.deps.Bus.Publish(eventbus.TopicQCRecorded, QCRecordedPayload{
+		SubjectType: req.SubjectType,
+		SubjectID:   req.SubjectID.Hex(),
+		Stage:       req.Stage,
+		OverallPass: overallPass,
+	})
+
 	if overallPass {
 		s.log.InfoContext(ctx, "qc gate passed",
 			slog.String("qc_result_id", resultID.Hex()),
@@ -537,7 +548,7 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 	items := make([]QCQueueItem, 0, len(lots)+len(batches))
 	for _, lot := range lots {
 		item, err := s.queueItem(ctx, domain.QCSubjectBMCLot, lot.ID, domain.QCStageBMCRapid,
-			lot.Date+" "+lot.Shift, lot.BMCID, lot.CreatedAt)
+			lot.Date+" "+lot.Shift, lot.TotalQuantityLitres, lot.BMCID, lot.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -545,7 +556,7 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 	}
 	for _, batch := range batches {
 		item, err := s.queueItem(ctx, domain.QCSubjectProcessingBatch, batch.ID, domain.QCStagePlantLab,
-			batch.BatchNumber, batch.PlantID, batch.CreatedAt)
+			batch.BatchNumber, batch.InputLitres, batch.PlantID, batch.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -557,7 +568,7 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 
 // queueItem builds one queue row: it derives the stage's mandatory tests and
 // splits them against the parameters already on file for the subject.
-func (s *service) queueItem(ctx context.Context, subjectType string, subjectID primitive.ObjectID, stage, reference string, orgUnitID primitive.ObjectID, createdAt time.Time) (QCQueueItem, error) {
+func (s *service) queueItem(ctx context.Context, subjectType string, subjectID primitive.ObjectID, stage, reference string, inputLitres float64, orgUnitID primitive.ObjectID, createdAt time.Time) (QCQueueItem, error) {
 	recordedSet, err := s.repo.recordedTestNames(ctx, subjectType, subjectID)
 	if err != nil {
 		s.log.ErrorContext(ctx, "qc queue: recorded tests lookup failed",
@@ -581,6 +592,7 @@ func (s *service) queueItem(ctx context.Context, subjectType string, subjectID p
 		SubjectID:      subjectID,
 		Stage:          stage,
 		Reference:      reference,
+		InputLitres:    inputLitres,
 		OrgUnitID:      orgUnitID,
 		MandatoryTests: mandatory,
 		RecordedTests:  recorded,
@@ -718,12 +730,36 @@ func (s *service) traceBack(ctx context.Context, actor auth.Actor, batchID primi
 		return nil, err
 	}
 
+	// Per-society weighted breakdown: resolve the batch's BMC lots → consignments
+	// → per-DCS litres/pour-count/date (§7.4). The share denominator is the sum
+	// of contributing litres (never zero-division).
+	contrib, cerr := s.repo.consignmentContributions(ctx, batch.BMCLotIDs)
+	if cerr != nil {
+		s.log.WarnContext(ctx, "qc trace-back: contribution aggregation failed (shares omitted)",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", cerr))
+		contrib = map[primitive.ObjectID]societyContribution{}
+	}
+	var totalLitres float64
+	for _, c := range contrib {
+		totalLitres += c.Litres
+	}
+
 	societies := make([]ContributingSociety, 0, len(batch.ContributingDCSIDs))
 	for _, dcsID := range batch.ContributingDCSIDs {
 		cs := ContributingSociety{OrgUnitID: dcsID}
+		if c, ok := contrib[dcsID]; ok {
+			cs.VolumeLitres = round2(c.Litres)
+			cs.PourCount = c.PourCount
+			cs.CollectedOn = c.CollectedOn
+			if totalLitres > 0 {
+				cs.VolumeShare = round4(c.Litres / totalLitres)
+			}
+		}
 		if org, oerr := s.deps.Orgs.Get(ctx, dcsID); oerr == nil && org != nil {
 			cs.Code = org.Code
 			cs.Name = org.Name
+			cs.NameHi = org.NameHi
+			cs.Village = org.Village
 			cs.District = org.District
 			cs.Resolved = true
 		} else {
@@ -746,11 +782,16 @@ func (s *service) traceBack(ctx context.Context, actor auth.Actor, batchID primi
 		BatchNumber:           batch.BatchNumber,
 		PlantID:               batch.PlantID,
 		Status:                batch.Status,
+		InputLitres:           round2(batch.InputLitres),
 		BlockReason:           batch.BlockReason,
 		ContributingSocieties: societies,
 		QCResults:             results,
 	}, nil
 }
+
+// round2/round4 keep litres and share values at sensible precision.
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+func round4(v float64) float64 { return math.Round(v*10000) / 10000 }
 
 // limits returns the FSSAI gate constants (blueprint §8.3) as reference data.
 func (s *service) limits() LimitsResponse {

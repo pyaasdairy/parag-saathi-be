@@ -59,11 +59,28 @@ type AdminStats struct {
 // Active is a pointer so an absent field is distinguishable from an explicit
 // false (default on insert is active=true).
 type UpsertProductRequest struct {
-	SKU      string  `json:"sku"`
-	Name     string  `json:"name"`
-	MRP      float64 `json:"mrp"`
-	UnitSize string  `json:"unit_size"`
-	Active   *bool   `json:"active"`
+	SKU           string  `json:"sku"`
+	Name          string  `json:"name"`
+	NameHi        string  `json:"name_hi"`
+	Category      string  `json:"category"` // MILK|DAHI|PANEER|GHEE|BUTTER|OTHER (defaults OTHER)
+	MRP           float64 `json:"mrp"`
+	UnitSize      string  `json:"unit_size"`
+	ShelfLifeDays int     `json:"shelf_life_days"`
+	Active        *bool   `json:"active"`
+}
+
+// SachivCapRequest is the PUT /admin/sachiv-cap body: the governance ceiling on
+// how many SAMITI_SACHEEV a DCS may appoint. SetByPartyID is derived from the
+// token; the client value (if any) is ignored.
+type SachivCapRequest struct {
+	Cap int `json:"cap"`
+}
+
+// SachivCapResponse is the GET/PUT /admin/sachiv-cap body: the cap plus the
+// current count of appointed (ACTIVE) SAMITI_SACHEEV assignments federation-wide.
+type SachivCapResponse struct {
+	Cap       int `json:"cap"`
+	Appointed int `json:"appointed"`
 }
 
 // StoredNotification is a notifications document as this module reads and

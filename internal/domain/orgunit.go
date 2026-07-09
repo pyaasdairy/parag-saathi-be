@@ -43,9 +43,11 @@ type OrgUnit struct {
 	ID        primitive.ObjectID   `bson:"_id,omitempty" json:"id"`
 	Type      string               `bson:"type"          json:"type"`
 	Name      string               `bson:"name"          json:"name"`
-	Code      string               `bson:"code"          json:"code"` // unique business key, e.g. "DCS-01842"
+	NameHi    string               `bson:"name_hi,omitempty" json:"name_hi,omitempty"` // vernacular display name
+	Code      string               `bson:"code"          json:"code"`                  // unique business key, e.g. "DCS-01842"
 	ParentID  *primitive.ObjectID  `bson:"parent_id,omitempty" json:"parent_id,omitempty"`
 	Path      []primitive.ObjectID `bson:"path"          json:"path"`
+	Village   string               `bson:"village,omitempty"  json:"village,omitempty"` // the village a DCS serves
 	District  string               `bson:"district,omitempty" json:"district,omitempty"`
 	State     string               `bson:"state,omitempty"    json:"state,omitempty"`
 	GeoLat    float64              `bson:"geo_lat,omitempty"  json:"geo_lat,omitempty"`

@@ -16,16 +16,20 @@ import (
 // repo reads (never writes) the pour, invoice and role-assignment collections
 // owned by other modules — dashboards is a pure read-side aggregate.
 type repo struct {
-	pours       *mongo.Collection
-	invoices    *mongo.Collection
-	assignments *mongo.Collection
+	pours        *mongo.Collection
+	invoices     *mongo.Collection
+	assignments  *mongo.Collection
+	animals      *mongo.Collection
+	consignments *mongo.Collection
 }
 
 func newRepo(db *mongo.Database) *repo {
 	return &repo{
-		pours:       db.Collection(mongodb.CollMilkPours),
-		invoices:    db.Collection(mongodb.CollInvoices),
-		assignments: db.Collection(mongodb.CollRoleAssignments),
+		pours:        db.Collection(mongodb.CollMilkPours),
+		invoices:     db.Collection(mongodb.CollInvoices),
+		assignments:  db.Collection(mongodb.CollRoleAssignments),
+		animals:      db.Collection(mongodb.CollAnimals),
+		consignments: db.Collection(mongodb.CollConsignments),
 	}
 }
 
@@ -132,6 +136,77 @@ func (r *repo) memberCount(ctx context.Context, dcsID primitive.ObjectID) (int, 
 		return 0, fmt.Errorf("member count: %w", err)
 	}
 	return int(n), nil
+}
+
+// animalCount counts the registered animals a farmer owns.
+func (r *repo) animalCount(ctx context.Context, farmerID primitive.ObjectID) (int, error) {
+	n, err := r.animals.CountDocuments(ctx, bson.D{{Key: "owner_party_id", Value: farmerID}})
+	if err != nil {
+		return 0, fmt.Errorf("animal count: %w", err)
+	}
+	return int(n), nil
+}
+
+// dcsAvgFatSnf returns the quantity-weighted average fat% and SNF% over a DCS's
+// RECORDED pours since `sinceDate` (both 0 when there are no pours).
+func (r *repo) dcsAvgFatSnf(ctx context.Context, dcsID primitive.ObjectID, sinceDate string) (avgFat, avgSNF float64, err error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "dcs_id", Value: dcsID},
+			{Key: "pour_date", Value: bson.D{{Key: "$gte", Value: sinceDate}}},
+			{Key: "status", Value: domain.PourStatusRecorded},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "qty", Value: bson.D{{Key: "$sum", Value: "$quantity_litres"}}},
+			{Key: "fatw", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$multiply", Value: bson.A{"$fat_pct", "$quantity_litres"}}}}}},
+			{Key: "snfw", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$multiply", Value: bson.A{"$snf_pct", "$quantity_litres"}}}}}},
+		}}},
+	}
+	cur, err := r.pours.Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, 0, fmt.Errorf("dcs avg fat/snf: %w", err)
+	}
+	var rows []struct {
+		Qty  float64 `bson:"qty"`
+		FatW float64 `bson:"fatw"`
+		SNFW float64 `bson:"snfw"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return 0, 0, fmt.Errorf("decode dcs avg fat/snf: %w", err)
+	}
+	if len(rows) == 0 || rows[0].Qty == 0 {
+		return 0, 0, nil
+	}
+	return round2(rows[0].FatW / rows[0].Qty), round2(rows[0].SNFW / rows[0].Qty), nil
+}
+
+// dcsRejectedConsignments counts a DCS's consignments rejected since `sinceDate`
+// — the "quality failures in the last 30 days" tile.
+func (r *repo) dcsRejectedConsignments(ctx context.Context, dcsID primitive.ObjectID, sinceDate string) (int, error) {
+	n, err := r.consignments.CountDocuments(ctx, bson.D{
+		{Key: "dcs_id", Value: dcsID},
+		{Key: "status", Value: domain.ConsignmentStatusRejected},
+		{Key: "date", Value: bson.D{{Key: "$gte", Value: sinceDate}}},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("dcs rejected consignments: %w", err)
+	}
+	return int(n), nil
+}
+
+// dcsHasOpenConsignment reports whether an OPEN (unsealed) consignment exists
+// for a DCS on `date` — the "today's shift still open" indicator.
+func (r *repo) dcsHasOpenConsignment(ctx context.Context, dcsID primitive.ObjectID, date string) (bool, error) {
+	n, err := r.consignments.CountDocuments(ctx, bson.D{
+		{Key: "dcs_id", Value: dcsID},
+		{Key: "date", Value: date},
+		{Key: "status", Value: domain.ConsignmentStatusOpen},
+	})
+	if err != nil {
+		return false, fmt.Errorf("dcs open consignment: %w", err)
+	}
+	return n > 0, nil
 }
 
 // monthStartIST returns the YYYY-MM-01 key for the IST month containing now.

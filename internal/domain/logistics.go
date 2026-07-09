@@ -43,7 +43,15 @@ type DCSConsignment struct {
 	RouteTripID   *primitive.ObjectID `bson:"route_trip_id,omitempty" json:"route_trip_id,omitempty"`
 	BMCLotID      *primitive.ObjectID `bson:"bmc_lot_id,omitempty"    json:"bmc_lot_id,omitempty"`
 	ProvenanceSeq int64               `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
-	CreatedAt     time.Time           `bson:"created_at" json:"created_at"`
+	// DCS→Union B2B settlement leg: fresh milk is GST-exempt (HSN 0401), so the
+	// consignment invoice values the pooled milk (Σ pour amounts) with zero tax.
+	// These are stamped when the DCS submits the consignment to its parent Union.
+	UnionApproved      bool                `bson:"union_approved,omitempty"          json:"union_approved,omitempty"`
+	UnionApprovedAt    *time.Time          `bson:"union_approved_at,omitempty"       json:"union_approved_at,omitempty"`
+	UnionApprovedByID  *primitive.ObjectID `bson:"union_approved_by_id,omitempty"    json:"union_approved_by_id,omitempty"`
+	UnionInvoiceNo     string              `bson:"union_invoice_no,omitempty"        json:"union_invoice_no,omitempty"`
+	UnionInvoiceAmount float64             `bson:"union_invoice_amount,omitempty"    json:"union_invoice_amount,omitempty"`
+	CreatedAt          time.Time           `bson:"created_at" json:"created_at"`
 }
 
 // Route trip statuses.

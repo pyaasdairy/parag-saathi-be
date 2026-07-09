@@ -703,11 +703,18 @@ func (s *service) CreateDBT(ctx context.Context, actor auth.Actor, in CreateDBTR
 	if err != nil {
 		return nil, err
 	}
+	// A FARMER may only apply for themselves — force the beneficiary to the actor
+	// so a self-service apply can never be filed against another farmer.
+	if actor.RoleCode == domain.RoleFarmer {
+		in.FarmerPartyID = actorID
+	}
 	if in.SchemeCode == "" || in.FarmerPartyID.IsZero() {
 		return nil, httpx.BadRequest("MISSING_FIELD", "scheme_code and farmer_party_id are required")
 	}
-	if in.Amount <= 0 {
-		return nil, httpx.BadRequest("INVALID_AMOUNT", "amount must be positive")
+	// amount may be 0 at application time (the subsidy is costed later on the PFMS
+	// rail); a negative amount is always a client error.
+	if in.Amount < 0 {
+		return nil, httpx.BadRequest("INVALID_AMOUNT", "amount must not be negative")
 	}
 	if _, err := s.repo.partyPhone(ctx, in.FarmerPartyID); err != nil {
 		return nil, err // farmer must exist
@@ -718,6 +725,8 @@ func (s *service) CreateDBT(ctx context.Context, actor auth.Actor, in CreateDBTR
 	req := &domain.DBTRequest{
 		ID:            primitive.NewObjectID(),
 		SchemeCode:    in.SchemeCode,
+		SchemeName:    in.SchemeName,
+		SchemeNameHi:  in.SchemeNameHi,
 		FarmerPartyID: in.FarmerPartyID,
 		Amount:        in.Amount,
 		PFMSRef:       mockPFMSRef(),

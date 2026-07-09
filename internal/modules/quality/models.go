@@ -55,6 +55,16 @@ type GateBlockedPayload struct {
 	FailureReasons []string           `json:"failure_reasons"`
 }
 
+// QCRecordedPayload is published on eventbus.TopicQCRecorded after every QC
+// verdict (pass or fail). The server bridges it to the SSE "quality.changed"
+// topic so open lab dashboards re-fetch their queue.
+type QCRecordedPayload struct {
+	SubjectType string `json:"subject_type"`
+	SubjectID   string `json:"subject_id"`
+	Stage       string `json:"stage"`
+	OverallPass bool   `json:"overall_pass"`
+}
+
 // listMeta is the pagination metadata attached to list responses.
 type listMeta struct {
 	Limit  int64 `json:"limit"`
@@ -69,8 +79,9 @@ type listMeta struct {
 type QCQueueItem struct {
 	SubjectType    string             `json:"subject_type"` // domain.QCSubject*
 	SubjectID      primitive.ObjectID `json:"subject_id"`
-	Stage          string             `json:"stage"`     // the QC stage this subject is gated at
-	Reference      string             `json:"reference"` // human label (lot date/shift or batch number)
+	Stage          string             `json:"stage"`        // the QC stage this subject is gated at
+	Reference      string             `json:"reference"`    // human label (lot date/shift or batch number)
+	InputLitres    float64            `json:"input_litres"` // volume awaiting QC (lot litres / batch input litres)
 	OrgUnitID      primitive.ObjectID `json:"org_unit_id"`
 	MandatoryTests []string           `json:"mandatory_tests"`
 	RecordedTests  []string           `json:"recorded_tests"`
@@ -93,18 +104,26 @@ type TraceBackResponse struct {
 	BatchNumber           string                `json:"batch_number"`
 	PlantID               primitive.ObjectID    `json:"plant_id"`
 	Status                string                `json:"status"`
+	InputLitres           float64               `json:"input_litres"` // total volume the batch pooled
 	BlockReason           string                `json:"block_reason,omitempty"`
 	ContributingSocieties []ContributingSociety `json:"contributing_societies"`
 	QCResults             []domain.QCResult     `json:"qc_results"`
 }
 
 // ContributingSociety is one DCS whose milk fed a batch, enriched from the org
-// directory. UnresolvedID is set (and Name/Code empty) when the org lookup
-// fails — the trace stays honest rather than silently dropping a contributor.
+// directory and with its weighted share of the pool. Resolved is false (and
+// Name/Code empty) when the org lookup fails — the trace stays honest rather
+// than silently dropping a contributor.
 type ContributingSociety struct {
-	OrgUnitID primitive.ObjectID `json:"org_unit_id"`
-	Code      string             `json:"code,omitempty"`
-	Name      string             `json:"name,omitempty"`
-	District  string             `json:"district,omitempty"`
-	Resolved  bool               `json:"resolved"`
+	OrgUnitID    primitive.ObjectID `json:"org_unit_id"`
+	Code         string             `json:"code,omitempty"`
+	Name         string             `json:"name,omitempty"`
+	NameHi       string             `json:"name_hi,omitempty"`
+	Village      string             `json:"village,omitempty"`
+	District     string             `json:"district,omitempty"`
+	VolumeLitres float64            `json:"volume_litres"`
+	VolumeShare  float64            `json:"volume_share"` // 0..1 of the batch pool
+	PourCount    int                `json:"pour_count"`
+	CollectedOn  string             `json:"collected_on,omitempty"`
+	Resolved     bool               `json:"resolved"`
 }

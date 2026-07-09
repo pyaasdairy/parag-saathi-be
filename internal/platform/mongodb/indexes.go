@@ -45,6 +45,7 @@ const (
 	CollOnboarding       = "onboarding_requests"
 	CollCMSContent       = "cms_content"
 	CollQCCertificates   = "qc_certificates"
+	CollSettings         = "app_settings"
 )
 
 // EnsureIndexes creates every index the query paths rely on. Idempotent —
@@ -221,6 +222,11 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		CollQCCertificates: {
 			idx(bson.D{{Key: "batch_id", Value: asc}}, nil),
 			idx(bson.D{{Key: "certificate_number", Value: asc}}, options.Index().SetUnique(true)),
+		},
+		CollSettings: {
+			// `_id` is the setting key (e.g. "sachiv_cap") — a small keyed store
+			// for governance knobs that are neither boolean flags nor counters.
+			idx(bson.D{{Key: "key", Value: asc}}, options.Index().SetUnique(true)),
 		},
 	}
 

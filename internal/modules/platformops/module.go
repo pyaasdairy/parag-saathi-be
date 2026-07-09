@@ -49,6 +49,21 @@ func Register(r chi.Router, d *deps.Deps) {
 			Get("/products", h.listProducts)
 		r.With(middleware.RequireRoles(domain.RoleSuperAdmin, domain.RolePCDFAdmin)).
 			Put("/products", h.upsertProduct)
+
+		// Sachiv-cap governance knob (max SAMITI_SACHEEV per DCS): read by admins,
+		// set by SUPER_ADMIN only.
+		r.With(middleware.RequireRoles(domain.RoleSuperAdmin, domain.RolePCDFAdmin, domain.RoleMissionOfficial)).
+			Get("/sachiv-cap", h.getSachivCap)
+		r.With(middleware.RequireRoles(domain.RoleSuperAdmin, domain.RolePCDFAdmin)).
+			Put("/sachiv-cap", h.setSachivCap)
+	})
+
+	// Session-readable active product catalogue (GET /products) — any logged-in
+	// party may read it (e.g. a plant operator picking product options for a
+	// lot). Writes stay on the admin-gated /admin/products surface.
+	r.Group(func(pr chi.Router) {
+		pr.Use(middleware.Authenticate(d.JWT))
+		pr.Get("/products", h.listActiveProducts)
 	})
 
 	r.Route("/audit", func(r chi.Router) {

@@ -332,13 +332,20 @@ func (r *repository) findPartiesByRoles(ctx context.Context, roleCodes []string,
 	return out, nil
 }
 
-// listPartiesByRoleInOrg pages the distinct parties holding an ACTIVE
-// assignment of roleCode inside orgUnitID — backing the reviewer's "sachivs in
-// this DCS" picker (FE listSachivs). It reuses the same active-assignment →
-// distinct-party-id → findPartiesByIDs shape as findPartiesByRoles, adding the
-// org-unit constraint and offset/limit paging over the distinct party set.
+// roleHolderRow is one party holding a role, paired with the org unit that
+// assignment is scoped to — enough to render the FE listSachivs picker (which
+// needs {party, org_unit_id, org_name}) without a second round-trip.
+type roleHolderRow struct {
+	AssignmentID primitive.ObjectID
+	OrgUnitID    primitive.ObjectID
+	Party        domain.Party
+}
+
+// listRoleHoldersInOrg pages the distinct parties holding an ACTIVE assignment
+// of roleCode inside orgUnitID, each paired with the org unit of their (newest)
+// matching assignment — backing the reviewer's "sachivs in this DCS" picker.
 // total is the count of distinct matching parties.
-func (r *repository) listPartiesByRoleInOrg(ctx context.Context, roleCode string, orgUnitID primitive.ObjectID, page httpx.Page) ([]domain.Party, int64, error) {
+func (r *repository) listRoleHoldersInOrg(ctx context.Context, roleCode string, orgUnitID primitive.ObjectID, page httpx.Page) ([]roleHolderRow, int64, error) {
 	assignFilter := bson.D{
 		{Key: "role_code", Value: roleCode},
 		{Key: "status", Value: domain.RoleAssignmentActive},
@@ -349,27 +356,30 @@ func (r *repository) listPartiesByRoleInOrg(ctx context.Context, roleCode string
 		assignFilter = append(assignFilter, bson.E{Key: "org_unit_id", Value: orgUnitID})
 	}
 	// Newest assignment first so the picker surfaces recent grants at the top;
-	// dedupe preserves first-seen order.
+	// dedupe preserves first-seen order (a party's newest matching assignment
+	// supplies the org shown).
 	cur, err := r.assignments.Find(ctx, assignFilter,
 		options.Find().
-			SetProjection(bson.D{{Key: "party_id", Value: 1}}).
+			SetProjection(bson.D{{Key: "_id", Value: 1}, {Key: "party_id", Value: 1}, {Key: "org_unit_id", Value: 1}}).
 			SetSort(bson.D{{Key: "created_at", Value: -1}}))
 	if err != nil {
 		return nil, 0, httpx.Internal(fmt.Errorf("find role assignments by org: %w", err))
 	}
 	var rows []struct {
-		PartyID primitive.ObjectID `bson:"party_id"`
+		ID        primitive.ObjectID `bson:"_id"`
+		PartyID   primitive.ObjectID `bson:"party_id"`
+		OrgUnitID primitive.ObjectID `bson:"org_unit_id"`
 	}
 	if err := cur.All(ctx, &rows); err != nil {
 		return nil, 0, httpx.Internal(fmt.Errorf("decode role assignments by org: %w", err))
 	}
-	seen := make(map[primitive.ObjectID]struct{}, len(rows))
+	seen := make(map[primitive.ObjectID]roleHolderRow, len(rows))
 	ordered := make([]primitive.ObjectID, 0, len(rows))
 	for _, row := range rows {
 		if _, ok := seen[row.PartyID]; ok {
 			continue
 		}
-		seen[row.PartyID] = struct{}{}
+		seen[row.PartyID] = roleHolderRow{AssignmentID: row.ID, OrgUnitID: row.OrgUnitID}
 		ordered = append(ordered, row.PartyID)
 	}
 	total := int64(len(ordered))
@@ -389,11 +399,13 @@ func (r *repository) listPartiesByRoleInOrg(ctx context.Context, roleCode string
 	if err != nil {
 		return nil, 0, err
 	}
-	out := make([]domain.Party, 0, len(pageIDs))
+	out := make([]roleHolderRow, 0, len(pageIDs))
 	for _, id := range pageIDs {
+		holder := seen[id]
 		if p, ok := byID[id]; ok {
-			out = append(out, p)
+			holder.Party = p
 		}
+		out = append(out, holder)
 	}
 	return out, total, nil
 }

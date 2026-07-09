@@ -30,10 +30,16 @@ func Register(r chi.Router, d *deps.Deps) {
 			sacheevOnly := middleware.RequireRoles(domain.RoleSamitiSacheev)
 			r.With(sacheevOnly).Post("/", h.createConsignment)
 			r.With(sacheevOnly).Post("/{consignmentID}/dispatch", h.dispatchConsignment)
-			r.With(middleware.RequireRoles(
+			// DCS→Union B2B invoice leg: the Sacheev submits the sealed
+			// consignment to the parent Union (HSN 0401, GST-exempt).
+			r.With(sacheevOnly).Post("/{consignmentID}/approve-union", h.approveForUnion)
+			consignmentReaders := middleware.RequireRoles(
 				domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh, domain.RoleVanRider,
 				domain.RoleUnionFieldSupervisor, domain.RoleBMCOperator, domain.RoleStateAuditor,
-			)).Get("/", h.listConsignments)
+			)
+			r.With(consignmentReaders).Get("/", h.listConsignments)
+			r.With(consignmentReaders).Get("/{consignmentID}", h.getConsignment)
+			r.With(consignmentReaders).Get("/{consignmentID}/invoice", h.getConsignmentInvoice)
 		})
 
 		r.Route("/trips", func(r chi.Router) {

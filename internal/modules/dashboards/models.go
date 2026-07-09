@@ -8,18 +8,23 @@ type FarmerSummary struct {
 	Month           PeriodTotals `json:"month"`
 	PendingAmount   float64      `json:"pending_amount"`   // issued-but-unpaid invoice total
 	PendingInvoices int          `json:"pending_invoices"` // count of unpaid invoices
+	AnimalCount     int          `json:"animal_count"`     // registered animals owned by this farmer
 	Trend           []DayTotals  `json:"trend"`            // most-recent days first
 }
 
 // SocietyStats is the DCS console aggregate for the sachiv/adhyaksh.
 type SocietyStats struct {
-	DCSID           string       `json:"dcs_id"`
-	Date            string       `json:"date"`
-	Today           DayTotals    `json:"today"`
-	Month           PeriodTotals `json:"month"`
-	ActiveFarmers   int          `json:"active_farmers"`   // distinct farmers who poured today
-	MemberCount     int          `json:"member_count"`     // active FARMER assignments at this DCS
-	OpenConsignment bool         `json:"open_consignment"` // is today's shift still unsealed
+	DCSID              string       `json:"dcs_id"`
+	Date               string       `json:"date"`
+	Today              DayTotals    `json:"today"`
+	Month              PeriodTotals `json:"month"`
+	ActiveFarmers      int          `json:"active_farmers"`       // distinct farmers who poured today
+	MemberCount        int          `json:"member_count"`         // active FARMER assignments at this DCS
+	AvgFatPct          float64      `json:"avg_fat_pct"`          // month quantity-weighted average fat
+	AvgSNFPct          float64      `json:"avg_snf_pct"`          // month quantity-weighted average SNF
+	QualityFailures30d int          `json:"quality_failures_30d"` // this DCS's consignments rejected in 30d
+	OpenConsignment    bool         `json:"open_consignment"`     // is today's shift still unsealed
+	Trend              []DayTotals  `json:"trend"`                // most-recent days first
 }
 
 // DayTotals is one day's pour rollup.

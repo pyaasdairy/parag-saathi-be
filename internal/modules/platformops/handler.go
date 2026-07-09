@@ -99,6 +99,48 @@ func (h *handler) upsertProduct(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, product)
 }
 
+// listActiveProducts handles GET /products — the session-readable active
+// catalogue (any logged-in party; e.g. a plant operator picking product
+// options for a lot).
+func (h *handler) listActiveProducts(w http.ResponseWriter, r *http.Request) {
+	products, err := h.svc.listActiveProducts(r.Context())
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, products)
+}
+
+// getSachivCap handles GET /admin/sachiv-cap.
+func (h *handler) getSachivCap(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.getSachivCap(r.Context())
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
+// setSachivCap handles PUT /admin/sachiv-cap.
+func (h *handler) setSachivCap(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	var req SachivCapRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	resp, err := h.svc.setSachivCap(r.Context(), actor, req.Cap)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
 // listAuditLogs handles GET /audit/logs?actor_party_id=&target_type=&action=&from=&to=.
 func (h *handler) listAuditLogs(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()

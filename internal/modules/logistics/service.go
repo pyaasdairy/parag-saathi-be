@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -322,6 +323,167 @@ func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q cons
 		return nil, 0, s.internal(ctx, "list consignments", err)
 	}
 	return items, total, nil
+}
+
+// getConsignment returns one consignment, enforcing the caller's org scope over
+// its DCS — the single-item read backing the FE getLot call.
+func (s *service) getConsignment(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*domain.DCSConsignment, error) {
+	consignment, err := s.loadConsignment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.orgs.RequireInScope(ctx, actor, consignment.DCSID); err != nil {
+		s.log.WarnContext(ctx, "consignment read denied: DCS out of scope",
+			slog.String("consignment_id", id.Hex()), slog.String("dcs_id", consignment.DCSID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, err
+	}
+	return consignment, nil
+}
+
+// approveForUnion generates the DCS→Union B2B invoice for a consignment: it
+// values the pooled milk (Σ pour amounts, GST-exempt HSN 0401), mints the
+// invoice number and stamps the union-approval fields. Idempotent — a second
+// call returns the already-generated invoice. The caller must be in the DCS's
+// org scope; the consignment must have left OPEN (be sealed/onward).
+func (s *service) approveForUnion(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*consignmentInvoice, error) {
+	consignment, err := s.loadConsignment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.orgs.RequireInScope(ctx, actor, consignment.DCSID); err != nil {
+		return nil, err
+	}
+	if consignment.Status == domain.ConsignmentStatusOpen {
+		return nil, httpx.Conflict("CONSIGNMENT_NOT_SEALED",
+			"only a dispatched (sealed) consignment can be invoiced to the union")
+	}
+	if consignment.UnionApproved {
+		return s.buildConsignmentInvoice(ctx, consignment) // idempotent
+	}
+	actorID, err := s.actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	amount, _, err := s.repo.consignmentBilling(ctx, consignment.PourIDs)
+	if err != nil {
+		return nil, s.internal(ctx, "approve for union: billing", err)
+	}
+	now := time.Now().UTC()
+	invoiceNo := s.mintConsignmentInvoiceNo(ctx, consignment)
+	consignment.UnionApproved = true
+	consignment.UnionApprovedAt = &now
+	consignment.UnionApprovedByID = &actorID
+	consignment.UnionInvoiceNo = invoiceNo
+	consignment.UnionInvoiceAmount = round2(amount)
+	if err := s.repo.markConsignmentUnionApproved(ctx, id, bson.D{
+		{Key: "union_approved", Value: true},
+		{Key: "union_approved_at", Value: now},
+		{Key: "union_approved_by_id", Value: actorID},
+		{Key: "union_invoice_no", Value: invoiceNo},
+		{Key: "union_invoice_amount", Value: round2(amount)},
+	}); err != nil {
+		return nil, s.internal(ctx, "approve for union: stamp", err)
+	}
+	s.log.InfoContext(ctx, "consignment approved for union invoice",
+		slog.String("consignment_id", id.Hex()),
+		slog.String("invoice_no", invoiceNo),
+		slog.Float64("amount", round2(amount)),
+		slog.String("actor_party_id", actor.PartyID))
+	return s.buildConsignmentInvoice(ctx, consignment)
+}
+
+// getConsignmentInvoice returns the B2B invoice for an already-approved
+// consignment (404 until it is approved for the union).
+func (s *service) getConsignmentInvoice(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*consignmentInvoice, error) {
+	consignment, err := s.loadConsignment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.orgs.RequireInScope(ctx, actor, consignment.DCSID); err != nil {
+		return nil, err
+	}
+	if !consignment.UnionApproved {
+		return nil, httpx.NotFound("consignment invoice (not yet approved for union)")
+	}
+	return s.buildConsignmentInvoice(ctx, consignment)
+}
+
+// buildConsignmentInvoice assembles the invoice view from a consignment,
+// resolving the seller DCS code and the buyer union (its parent). Milk is
+// GST-exempt so tax is zero and total equals the taxable milk value.
+func (s *service) buildConsignmentInvoice(ctx context.Context, c *domain.DCSConsignment) (*consignmentInvoice, error) {
+	inv := &consignmentInvoice{
+		InvoiceNo:       c.UnionInvoiceNo,
+		ConsignmentID:   c.ID,
+		ConsignmentCode: consignmentCode("", c.Date, c.Shift, c.ID),
+		FromDCSID:       c.DCSID,
+		Date:            c.Date,
+		Shift:           c.Shift,
+		HSNCode:         "0401",
+		GSTNote:         "Fresh milk is GST exempt (HSN 0401)",
+		TotalLitres:     c.TotalQuantityLitres,
+		AvgFatPct:       c.AvgFatPct,
+		AvgSNFPct:       c.AvgSNFPct,
+		TaxableAmount:   c.UnionInvoiceAmount,
+		TaxAmount:       0,
+		TotalAmount:     c.UnionInvoiceAmount,
+		GeneratedByID:   c.UnionApprovedByID,
+		GeneratedAt:     c.UnionApprovedAt,
+	}
+	// Farmer count from the pour set (best-effort; never fails the invoice).
+	if _, farmers, err := s.repo.consignmentBilling(ctx, c.PourIDs); err == nil {
+		inv.FarmerCount = farmers
+	}
+	// Enrich seller code + buyer union from the org directory (best-effort).
+	if org, err := s.orgs.Get(ctx, c.DCSID); err == nil && org != nil {
+		inv.ConsignmentCode = consignmentCode(org.Code, c.Date, c.Shift, c.ID)
+		inv.ToUnionID = org.ParentID
+	}
+	return inv, nil
+}
+
+// mintConsignmentInvoiceNo builds the B2B invoice number
+// "<dcsCode>/<FY>/<idSuffix>" — the id suffix keeps it unique without a shared
+// counter. dcsCode falls back to a short id when the org lookup fails.
+func (s *service) mintConsignmentInvoiceNo(ctx context.Context, c *domain.DCSConsignment) string {
+	dcsCode := c.DCSID.Hex()[18:24]
+	if org, err := s.orgs.Get(ctx, c.DCSID); err == nil && org != nil && org.Code != "" {
+		dcsCode = org.Code
+	}
+	return fmt.Sprintf("%s/%s/%s", dcsCode, fiscalYear(c.Date), c.ID.Hex()[18:24])
+}
+
+// consignmentCode builds the Developer-Note Appendix-A style consignment code
+// CON-<societyCode>-<YYYYMMDD>-<AM|PM>, falling back to an id suffix for the
+// society segment when the code is unknown.
+func consignmentCode(societyCode, date, shift string, id primitive.ObjectID) string {
+	seg := societyCode
+	if seg == "" {
+		seg = id.Hex()[18:24]
+	}
+	ap := "AM"
+	if shift == domain.ShiftEvening {
+		ap = "PM"
+	}
+	return "CON-" + seg + "-" + strings.ReplaceAll(date, "-", "") + "-" + ap
+}
+
+// fiscalYear returns the Indian financial year "YYYY-YY" for a YYYY-MM-DD date
+// (April–March). A malformed date falls back to the calendar year.
+func fiscalYear(date string) string {
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		if len(date) >= 4 {
+			return date[:4]
+		}
+		return "0000"
+	}
+	y := t.Year()
+	if int(t.Month()) < 4 { // Jan-Mar belongs to the FY that started the previous April
+		y--
+	}
+	return fmt.Sprintf("%d-%02d", y, (y+1)%100)
 }
 
 // ---------------------------------------------------------------------------

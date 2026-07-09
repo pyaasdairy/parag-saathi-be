@@ -26,6 +26,7 @@ type Repo struct {
 	productLots  *mongo.Collection
 	qrs          *mongo.Collection
 	counters     *mongo.Collection
+	products     *mongo.Collection // read-only view into the product master (derive lot SKU metadata)
 }
 
 // NewRepo binds the repo to the shared database.
@@ -38,7 +39,18 @@ func NewRepo(db *mongo.Database) *Repo {
 		productLots:  db.Collection(mongodb.CollProductLots),
 		qrs:          db.Collection(mongodb.CollBatchQRs),
 		counters:     db.Collection(mongodb.CollCounters),
+		products:     db.Collection(mongodb.CollProducts),
 	}
+}
+
+// ProductByID loads one product-master row (mongo.ErrNoDocuments when absent) —
+// used to derive a product lot's SKU/name/unit_size from a chosen product_id.
+func (r *Repo) ProductByID(ctx context.Context, id primitive.ObjectID) (*domain.Product, error) {
+	var p domain.Product
+	if err := r.products.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&p); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // TripDeliveryBMCByIDs returns, for each given route-trip id, the BMC it was

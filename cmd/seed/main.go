@@ -198,6 +198,20 @@ func run() error {
 		return fmt.Errorf("rate chart: %w", err)
 	}
 
+	// ── Product master (find-or-insert by unique sku) — backs GET /products
+	// and the product-lot mint's product_id derivation. ──────────────────────
+	products := []domain.Product{
+		{SKU: "PARAG-TM-500", Name: "Parag Toned Milk 500ml", NameHi: "पराग टोन्ड दूध 500ml", Category: "MILK", UnitSize: "500ml", MRP: 27, ShelfLifeDays: 4, Active: true, CreatedAt: now, UpdatedAt: now},
+		{SKU: "PARAG-FCM-1L", Name: "Parag Full Cream Milk 1L", NameHi: "पराग फुल क्रीम दूध 1L", Category: "MILK", UnitSize: "1L", MRP: 66, ShelfLifeDays: 3, Active: true, CreatedAt: now, UpdatedAt: now},
+		{SKU: "PARAG-DAHI-400", Name: "Parag Dahi 400g", NameHi: "पराग दही 400g", Category: "DAHI", UnitSize: "400g", MRP: 45, ShelfLifeDays: 12, Active: true, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, p := range products {
+		if err := upsertByFilter(ctx, db.Collection(mongodb.CollProducts),
+			bson.D{{Key: "sku", Value: p.SKU}}, p); err != nil {
+			return fmt.Errorf("product %s: %w", p.SKU, err)
+		}
+	}
+
 	// ── Sample animals (find-or-insert by unique pashu_aadhaar) ─────────────
 	animals := []domain.Animal{
 		{PashuAadhaar: "356729481027", OwnerPartyID: mahesh, DCSID: dcs1.ID, Species: "COW", Breed: "Sahiwal", Sex: "F", LactationStatus: "LACTATING", Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},

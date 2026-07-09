@@ -107,6 +107,22 @@ type assignmentWithOrg struct {
 	OrgCode string `json:"org_code,omitempty"`
 }
 
+// partyWithRole is one party holding a queried role, enriched with the org unit
+// they hold it at — the shape the FE listSachivs picker consumes
+// ({party_id, full_name, org_unit_id, org_name, village}). name_hi is not held
+// on the party record today, so it is omitted.
+type partyWithRole struct {
+	PartyID          string `json:"party_id"`
+	FullName         string `json:"full_name,omitempty"`
+	Phone            string `json:"phone,omitempty"`
+	KYCTier          string `json:"kyc_tier,omitempty"`
+	OrgUnitID        string `json:"org_unit_id"`
+	OrgName          string `json:"org_name,omitempty"`
+	OrgCode          string `json:"org_code,omitempty"`
+	Village          string `json:"village,omitempty"`
+	RoleAssignmentID string `json:"role_assignment_id,omitempty"`
+}
+
 // roleSelectRequest picks one active assignment to operate under. The ID
 // arrives as an ObjectID hex string and unmarshals natively.
 type roleSelectRequest struct {

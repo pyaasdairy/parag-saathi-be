@@ -39,6 +39,7 @@ type repository struct {
 	invoices      *mongo.Collection
 	qcResults     *mongo.Collection
 	products      *mongo.Collection
+	settings      *mongo.Collection
 }
 
 // newRepository binds the repository to its collections.
@@ -56,6 +57,7 @@ func newRepository(db *mongo.Database) *repository {
 		invoices:      db.Collection(mongodb.CollInvoices),
 		qcResults:     db.Collection(mongodb.CollQCResults),
 		products:      db.Collection(mongodb.CollProducts),
+		settings:      db.Collection(mongodb.CollSettings),
 	}
 }
 
@@ -399,9 +401,15 @@ func (r *repository) sumTodayLitres(ctx context.Context, dayKey string) (float64
 // ---- Admin: product master (§12) ----
 
 // listProducts returns the full product master, ordered by SKU. The catalogue
-// is small and admin-only, so it is returned unpaginated.
-func (r *repository) listProducts(ctx context.Context) ([]domain.Product, error) {
-	cur, err := r.products.Find(ctx, bson.D{}, options.Find().SetSort(bson.D{{Key: "sku", Value: 1}}))
+// is small and admin-only, so it is returned unpaginated. When activeOnly is
+// set, inactive rows are filtered out — the shape served to session callers on
+// GET /products (a plant operator picking product options).
+func (r *repository) listProducts(ctx context.Context, activeOnly bool) ([]domain.Product, error) {
+	filter := bson.D{}
+	if activeOnly {
+		filter = bson.D{{Key: "active", Value: true}}
+	}
+	cur, err := r.products.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "sku", Value: 1}}))
 	if err != nil {
 		return nil, httpx.Internal(fmt.Errorf("list products: %w", err))
 	}
@@ -410,6 +418,52 @@ func (r *repository) listProducts(ctx context.Context) ([]domain.Product, error)
 		return nil, httpx.Internal(fmt.Errorf("decode products: %w", err))
 	}
 	return products, nil
+}
+
+// ---- Admin: governance settings (sachiv cap) ----
+
+// storedSetting is one keyed governance value in the app_settings collection.
+type storedSetting struct {
+	Key      string `bson:"key"`
+	IntValue int    `bson:"int_value"`
+}
+
+// getIntSetting reads a keyed int setting, returning (fallback, nil) when unset.
+func (r *repository) getIntSetting(ctx context.Context, key string, fallback int) (int, error) {
+	var doc storedSetting
+	err := r.settings.FindOne(ctx, bson.D{{Key: "key", Value: key}}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return fallback, nil
+	}
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("get setting %s: %w", key, err))
+	}
+	return doc.IntValue, nil
+}
+
+// setIntSetting upserts a keyed int setting.
+func (r *repository) setIntSetting(ctx context.Context, key string, value int) error {
+	_, err := r.settings.UpdateOne(ctx,
+		bson.D{{Key: "key", Value: key}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "key", Value: key}, {Key: "int_value", Value: value}}}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		return httpx.Internal(fmt.Errorf("set setting %s: %w", key, err))
+	}
+	return nil
+}
+
+// countActiveRoleHolders counts ACTIVE assignments of one role federation-wide.
+func (r *repository) countActiveRoleHolders(ctx context.Context, roleCode string) (int, error) {
+	n, err := r.assignments.CountDocuments(ctx, bson.D{
+		{Key: "role_code", Value: roleCode},
+		{Key: "status", Value: domain.RoleAssignmentActive},
+	})
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("count active %s: %w", roleCode, err))
+	}
+	return int(n), nil
 }
 
 // upsertProduct inserts or updates the product master row keyed by SKU and
