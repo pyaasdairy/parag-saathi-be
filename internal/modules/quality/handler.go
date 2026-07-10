@@ -129,11 +129,12 @@ func (h *handler) getLimits(w http.ResponseWriter, r *http.Request) {
 
 // getQCQueue handles GET /quality/qc-queue.
 func (h *handler) getQCQueue(w http.ResponseWriter, r *http.Request) {
-	if _, ok := auth.ActorFrom(r.Context()); !ok {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
 		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
 		return
 	}
-	queue, err := h.svc.qcQueue(r.Context())
+	queue, err := h.svc.qcQueue(r.Context(), actor)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

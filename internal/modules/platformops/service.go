@@ -185,37 +185,39 @@ const sachivCapKey = "sachiv_cap"
 // defaultSachivCap is the ceiling applied until an admin sets one explicitly.
 const defaultSachivCap = 2
 
-// getSachivCap returns the current cap and the count of appointed (ACTIVE)
-// SAMITI_SACHEEV assignments, federation-wide.
+// getSachivCap returns the current PER-DCS cap and the tightest per-DCS
+// occupancy — the largest number of appointed (ACTIVE) SAMITI_SACHEEV at any
+// single DCS. The cap is a per-DCS ceiling (§5.2), so this occupancy (not the
+// federation-wide total) is the figure the cap is measured against.
 func (s *service) getSachivCap(ctx context.Context) (*SachivCapResponse, error) {
 	capValue, err := s.repo.getIntSetting(ctx, sachivCapKey, defaultSachivCap)
 	if err != nil {
 		return nil, err
 	}
-	appointed, err := s.repo.countActiveRoleHolders(ctx, domain.RoleSamitiSacheev)
+	appointed, err := s.repo.maxActiveRoleHoldersPerOrg(ctx, domain.RoleSamitiSacheev)
 	if err != nil {
 		return nil, err
 	}
 	return &SachivCapResponse{Cap: capValue, Appointed: appointed}, nil
 }
 
-// setSachivCap updates the cap. A cap below the number already appointed is a
-// 409 (the knob can be raised freely but never dropped below live reality), and
-// the change is audited.
+// setSachivCap updates the PER-DCS cap. A cap below the busiest DCS's current
+// occupancy is a 409 (the knob can be raised freely but never dropped below
+// live per-DCS reality), and the change is audited.
 func (s *service) setSachivCap(ctx context.Context, actor auth.Actor, capValue int) (*SachivCapResponse, error) {
 	if capValue < 0 {
 		return nil, httpx.BadRequest("INVALID_CAP", "cap must not be negative")
 	}
-	appointed, err := s.repo.countActiveRoleHolders(ctx, domain.RoleSamitiSacheev)
+	appointed, err := s.repo.maxActiveRoleHoldersPerOrg(ctx, domain.RoleSamitiSacheev)
 	if err != nil {
 		return nil, err
 	}
 	if capValue < appointed {
-		s.log.WarnContext(ctx, "sachiv cap set rejected: below appointed",
+		s.log.WarnContext(ctx, "sachiv cap set rejected: below busiest-DCS occupancy",
 			slog.Int("cap", capValue), slog.Int("appointed", appointed),
 			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("CAP_BELOW_APPOINTED",
-			fmt.Sprintf("cap %d is below the %d already-appointed Sachivs", capValue, appointed))
+			fmt.Sprintf("cap %d is below the %d Sachivs already appointed at the busiest DCS", capValue, appointed))
 	}
 	if err := s.repo.setIntSetting(ctx, sachivCapKey, capValue); err != nil {
 		return nil, err

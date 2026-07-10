@@ -307,8 +307,12 @@ func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q cons
 			return nil, 0, err
 		}
 		dcsIDs = []primitive.ObjectID{id}
-	case actor.RoleCode == domain.RoleVanRider || actor.RoleCode == domain.RoleBMCOperator:
+	case actor.RoleCode == domain.RoleVanRider || actor.RoleCode == domain.RoleBMCOperator ||
+		actor.RoleCode == domain.RoleUnionFieldSupervisor || actor.RoleCode == domain.RoleUnionPresident:
 		// Union scope: resolve the actor's MILK_UNION, then every DCS beneath it.
+		// Riders/BMC operators plan routes and open silo lots; union oversight
+		// roles (field supervisor, president) list every society's consignments
+		// without enumerating dcs_ids.
 		unionID, err := s.actorUnion(ctx, actor)
 		if err != nil {
 			return nil, 0, err

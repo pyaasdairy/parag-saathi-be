@@ -313,9 +313,11 @@ func (r *Repo) ReleaseBMCLots(ctx context.Context, batchID primitive.ObjectID) e
 }
 
 // BMCLotListFilter narrows the BMC lot listing. Zero-valued fields are
-// ignored.
+// ignored. BMCIDs (when non-empty) constrains the listing to a set of BMCs —
+// the org-scope fence for a plant reader (every BMC under the plant's union).
 type BMCLotListFilter struct {
 	BMCID  primitive.ObjectID
+	BMCIDs []primitive.ObjectID
 	Date   string
 	Status string
 }
@@ -325,6 +327,9 @@ func (r *Repo) ListBMCLots(ctx context.Context, f BMCLotListFilter, page httpx.P
 	filter := bson.D{}
 	if !f.BMCID.IsZero() {
 		filter = append(filter, bson.E{Key: "bmc_id", Value: f.BMCID})
+	}
+	if len(f.BMCIDs) > 0 {
+		filter = append(filter, bson.E{Key: "bmc_id", Value: bson.D{{Key: "$in", Value: f.BMCIDs}}})
 	}
 	if f.Date != "" {
 		filter = append(filter, bson.E{Key: "date", Value: f.Date})

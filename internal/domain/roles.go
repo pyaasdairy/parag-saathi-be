@@ -118,9 +118,10 @@ const (
 
 // RequiredKYCTier maps each role to the minimum KYC tier a party must hold
 // before a role token for it can be issued (blueprint §5.2 "KYC tier").
-// Tier upgrades happen ONLY through the KYC approval workflow: submit →
-// PENDING → reviewed by an authorised approver → VERIFIED. There is no
-// self-service tier upgrade.
+// Tier upgrades happen through an AUTHORISED action, never self-service: either
+// the KYC approval workflow (submit → PENDING → reviewed → VERIFIED) OR an admin
+// role grant, which per Developer Note §2 ("a person receives the modules their
+// role grants") vouches the party up to the granted role's required tier.
 var RequiredKYCTier = map[string]string{
 	RoleFarmer:               KYCTierFarmer,
 	RoleSamitiSacheev:        KYCTierHigh,
@@ -189,6 +190,64 @@ var KYCApprovableTiers = map[string][]string{
 func CanApproveKYCTier(approverRole, tier string) bool {
 	for _, t := range KYCApprovableTiers[approverRole] {
 		if t == tier {
+			return true
+		}
+	}
+	return false
+}
+
+// RoleAllowedOrgTypes maps each role to the org-unit type(s) at which a
+// RoleAssignment for it is meaningful. A role granted at the wrong org type
+// mints a token that role-selects fine but lands on an empty/broken console
+// (its scoped reads resolve to the wrong tier of the hierarchy), so grants are
+// validated against this map (blueprint §5.1/§5.2). Roles absent from the map
+// (CONSUMER, SERVICE_ACCOUNT) carry no org-type restriction — CONSUMER may hold
+// anywhere, machine accounts are provisioned out-of-band.
+var RoleAllowedOrgTypes = map[string][]string{
+	// Village tier — the DCS/samiti console.
+	RoleFarmer:         {OrgTypeDCS},
+	RoleSamitiSacheev:  {OrgTypeDCS},
+	RoleSamitiAdhyaksh: {OrgTypeDCS},
+	RoleMilkTester:     {OrgTypeDCS},
+	RoleLRP:            {OrgTypeDCS},
+	RoleAITech:         {OrgTypeDCS},
+
+	// BMC tier.
+	RoleBMCOperator: {OrgTypeBMC},
+
+	// Plant tier.
+	RolePlantOperator:   {OrgTypeProcessingPlant},
+	RolePlantLabAnalyst: {OrgTypeProcessingPlant},
+
+	// Union / field / logistics / health tier — rooted at the MILK_UNION.
+	RoleVanRider:             {OrgTypeMilkUnion},
+	RoleDeliveryRider:        {OrgTypeMilkUnion},
+	RoleUnionFieldSupervisor: {OrgTypeMilkUnion},
+	RoleUnionPresident:       {OrgTypeMilkUnion},
+	RoleOrganisingManager:    {OrgTypeMilkUnion},
+	RoleOnboardingExecutive:  {OrgTypeMilkUnion},
+	RoleStoreManager:         {OrgTypeMilkUnion},
+	RoleVeterinarian:         {OrgTypeMilkUnion},
+	RoleMVUDriver:            {OrgTypeMilkUnion},
+
+	// State / federation apex tier.
+	RolePCDFAdmin:        {OrgTypeFederation},
+	RoleMissionOfficial:  {OrgTypeFederation},
+	RoleDistrictVerifier: {OrgTypeFederation},
+	RoleSuperAdmin:       {OrgTypeFederation},
+	RoleStateAuditor:     {OrgTypeFederation},
+	RoleSupportAgent:     {OrgTypeFederation},
+}
+
+// RoleAllowedAtOrgType reports whether a role may be assigned at the given
+// org-unit type. Roles with no entry in RoleAllowedOrgTypes are unrestricted.
+func RoleAllowedAtOrgType(roleCode, orgType string) bool {
+	allowed, ok := RoleAllowedOrgTypes[roleCode]
+	if !ok {
+		return true
+	}
+	for _, t := range allowed {
+		if t == orgType {
 			return true
 		}
 	}

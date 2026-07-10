@@ -371,6 +371,36 @@ func (h *handler) rejectKYC(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, resp)
 }
 
+// verifyPartyKYC handles POST /parties/{id}/kyc/verify — an authorised reviewer
+// directly vouches a party up to a tier (no PENDING record needed), the
+// admin-side counterpart to approve/reject.
+func (h *handler) verifyPartyKYC(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	partyID, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req kycVerifyRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if err := req.validate(); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	party, err := h.svc.verifyPartyKYC(r.Context(), actor, partyID, req.Tier, req.Reason)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, party)
+}
+
 // --- /roles ---
 
 // createAssignment handles POST /roles/assignments.

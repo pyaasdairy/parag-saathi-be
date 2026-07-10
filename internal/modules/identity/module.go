@@ -54,10 +54,12 @@ func Register(r chi.Router, d *deps.Deps) {
 		})
 
 		// Reviewer directory: parties holding a role in an org unit (backs the
-		// FE listSachivs picker). Reviewer roles only.
+		// FE listSachivs picker), plus the admin direct-vouch KYC action.
+		// Reviewer roles only (scope + per-tier authority enforced in service).
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireRoles(domain.OnboardingReviewerRoles...))
 			r.Get("/", h.listPartiesByRole)
+			r.Post("/{id}/kyc/verify", h.verifyPartyKYC)
 		})
 	})
 

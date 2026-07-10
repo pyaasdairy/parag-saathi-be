@@ -534,7 +534,7 @@ func toDomainTests(in []QCTestInput) []domain.QCTest {
 // stage's mandatory tests split into recorded vs still-pending. The mandatory
 // set is derived from the SAME stage logic as missingMandatoryTests, so the
 // queue can never disagree with the gate about what a PASS requires.
-func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
+func (s *service) qcQueue(ctx context.Context, actor auth.Actor) (*QCQueueResponse, error) {
 	lots, err := s.repo.listBMCLotsByStatus(ctx, domain.BMCLotStatusQCPending)
 	if err != nil {
 		s.log.ErrorContext(ctx, "qc queue: list bmc lots failed", slog.Any("err", err))
@@ -546,8 +546,35 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 		return nil, err
 	}
 
+	// Cross-tenant fence: plant-tier writer roles (the operators/analysts who
+	// drain the queue) only see subjects inside their own org scope; oversight
+	// roles (UNION_FIELD_SUPERVISOR / MISSION_OFFICIAL / STATE_AUDITOR) keep the
+	// federation-wide view they are granted for.
+	scoped := qcQueueScopedRole(actor.RoleCode)
+	inScope := func(orgUnitID primitive.ObjectID) bool {
+		if !scoped {
+			return true
+		}
+		err := s.deps.Orgs.RequireInScope(ctx, actor, orgUnitID)
+		if err == nil {
+			return true
+		}
+		var appErr *httpx.AppError
+		if errors.As(err, &appErr) && appErr.Status == http.StatusForbidden {
+			return false
+		}
+		// Fail closed on a genuine lookup error — never leak a subject we could
+		// not scope-check.
+		s.log.WarnContext(ctx, "qc queue: scope check failed, excluding subject",
+			slog.String("org_unit_id", orgUnitID.Hex()), slog.Any("err", err))
+		return false
+	}
+
 	items := make([]QCQueueItem, 0, len(lots)+len(batches))
 	for _, lot := range lots {
+		if !inScope(lot.BMCID) {
+			continue
+		}
 		item, err := s.queueItem(ctx, domain.QCSubjectBMCLot, lot.ID, domain.QCStageBMCRapid,
 			lot.Date+" "+lot.Shift, lot.TotalQuantityLitres, lot.BMCID, lot.CreatedAt)
 		if err != nil {
@@ -556,6 +583,9 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 		items = append(items, item)
 	}
 	for _, batch := range batches {
+		if !inScope(batch.PlantID) {
+			continue
+		}
 		item, err := s.queueItem(ctx, domain.QCSubjectProcessingBatch, batch.ID, domain.QCStagePlantLab,
 			batch.BatchNumber, batch.InputLitres, batch.PlantID, batch.CreatedAt)
 		if err != nil {
@@ -565,6 +595,18 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 	}
 
 	return &QCQueueResponse{Items: items, Total: len(items)}, nil
+}
+
+// qcQueueScopedRole reports whether a role's QC-queue view must be fenced to its
+// own org scope. The plant-tier writer roles that act on the queue are scoped;
+// oversight roles (supervisor/mission/auditor) see federation-wide.
+func qcQueueScopedRole(roleCode string) bool {
+	switch roleCode {
+	case domain.RoleBMCOperator, domain.RolePlantOperator, domain.RolePlantLabAnalyst:
+		return true
+	default:
+		return false
+	}
 }
 
 // queueItem builds one queue row: it derives the stage's mandatory tests and

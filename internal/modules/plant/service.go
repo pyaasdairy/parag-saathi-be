@@ -430,6 +430,27 @@ func (s *Service) ListBMCLots(ctx context.Context, actor auth.Actor, f BMCLotLis
 			return nil, 0, err
 		}
 	}
+	// Cross-tenant fence for plant-tier readers: a plant operator / lab analyst
+	// legitimately sees BMC lots from every BMC under its own MILK_UNION (sibling
+	// chilling centres feed the plant), but MUST NOT see other unions' lots.
+	// Constrain the listing to the BMCs in the plant's union subtree.
+	if actor.RoleCode == domain.RolePlantOperator || actor.RoleCode == domain.RolePlantLabAnalyst {
+		bmcIDs, err := s.plantUnionBMCIDs(ctx, actor)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(bmcIDs) == 0 {
+			return []domain.BMCLot{}, 0, nil
+		}
+		if !f.BMCID.IsZero() {
+			// An explicit BMC filter must fall inside the plant's union scope.
+			if !containsID(bmcIDs, f.BMCID) {
+				return nil, 0, httpx.Forbidden("BMC is outside this plant's organisational scope")
+			}
+		} else {
+			f.BMCIDs = bmcIDs
+		}
+	}
 	lots, total, err := s.repo.ListBMCLots(ctx, f, page)
 	if err != nil {
 		return nil, 0, s.fail(ctx, "list bmc lots", err)
@@ -1212,6 +1233,39 @@ func dedupe(ids []primitive.ObjectID) []primitive.ObjectID {
 		out = append(out, id)
 	}
 	return out
+}
+
+// plantUnionBMCIDs resolves the BMC org units within the actor plant's union
+// subtree — the set a plant-tier reader may legitimately see BMC lots from. The
+// scope root is the plant's parent union (siblings' BMCs feed the plant), or
+// the plant itself when it sits directly under the federation.
+func (s *Service) plantUnionBMCIDs(ctx context.Context, actor auth.Actor) ([]primitive.ObjectID, error) {
+	if actor.OrgUnitID == "" {
+		return nil, httpx.Forbidden("role token with org scope required")
+	}
+	plantID, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+	if err != nil {
+		return nil, httpx.Forbidden("role token carries an invalid org scope")
+	}
+	plant, err := s.orgs.Get(ctx, plantID)
+	if err != nil {
+		return nil, err
+	}
+	scopeRoot := plant.ID
+	if plant.ParentID != nil {
+		scopeRoot = *plant.ParentID
+	}
+	return s.orgs.DescendantIDs(ctx, scopeRoot, domain.OrgTypeBMC)
+}
+
+// containsID reports whether id is present in ids.
+func containsID(ids []primitive.ObjectID, id primitive.ObjectID) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 // missingIDs lists requested consignment IDs (as hex) absent from the fetched

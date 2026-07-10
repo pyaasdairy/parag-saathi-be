@@ -57,6 +57,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			r.Use(middleware.RequireRoles(
 				domain.RoleSamitiSacheev,
 				domain.RoleSamitiAdhyaksh,
+				domain.RoleMilkTester,
 				domain.RoleUnionFieldSupervisor,
 				domain.RoleUnionPresident,
 				domain.RolePCDFAdmin,

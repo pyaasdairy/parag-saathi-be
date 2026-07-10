@@ -250,6 +250,36 @@ func (r kycRejectRequest) validate() error {
 	return nil
 }
 
+// settableKYCTiers are the tiers an authorised reviewer may set on a party via
+// the admin direct-vouch endpoint. HIGHEST/SERVICE are included because a
+// SUPER_ADMIN may set them; the per-role authority (which reviewer may set which
+// tier) is enforced separately by domain.CanApproveKYCTier in the service.
+var settableKYCTiers = map[string]bool{
+	domain.KYCTierFarmer:   true,
+	domain.KYCTierStandard: true,
+	domain.KYCTierRider:    true,
+	domain.KYCTierHigh:     true,
+	domain.KYCTierHighest:  true,
+	domain.KYCTierService:  true,
+}
+
+// kycVerifyRequest is the admin direct-vouch body: raise a party to `tier` with
+// an optional human-readable reason (POST /parties/{id}/kyc/verify).
+type kycVerifyRequest struct {
+	Tier   string `json:"tier"`
+	Reason string `json:"reason"`
+}
+
+func (r kycVerifyRequest) validate() error {
+	if !settableKYCTiers[r.Tier] {
+		return httpx.BadRequest("INVALID_TIER", "tier must be one of FARMER, STANDARD, RIDER, HIGH, HIGHEST, SERVICE")
+	}
+	if len(strings.TrimSpace(r.Reason)) > 500 {
+		return httpx.BadRequest("INVALID_REASON", "reason must be at most 500 characters")
+	}
+	return nil
+}
+
 // pendingPartySummary is the reviewer-facing digest of the requesting party.
 type pendingPartySummary struct {
 	ID       primitive.ObjectID `json:"id"`

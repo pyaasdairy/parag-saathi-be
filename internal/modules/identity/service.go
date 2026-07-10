@@ -3,8 +3,10 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +38,12 @@ const (
 	// beneficiary-name match score from the bank; the mock always verifies
 	// with this fixed score.
 	mockPennyDropNameMatch = 0.92
+
+	// sachivCapSettingKey is the app_settings key for the max-SAMITI_SACHEEV
+	// per-DCS ceiling (owned by platformops; read here to enforce at grant).
+	sachivCapSettingKey = "sachiv_cap"
+	// defaultSachivCap is the ceiling applied until an admin sets one explicitly.
+	defaultSachivCap = 2
 )
 
 // grantableRoles caps what each NON-admin granter role may hand out
@@ -1073,6 +1081,90 @@ func (s *service) rejectKYC(ctx context.Context, actor auth.Actor, id primitive.
 	return &kycReviewResponse{Record: updated, KYCTier: party.KYCTier}, nil
 }
 
+// verifyPartyKYC is the admin direct-vouch path: an authorised reviewer raises
+// a party to a KYC tier WITHOUT a self-submitted PENDING record (the
+// counterpart to approve/reject, for staff who never self-submitted). It writes
+// an append-only VERIFIED KYCRecord, lifts the party's tier UPWARD only, audits
+// "kyc.tier_vouched" and returns the updated party.
+func (s *service) verifyPartyKYC(ctx context.Context, actor auth.Actor, partyID primitive.ObjectID, tier, reason string) (*domain.Party, error) {
+	now := time.Now().UTC()
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	// Authority: the reviewer's role must be permitted to set this tier.
+	if !domain.CanApproveKYCTier(actor.RoleCode, tier) {
+		s.log.WarnContext(ctx, "kyc vouch rejected: tier not approvable",
+			slog.String("reviewer_role", actor.RoleCode), slog.String("tier", tier),
+			slog.String("actor_party_id", actor.PartyID))
+		appErr := httpx.Forbidden("your role may not verify KYC at the " + tier + " tier")
+		appErr.Code = "KYC_TIER_NOT_APPROVABLE"
+		return nil, appErr
+	}
+	party, err := s.repo.findPartyByID(ctx, partyID)
+	if err != nil {
+		return nil, err
+	}
+	// Separation of duties: a reviewer may never vouch their own tier.
+	if party.ID == aid {
+		s.log.WarnContext(ctx, "kyc vouch rejected: self-review",
+			slog.String("party_id", party.ID.Hex()), slog.String("actor_party_id", actor.PartyID))
+		appErr := httpx.Forbidden("you may not verify your own KYC")
+		appErr.Code = "KYC_SELF_REVIEW"
+		return nil, appErr
+	}
+	// Org scope: only vouch subjects within the reviewer's area.
+	if err := s.requireKYCSubjectInScope(ctx, actor, party.ID); err != nil {
+		return nil, err
+	}
+
+	reviewedAt := now
+	reviewerID := aid
+	record := domain.KYCRecord{
+		ID:             primitive.NewObjectID(),
+		PartyID:        party.ID,
+		RequestedTier:  tier,
+		Status:         domain.KYCStatusVerified,
+		ReviewedBy:     &reviewerID,
+		ReviewedByRole: actor.RoleCode,
+		ReviewedAt:     &reviewedAt,
+		VerifiedAt:     &reviewedAt,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := s.repo.insertKYCRecord(ctx, record); err != nil {
+		return nil, err
+	}
+
+	newTier := upgradedKYCTier(party.KYCTier, tier)
+	if newTier != party.KYCTier {
+		if err := s.repo.updatePartyKYCTier(ctx, party.ID, newTier, now); err != nil {
+			return nil, err
+		}
+		party.KYCTier = newTier
+	}
+
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "kyc.tier_vouched",
+		TargetType: "party",
+		TargetID:   party.ID.Hex(),
+		Meta: map[string]any{
+			"tier":       newTier,
+			"granted_by": actor.PartyID,
+			"reason":     reason,
+			"kyc_id":     record.ID.Hex(),
+		},
+	})
+	s.log.InfoContext(ctx, "party KYC tier vouched by reviewer",
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("tier", newTier),
+		slog.String("reviewer_role", actor.RoleCode),
+		slog.String("actor_party_id", actor.PartyID))
+	// Nudge reviewer dashboards (this may clear a pending badge for the subject).
+	s.publishKYCQueueChanged("vouched", record.ID, party.ID)
+	return party, nil
+}
+
 // --- Role administration ---
 
 // requireGrantAuthority enforces the non-admin granter matrix (§5.2):
@@ -1123,6 +1215,24 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 		return nil, err
 	}
 
+	// Org-type validation (§5.1): a role is only meaningful at certain tiers of
+	// the hierarchy. Granting e.g. PLANT_OPERATOR@BMC or VAN_RIDER@DCS mints a
+	// token that role-selects fine but lands on an empty/broken console, so the
+	// mismatch is rejected here for every role centrally.
+	targetOrg, err := s.deps.Orgs.Get(ctx, req.OrgUnitID)
+	if err != nil {
+		return nil, err
+	}
+	if !domain.RoleAllowedAtOrgType(req.RoleCode, targetOrg.Type) {
+		s.log.WarnContext(ctx, "assignment grant rejected: role not allowed at org type",
+			slog.String("role_code", req.RoleCode),
+			slog.String("org_unit_id", req.OrgUnitID.Hex()),
+			slog.String("org_type", targetOrg.Type))
+		allowed := strings.Join(domain.RoleAllowedOrgTypes[req.RoleCode], ", ")
+		return nil, httpx.BadRequest("INVALID_ORG_TYPE",
+			req.RoleCode+" may only be assigned at org type "+allowed+", not "+targetOrg.Type)
+	}
+
 	exists, err := s.repo.activeAssignmentExists(ctx, party.ID, req.RoleCode, req.OrgUnitID)
 	if err != nil {
 		return nil, err
@@ -1133,6 +1243,27 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 			slog.String("role_code", req.RoleCode),
 			slog.String("org_unit_id", req.OrgUnitID.Hex()))
 		return nil, httpx.Conflict("ASSIGNMENT_EXISTS", "party already holds an active "+req.RoleCode+" assignment in this org unit")
+	}
+
+	// Sachiv governance cap (§5.2): a DCS may appoint at most `sachiv_cap`
+	// (setting, default 2) active SAMITI_SACHEEV. Enforced PER-DCS at grant so
+	// the ceiling is real (not only checked when an admin lowers the knob).
+	if req.RoleCode == domain.RoleSamitiSacheev {
+		capValue, err := s.repo.getIntSetting(ctx, sachivCapSettingKey, defaultSachivCap)
+		if err != nil {
+			return nil, err
+		}
+		appointed, err := s.repo.countActiveRoleHoldersInOrg(ctx, domain.RoleSamitiSacheev, req.OrgUnitID)
+		if err != nil {
+			return nil, err
+		}
+		if appointed >= capValue {
+			s.log.WarnContext(ctx, "assignment grant rejected: sachiv cap reached",
+				slog.String("org_unit_id", req.OrgUnitID.Hex()),
+				slog.Int("appointed", appointed), slog.Int("cap", capValue))
+			return nil, httpx.Conflict("SACHIV_CAP_REACHED",
+				fmt.Sprintf("this DCS already has %d of %d permitted Sachivs", appointed, capValue))
+		}
 	}
 
 	now := time.Now().UTC()
@@ -1175,6 +1306,27 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 		slog.String("role_code", req.RoleCode),
 		slog.String("org_unit_id", req.OrgUnitID.Hex()),
 		slog.String("actor_party_id", actor.PartyID))
+
+	// Developer Note §2: "a person receives the modules their role grants." The
+	// authorised admin grant IS the cooperative's verification for this
+	// appointment, so it vouches the party up to the tier the role requires —
+	// otherwise a just-granted role would be un-activatable (role/select would
+	// 403 KYC_TIER_INSUFFICIENT). Tier only ever moves up, never down.
+	if reqTier := domain.RequiredKYCTier[req.RoleCode]; reqTier != "" && !domain.KYCTierSatisfies(party.KYCTier, reqTier) {
+		if err := s.repo.updatePartyKYCTier(ctx, party.ID, reqTier, now); err != nil {
+			return nil, err
+		}
+		s.deps.Audit.Record(ctx, audit.Entry{
+			Action:     "kyc.tier_vouched",
+			TargetType: "party",
+			TargetID:   party.ID.Hex(),
+			Meta:       map[string]any{"tier": reqTier, "via_role": req.RoleCode, "granted_by": actor.PartyID},
+		})
+		s.log.InfoContext(ctx, "party KYC tier vouched on role grant",
+			slog.String("party_id", party.ID.Hex()),
+			slog.String("tier", reqTier),
+			slog.String("role_code", req.RoleCode))
+	}
 	return &assignment, nil
 }
 

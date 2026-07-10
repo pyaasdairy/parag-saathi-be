@@ -83,8 +83,10 @@ type SachivCapRequest struct {
 	Cap int `json:"cap"`
 }
 
-// SachivCapResponse is the GET/PUT /admin/sachiv-cap body: the cap plus the
-// current count of appointed (ACTIVE) SAMITI_SACHEEV assignments federation-wide.
+// SachivCapResponse is the GET/PUT /admin/sachiv-cap body: the PER-DCS cap plus
+// Appointed — the tightest per-DCS occupancy (the count of appointed ACTIVE
+// SAMITI_SACHEEV at the busiest single DCS). Appointed is measured per-DCS, not
+// federation-wide, so it is directly comparable to the per-DCS cap.
 type SachivCapResponse struct {
 	Cap       int `json:"cap"`
 	Appointed int `json:"appointed"`

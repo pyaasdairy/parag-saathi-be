@@ -517,16 +517,38 @@ func (r *repository) setIntSetting(ctx context.Context, key string, value int) e
 	return nil
 }
 
-// countActiveRoleHolders counts ACTIVE assignments of one role federation-wide.
-func (r *repository) countActiveRoleHolders(ctx context.Context, roleCode string) (int, error) {
-	n, err := r.assignments.CountDocuments(ctx, bson.D{
-		{Key: "role_code", Value: roleCode},
-		{Key: "status", Value: domain.RoleAssignmentActive},
+// maxActiveRoleHoldersPerOrg returns the largest number of ACTIVE holders of a
+// role at any single org unit — the tightest per-DCS occupancy. The Sachiv cap
+// is a PER-DCS ceiling, so this (not the federation-wide total) is what the cap
+// is compared against: the busiest DCS is the constraint on how low the knob
+// may be set. Returns 0 when the role is unheld anywhere.
+func (r *repository) maxActiveRoleHoldersPerOrg(ctx context.Context, roleCode string) (int, error) {
+	cur, err := r.assignments.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "role_code", Value: roleCode},
+			{Key: "status", Value: domain.RoleAssignmentActive},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$org_unit_id"},
+			{Key: "n", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "n", Value: -1}}}},
+		{{Key: "$limit", Value: 1}},
 	})
 	if err != nil {
-		return 0, httpx.Internal(fmt.Errorf("count active %s: %w", roleCode, err))
+		return 0, httpx.Internal(fmt.Errorf("max active %s per org: %w", roleCode, err))
 	}
-	return int(n), nil
+	defer cur.Close(ctx)
+	var rows []struct {
+		N int `bson:"n"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return 0, httpx.Internal(fmt.Errorf("decode max active %s per org: %w", roleCode, err))
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].N, nil
 }
 
 // upsertProduct inserts or updates the product master row keyed by SKU and
