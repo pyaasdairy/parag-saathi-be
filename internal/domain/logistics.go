@@ -20,7 +20,10 @@ const (
 // the van picks up. It is the pooling boundary: past this point milk traces
 // to a *set* of contributors (blueprint §7.4).
 type DCSConsignment struct {
-	ID                  primitive.ObjectID   `bson:"_id,omitempty" json:"id"`
+	ID primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	// ConsignmentCode is the human-readable unique business key minted at
+	// creation: CON-<last4 of DCS code>-<YYMMDD>-<M|E>, e.g. CON-1842-260710-M.
+	ConsignmentCode     string               `bson:"consignment_code" json:"consignment_code"`
 	DCSID               primitive.ObjectID   `bson:"dcs_id"    json:"dcs_id"`
 	Date                string               `bson:"date"      json:"date"` // YYYY-MM-DD
 	Shift               string               `bson:"shift"     json:"shift"`
@@ -61,13 +64,16 @@ const (
 	TripStatusDelivered  = "DELIVERED"
 )
 
-// RouteStop is one DCS pickup on a trip, with the cold-chain temperature
-// captured at pickup time.
+// RouteStop is one DCS pickup on a trip, with the cold-chain temperature and
+// optional geo/photo evidence captured at pickup time.
 type RouteStop struct {
 	DCSID         primitive.ObjectID `bson:"dcs_id"         json:"dcs_id"`
 	ConsignmentID primitive.ObjectID `bson:"consignment_id" json:"consignment_id"`
 	PickedUpAt    *time.Time         `bson:"picked_up_at,omitempty" json:"picked_up_at,omitempty"`
 	TempC         float64            `bson:"temp_c,omitempty"       json:"temp_c,omitempty"`
+	Lat           float64            `bson:"lat,omitempty"          json:"lat,omitempty"`
+	Lng           float64            `bson:"lng,omitempty"          json:"lng,omitempty"`
+	PhotoURI      string             `bson:"photo_uri,omitempty"    json:"photo_uri,omitempty"`
 	Notes         string             `bson:"notes,omitempty"        json:"notes,omitempty"`
 }
 

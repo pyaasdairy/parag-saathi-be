@@ -1,7 +1,7 @@
 // Command seed loads idempotent baseline data for development and demos:
 // the cooperative org tree (PCDF → union → plant/BMC/DCS per the PCDF
-// constitution), one party per MVP role, an active rate chart, and sample
-// animals.
+// constitution), one party per MVP role, an active rate chart, sample
+// animals, education-hub content, and the demo product master.
 //
 // ID scheme: `_id` is always a Mongo-generated ObjectID. Seeding is
 // idempotent via NATURAL business keys (org `code`, party `phone`, animal
@@ -54,14 +54,14 @@ func run() error {
 
 	// ── Org tree (find-or-insert by unique `code`) ──────────────────────────
 	federation, err := upsertOrg(ctx, db, domain.OrgUnit{
-		Type: domain.OrgTypeFederation, Name: "PCDF / Parag (Uttar Pradesh)", Code: "PCDF",
+		Type: domain.OrgTypeFederation, Name: "PCDF / Parag (Uttar Pradesh)", NameHi: "पीसीडीएफ / पराग (उत्तर प्रदेश)", Code: "PCDF",
 		Path: []primitive.ObjectID{}, State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
 		return err
 	}
 	union, err := upsertOrg(ctx, db, domain.OrgUnit{
-		Type: domain.OrgTypeMilkUnion, Name: "Lucknow Dugdh Utpadak Sahkari Sangh", Code: "UNION-LKO",
+		Type: domain.OrgTypeMilkUnion, Name: "Lucknow Dugdh Utpadak Sahkari Sangh", NameHi: "लखनऊ दुग्ध उत्पादक सहकारी संघ", Code: "UNION-LKO",
 		ParentID: &federation.ID, Path: []primitive.ObjectID{federation.ID},
 		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
 	})
@@ -69,7 +69,7 @@ func run() error {
 		return err
 	}
 	plant, err := upsertOrg(ctx, db, domain.OrgUnit{
-		Type: domain.OrgTypeProcessingPlant, Name: "Parag Dairy Plant, Lucknow", Code: "PLANT-LKO-01",
+		Type: domain.OrgTypeProcessingPlant, Name: "Parag Dairy Plant, Lucknow", NameHi: "पराग डेयरी प्लांट, लखनऊ", Code: "PLANT-LKO-01",
 		ParentID: &union.ID, Path: []primitive.ObjectID{federation.ID, union.ID},
 		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
 	})
@@ -77,7 +77,7 @@ func run() error {
 		return err
 	}
 	bmc, err := upsertOrg(ctx, db, domain.OrgUnit{
-		Type: domain.OrgTypeBMC, Name: "BMC Malihabad", Code: "BMC-LKO-007",
+		Type: domain.OrgTypeBMC, Name: "BMC Malihabad", NameHi: "बीएमसी मलिहाबाद", Code: "BMC-LKO-007",
 		ParentID: &union.ID, Path: []primitive.ObjectID{federation.ID, union.ID},
 		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
 	})
@@ -85,17 +85,17 @@ func run() error {
 		return err
 	}
 	dcs1, err := upsertOrg(ctx, db, domain.OrgUnit{
-		Type: domain.OrgTypeDCS, Name: "DCS Kasmandi Kalan", Code: "DCS-01842",
+		Type: domain.OrgTypeDCS, Name: "DCS Kasmandi Kalan", NameHi: "डीसीएस कसमंडी कलां", Code: "DCS-01842",
 		ParentID: &bmc.ID, Path: []primitive.ObjectID{federation.ID, union.ID, bmc.ID},
-		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
+		Village: "Kasmandi Kalan", District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
 		return err
 	}
 	dcs2, err := upsertOrg(ctx, db, domain.OrgUnit{
-		Type: domain.OrgTypeDCS, Name: "DCS Rahimabad", Code: "DCS-01907",
+		Type: domain.OrgTypeDCS, Name: "DCS Rahimabad", NameHi: "डीसीएस रहीमाबाद", Code: "DCS-01907",
 		ParentID: &bmc.ID, Path: []primitive.ObjectID{federation.ID, union.ID, bmc.ID},
-		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
+		Village: "Rahimabad", District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
 		return err
@@ -221,6 +221,47 @@ func run() error {
 		if err := upsertByFilter(ctx, db.Collection(mongodb.CollAnimals),
 			bson.D{{Key: "pashu_aadhaar", Value: a.PashuAadhaar}}, a); err != nil {
 			return fmt.Errorf("animal %s: %w", a.PashuAadhaar, err)
+		}
+	}
+
+	// ── Education hub content (find-or-insert by topic+language+title) ──────
+	// Published rows the GET /cattle/education hub lists on day one (§10).
+	education := []domain.EducationContent{
+		{Topic: "CLEAN_MILKING", Title: "स्वच्छ दुहाई के 5 कदम", Language: "hi", MediaType: "VIDEO",
+			MediaURL:    "https://saathi-media.s3.ap-south-1.amazonaws.com/education/clean-milking-hi.mp4",
+			DurationSec: 240, Published: true, CreatedAt: now},
+		{Topic: "FEED_RATION", Title: "संतुलित पशु आहार कैसे बनाएं", Language: "hi", MediaType: "AUDIO",
+			MediaURL:    "https://saathi-media.s3.ap-south-1.amazonaws.com/education/feed-ration-hi.mp3",
+			DurationSec: 180, Published: true, CreatedAt: now},
+		{Topic: "BREED_CARE", Title: "Sahiwal cow care basics", Language: "en", MediaType: "INFOGRAPHIC",
+			MediaURL:  "https://saathi-media.s3.ap-south-1.amazonaws.com/education/sahiwal-care-en.png",
+			Published: true, CreatedAt: now},
+	}
+	for _, e := range education {
+		if err := upsertByFilter(ctx, db.Collection(mongodb.CollEducation),
+			bson.D{
+				{Key: "topic", Value: e.Topic},
+				{Key: "language", Value: e.Language},
+				{Key: "title", Value: e.Title},
+			}, e); err != nil {
+			return fmt.Errorf("education %s/%s: %w", e.Topic, e.Language, err)
+		}
+	}
+
+	// ── Product master (find-or-insert by unique `sku`) ─────────────────────
+	// Demo catalogue rows so GET /admin/products and the FE catalogue read
+	// real data. NOTE: DBT requests are NOT seeded — a DBTRequest is strictly
+	// per-party (farmer_party_id + submitted_by), created via POST /dbt/requests.
+	products := []domain.Product{
+		{SKU: "PRG-FC-500", Name: "Parag Full Cream Milk 500ml", NameHi: "पराग फुल क्रीम दूध 500 मिली",
+			Category: "MILK", MRP: 33, UnitSize: "500ml", Active: true, CreatedAt: now, UpdatedAt: now},
+		{SKU: "PRG-TN-500", Name: "Parag Toned Milk 500ml", NameHi: "पराग टोंड दूध 500 मिली",
+			Category: "MILK", MRP: 28, UnitSize: "500ml", Active: true, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, p := range products {
+		if err := upsertByFilter(ctx, db.Collection(mongodb.CollProducts),
+			bson.D{{Key: "sku", Value: p.SKU}}, p); err != nil {
+			return fmt.Errorf("product %s: %w", p.SKU, err)
 		}
 	}
 

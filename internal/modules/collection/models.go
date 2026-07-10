@@ -52,6 +52,7 @@ type CreatePourRequest struct {
 	FatPct            float64             `json:"fat_pct"`
 	SNFPct            float64             `json:"snf_pct"`
 	CLR               float64             `json:"clr,omitempty"`
+	TemperatureC      *float64            `json:"temperature_c,omitempty"` // cold-chain reading at pour time (°C)
 	AnimalID          *primitive.ObjectID `json:"animal_id,omitempty"`
 	AnalyzerReadingID *primitive.ObjectID `json:"analyzer_reading_id,omitempty"`
 	Source            string              `json:"source"` // reading mode that produced the values

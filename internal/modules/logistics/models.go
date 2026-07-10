@@ -30,10 +30,14 @@ type createTripRequest struct {
 }
 
 // pickupRequest records collecting one consignment at a stop. TempC is a
-// pointer so a legitimate 0.0 °C reading is distinguishable from "missing".
+// pointer so a legitimate 0.0 °C reading is distinguishable from "missing";
+// Lat/Lng are pointers so "absent" is distinguishable from zero.
 type pickupRequest struct {
-	TempC *float64 `json:"temp_c"`
-	Notes string   `json:"notes,omitempty"`
+	TempC    *float64 `json:"temp_c"`
+	Lat      *float64 `json:"lat,omitempty"`
+	Lng      *float64 `json:"lng,omitempty"`
+	PhotoURI string   `json:"photo_uri,omitempty"`
+	Notes    string   `json:"notes,omitempty"`
 }
 
 // coldChainRequest logs an in-transit temperature (and optional location)

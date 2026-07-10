@@ -13,8 +13,8 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/mongodb"
 )
 
-// repo reads (never writes) the pour, invoice and role-assignment collections
-// owned by other modules — dashboards is a pure read-side aggregate.
+// repo reads (never writes) the pour, invoice, role-assignment and animal
+// collections owned by other modules — dashboards is a pure read-side aggregate.
 type repo struct {
 	pours        *mongo.Collection
 	invoices     *mongo.Collection
@@ -123,6 +123,18 @@ func (r *repo) activeFarmersToday(ctx context.Context, dcsID primitive.ObjectID,
 		return 0, fmt.Errorf("active farmers: %w", err)
 	}
 	return len(vals), nil
+}
+
+// animalCount counts a farmer's ACTIVE animals.
+func (r *repo) animalCount(ctx context.Context, farmerID primitive.ObjectID) (int, error) {
+	n, err := r.animals.CountDocuments(ctx, bson.D{
+		{Key: "owner_party_id", Value: farmerID},
+		{Key: "status", Value: domain.AnimalStatusActive},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("animal count: %w", err)
+	}
+	return int(n), nil
 }
 
 // memberCount counts ACTIVE FARMER assignments at a DCS.

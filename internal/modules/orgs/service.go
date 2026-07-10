@@ -205,7 +205,8 @@ func hexOrEmpty(id *primitive.ObjectID) string {
 	return id.Hex()
 }
 
-// Update patches name/district/active/geo on an org unit (PATCH /orgs/{id}).
+// Update patches name/name_hi/village/district/active/geo on an org unit
+// (PATCH /orgs/{id}).
 // Type or parent moves are rejected — restructuring the tree is out of scope
 // for v1 because Path denormalisation across a subtree is not transactional.
 func (s *service) Update(ctx context.Context, actor auth.Actor, id primitive.ObjectID, req UpdateOrgRequest) (*domain.OrgUnit, error) {

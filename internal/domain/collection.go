@@ -173,6 +173,7 @@ type MilkPour struct {
 	FatPct            float64             `bson:"fat_pct"       json:"fat_pct"`
 	SNFPct            float64             `bson:"snf_pct"       json:"snf_pct"`
 	CLR               float64             `bson:"clr,omitempty" json:"clr,omitempty"`
+	TemperatureC      *float64            `bson:"temperature_c,omitempty" json:"temperature_c,omitempty"` // cold-chain reading at pour time (°C); pointer so 0.0 is distinguishable from "absent"
 	RatePerLitre      float64             `bson:"rate_per_litre" json:"rate_per_litre"`
 	Amount            float64             `bson:"amount"        json:"amount"`
 	RateChartID       primitive.ObjectID  `bson:"rate_chart_id" json:"rate_chart_id"`

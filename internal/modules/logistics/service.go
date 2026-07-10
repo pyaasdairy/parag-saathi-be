@@ -117,6 +117,7 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 
 	consignment := &domain.DCSConsignment{
 		ID:                  primitive.NewObjectID(), // pre-generated: insert + ledger refs stay consistent
+		ConsignmentCode:     mintConsignmentCode(org.Code, date, req.Shift),
 		DCSID:               req.DCSID,
 		Date:                date,
 		Shift:               req.Shift,
@@ -643,7 +644,7 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 	}
 
 	now := time.Now().UTC()
-	if err := s.repo.markStopPickedUp(ctx, trip.ID, consignmentID, now, *req.TempC, req.Notes); err != nil {
+	if err := s.repo.markStopPickedUp(ctx, trip.ID, consignmentID, now, *req.TempC, req.Notes, req.Lat, req.Lng, req.PhotoURI); err != nil {
 		return nil, s.internal(ctx, "pickup stop: mark stop picked up", err)
 	}
 
@@ -670,6 +671,10 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 		trip.Stops[i].PickedUpAt = &now
 		trip.Stops[i].TempC = *req.TempC
 		trip.Stops[i].Notes = req.Notes
+		if req.Lat != nil && req.Lng != nil {
+			trip.Stops[i].Lat, trip.Stops[i].Lng = *req.Lat, *req.Lng
+		}
+		trip.Stops[i].PhotoURI = req.PhotoURI
 	}
 	s.log.InfoContext(ctx, "stop picked up",
 		slog.String("trip_id", trip.ID.Hex()),
@@ -942,6 +947,25 @@ func aggregatePours(rows []pourRow) (pourIDs []primitive.ObjectID, totalQty, avg
 
 // round2 rounds to 2 decimal places (litres / percentage precision).
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// mintConsignmentCode builds the human-readable consignment business key
+// CON-<last4 of DCS code>-<YYMMDD>-<M|E>, e.g. CON-1842-260710-M. date is the
+// validated YYYY-MM-DD day key; shift is a validated collection shift.
+func mintConsignmentCode(dcsCode, date, shift string) string {
+	last4 := dcsCode
+	if len(last4) > 4 {
+		last4 = last4[len(last4)-4:]
+	}
+	yymmdd := strings.ReplaceAll(date, "-", "")
+	if len(yymmdd) == 8 {
+		yymmdd = yymmdd[2:] // YYYYMMDD → YYMMDD
+	}
+	shiftMark := "M"
+	if shift == domain.ShiftEvening {
+		shiftMark = "E"
+	}
+	return fmt.Sprintf("CON-%s-%s-%s", last4, yymmdd, shiftMark)
+}
 
 // mintSealCode builds the §6.4 / Appendix-A seal code SEAL-<consignment>-<checksum>,
 // where the checksum is a CRC32 over the frozen pour set so a later silent
