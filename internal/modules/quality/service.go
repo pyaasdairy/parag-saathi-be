@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -320,6 +321,16 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 			slog.String("actor_party_id", actor.PartyID))
 		return nil, httpx.Conflict("SUBJECT_ALREADY_GATED", "subject is no longer awaiting QC — a verdict was already recorded")
 	}
+
+	// A QC verdict (pass OR fail) removes the subject from the lab's live queue,
+	// so nudge any open quality dashboards to re-fetch. Fire-and-forget bus event
+	// bridged to the SSE "quality.changed" topic.
+	s.deps.Bus.Publish(eventbus.TopicQCRecorded, QCRecordedPayload{
+		SubjectType: req.SubjectType,
+		SubjectID:   req.SubjectID.Hex(),
+		Stage:       req.Stage,
+		OverallPass: overallPass,
+	})
 
 	if overallPass {
 		s.log.InfoContext(ctx, "qc gate passed",
@@ -719,12 +730,36 @@ func (s *service) traceBack(ctx context.Context, actor auth.Actor, batchID primi
 		return nil, err
 	}
 
+	// Per-society weighted breakdown: resolve the batch's BMC lots → consignments
+	// → per-DCS litres/pour-count/date (§7.4). The share denominator is the sum
+	// of contributing litres (never zero-division).
+	contrib, cerr := s.repo.consignmentContributions(ctx, batch.BMCLotIDs)
+	if cerr != nil {
+		s.log.WarnContext(ctx, "qc trace-back: contribution aggregation failed (shares omitted)",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", cerr))
+		contrib = map[primitive.ObjectID]societyContribution{}
+	}
+	var totalLitres float64
+	for _, c := range contrib {
+		totalLitres += c.Litres
+	}
+
 	societies := make([]ContributingSociety, 0, len(batch.ContributingDCSIDs))
 	for _, dcsID := range batch.ContributingDCSIDs {
 		cs := ContributingSociety{OrgUnitID: dcsID}
+		if c, ok := contrib[dcsID]; ok {
+			cs.VolumeLitres = round2(c.Litres)
+			cs.PourCount = c.PourCount
+			cs.CollectedOn = c.CollectedOn
+			if totalLitres > 0 {
+				cs.VolumeShare = round4(c.Litres / totalLitres)
+			}
+		}
 		if org, oerr := s.deps.Orgs.Get(ctx, dcsID); oerr == nil && org != nil {
 			cs.Code = org.Code
 			cs.Name = org.Name
+			cs.NameHi = org.NameHi
+			cs.Village = org.Village
 			cs.District = org.District
 			cs.Resolved = true
 		} else {
@@ -747,11 +782,16 @@ func (s *service) traceBack(ctx context.Context, actor auth.Actor, batchID primi
 		BatchNumber:           batch.BatchNumber,
 		PlantID:               batch.PlantID,
 		Status:                batch.Status,
+		InputLitres:           round2(batch.InputLitres),
 		BlockReason:           batch.BlockReason,
 		ContributingSocieties: societies,
 		QCResults:             results,
 	}, nil
 }
+
+// round2/round4 keep litres and share values at sensible precision.
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+func round4(v float64) float64 { return math.Round(v*10000) / 10000 }
 
 // limits returns the FSSAI gate constants (blueprint §8.3) as reference data.
 func (s *service) limits() LimitsResponse {

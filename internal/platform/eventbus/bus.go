@@ -14,10 +14,15 @@ import (
 
 // Topics published across module seams.
 const (
-	TopicPourRecorded       = "pour.recorded"
-	TopicInvoiceIssued      = "invoice.issued"
-	TopicGateBlocked        = "qc.gate_blocked"
+	TopicPourRecorded  = "pour.recorded"
+	TopicInvoiceIssued = "invoice.issued"
+	TopicGateBlocked   = "qc.gate_blocked"
+	// TopicQCRecorded fires on every QC result (pass OR fail) so the lab's
+	// live queue can refresh — a pass removes the subject from the queue just
+	// as a fail does. Payload: quality.QCRecordedPayload.
+	TopicQCRecorded         = "qc.recorded"
 	TopicSettlementExecuted = "settlement.executed"
+	TopicSettlementChanged  = "settlement.changed" // any settlement state change (initiate/approve/execute)
 	TopicPayoutCredited     = "payout.credited"
 	TopicMVUDispatched      = "mvu.dispatched"
 	// KYC review queue changed — a record entered PENDING (submitted) or left

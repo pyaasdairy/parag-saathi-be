@@ -475,9 +475,10 @@ func (s *service) patchMe(ctx context.Context, actor auth.Actor, req patchMeRequ
 }
 
 // listPartiesByRole returns the parties holding an ACTIVE assignment of
-// roleCode inside orgUnitID (paged) — the reviewer-facing directory backing
-// the FE listSachivs dropdown. The caller must be in scope for the org unit.
-func (s *service) listPartiesByRole(ctx context.Context, actor auth.Actor, roleCode string, orgUnitID primitive.ObjectID, page httpx.Page) ([]domain.Party, int64, error) {
+// roleCode inside orgUnitID (paged), each enriched with the org unit they hold
+// it at — the reviewer-facing directory backing the FE listSachivs dropdown.
+// The caller must be in scope for the org unit.
+func (s *service) listPartiesByRole(ctx context.Context, actor auth.Actor, roleCode string, orgUnitID primitive.ObjectID, page httpx.Page) ([]partyWithRole, int64, error) {
 	// Resolve the scope when the caller omits org_unit_id:
 	//   • federation-wide roles (super admin / PCDF / mission / auditor) may
 	//     list the role platform-wide (orgUnitID stays zero → no org filter);
@@ -504,7 +505,31 @@ func (s *service) listPartiesByRole(ctx context.Context, actor auth.Actor, roleC
 			return nil, 0, err
 		}
 	}
-	return s.repo.listPartiesByRoleInOrg(ctx, roleCode, orgUnitID, page)
+	holders, total, err := s.repo.listRoleHoldersInOrg(ctx, roleCode, orgUnitID, page)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Enrich each holder with its org's display fields (name/code/village) so the
+	// picker renders the society without a second call. Org lookups are cached and
+	// best-effort — a missing org unit never breaks the listing.
+	out := make([]partyWithRole, 0, len(holders))
+	for _, h := range holders {
+		row := partyWithRole{
+			PartyID:          h.Party.ID.Hex(),
+			FullName:         h.Party.FullName,
+			Phone:            h.Party.Phone,
+			KYCTier:          h.Party.KYCTier,
+			OrgUnitID:        h.OrgUnitID.Hex(),
+			RoleAssignmentID: h.AssignmentID.Hex(),
+		}
+		if org, oerr := s.deps.Orgs.Get(ctx, h.OrgUnitID); oerr == nil && org != nil {
+			row.OrgName = org.Name
+			row.OrgCode = org.Code
+			row.Village = org.Village
+		}
+		out = append(out, row)
+	}
+	return out, total, nil
 }
 
 // --- KYC (mock DPI adapters — real UIDAI / penny-drop integration later) ---

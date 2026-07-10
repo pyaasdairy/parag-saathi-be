@@ -15,7 +15,7 @@ type CreateOrgRequest struct {
 	NameHi   string              `json:"name_hi,omitempty"`
 	Code     string              `json:"code"`
 	ParentID *primitive.ObjectID `json:"parent_id,omitempty"`
-	Village  string              `json:"village,omitempty"`
+	Village  string              `json:"village,omitempty"` // the village a DCS serves
 	District string              `json:"district,omitempty"`
 	State    string              `json:"state,omitempty"`
 	GeoLat   *float64            `json:"geo_lat,omitempty"`

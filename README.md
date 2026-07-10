@@ -155,6 +155,9 @@ farmer `9000000011`, …).
 
 Then read:
 
+- [`docs/FRONTEND_INTEGRATION.md`](docs/FRONTEND_INTEGRATION.md) — **the integration brief for the
+  mobile app**: connect, auth/multi-role, the full route reference, real-time SSE, error codes, and
+  the FE-mapper reconciliation checklist to do before flipping to `MODE=http`.
 - [`docs/strict_brief.md`](docs/strict_brief.md) — **the API contract**: every endpoint, its auth,
   and how the backend works (ground rules: ObjectID scheme, envelopes, auth, scoping, logging).
 - [`docs/WORKFLOW_GUIDE.md`](docs/WORKFLOW_GUIDE.md) — **who does what**: every role (farmer →

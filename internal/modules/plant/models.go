@@ -28,15 +28,22 @@ type CreateBatchRequest struct {
 }
 
 // CreateProductLotRequest packages a COMPLETED batch into a SKU lot.
+//
+// Two ways to name the SKU: send an explicit sku/product_name/unit_size, OR send
+// a product_id and let the server derive them from the product master (the
+// frontend pack sheet only knows the product it picked). When product_id is
+// given, sku/product_name/unit_size/mrp are filled from the catalogue and
+// expiry_date defaults to mfg_date + the product's shelf life if omitted.
 type CreateProductLotRequest struct {
 	BatchID     primitive.ObjectID `json:"batch_id"`
+	ProductID   primitive.ObjectID `json:"product_id,omitempty"` // when set, derives sku/name/unit_size/mrp from the product master
 	SKU         string             `json:"sku"`
 	ProductName string             `json:"product_name"`
 	Units       int                `json:"units"`
 	UnitSize    string             `json:"unit_size"` // Legal Metrology net quantity, e.g. "500ml"
 	MRP         float64            `json:"mrp,omitempty"`
-	MfgDate     string             `json:"mfg_date,omitempty"` // YYYY-MM-DD; defaults to today (IST)
-	ExpiryDate  string             `json:"expiry_date"`        // YYYY-MM-DD
+	MfgDate     string             `json:"mfg_date,omitempty"`    // YYYY-MM-DD; defaults to today (IST)
+	ExpiryDate  string             `json:"expiry_date,omitempty"` // YYYY-MM-DD; derived from product shelf life when omitted
 }
 
 // RecallProductLotRequest pulls a product lot from market (FSSAI §18-C).

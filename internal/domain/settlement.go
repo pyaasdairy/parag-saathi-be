@@ -79,7 +79,9 @@ const (
 // via PFMS. Saathi tracks status; it never disburses subsidies itself.
 type DBTRequest struct {
 	ID            primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	SchemeCode    string             `bson:"scheme_code"   json:"scheme_code"` // e.g. NAND_BABA_SUBSIDY
+	SchemeCode    string             `bson:"scheme_code"   json:"scheme_code"`                         // e.g. NAND_BABA_SUBSIDY
+	SchemeName    string             `bson:"scheme_name,omitempty"    json:"scheme_name,omitempty"`    // display label
+	SchemeNameHi  string             `bson:"scheme_name_hi,omitempty" json:"scheme_name_hi,omitempty"` // vernacular label
 	FarmerPartyID primitive.ObjectID `bson:"farmer_party_id" json:"farmer_party_id"`
 	Amount        float64            `bson:"amount"        json:"amount"`
 	PFMSRef       string             `bson:"pfms_ref,omitempty" json:"pfms_ref,omitempty"`

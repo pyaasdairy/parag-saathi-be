@@ -24,15 +24,30 @@ var requestableTiers = map[string]bool{
 	domain.KYCTierHigh:     true,
 }
 
-// submitRequest is the field executive's assisted-onboarding submission.
+// submitRequest is the field executive's assisted-onboarding submission. Beyond
+// the identity essentials it carries the rich doorstep capture (village, cattle,
+// vehicle, staff id, document, photo URLs) which is stored verbatim on the queue
+// item for the reviewer console — the approval saga still only needs the
+// essentials.
 type submitRequest struct {
 	Phone         string             `json:"phone"`
 	FullName      string             `json:"full_name"`
+	FullNameHi    string             `json:"full_name_hi,omitempty"`
 	RequestedRole string             `json:"requested_role"`
 	OrgUnitID     primitive.ObjectID `json:"org_unit_id"`
 	RequestedTier string             `json:"requested_tier"`
 	Note          string             `json:"note,omitempty"`
 	DocumentRefs  []string           `json:"document_refs,omitempty"`
+	// Rich field capture (optional).
+	Village         string `json:"village,omitempty"`
+	DocumentType    string `json:"document_type,omitempty"`
+	DocumentNumber  string `json:"document_number,omitempty"`
+	KYCPhotoURL     string `json:"kyc_photo_url,omitempty"`
+	ProfilePhotoURL string `json:"profile_photo_url,omitempty"`
+	CattleCount     int    `json:"cattle_count,omitempty"`
+	CattleBreed     string `json:"cattle_breed,omitempty"`
+	VehicleNumber   string `json:"vehicle_number,omitempty"`
+	EmployeeID      string `json:"employee_id,omitempty"`
 }
 
 func (r submitRequest) validate() error {
@@ -57,6 +72,9 @@ func (r submitRequest) validate() error {
 	}
 	if len(r.DocumentRefs) > 20 {
 		return httpx.BadRequest("TOO_MANY_DOCS", "document_refs must contain at most 20 entries")
+	}
+	if r.CattleCount < 0 || r.CattleCount > 10000 {
+		return httpx.BadRequest("INVALID_CATTLE_COUNT", "cattle_count must be between 0 and 10000")
 	}
 	return nil
 }

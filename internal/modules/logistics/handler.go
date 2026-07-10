@@ -79,6 +79,54 @@ func (h *handler) listConsignments(w http.ResponseWriter, r *http.Request) {
 	httpx.JSONMeta(w, http.StatusOK, items, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
 }
 
+// getConsignment handles GET /logistics/consignments/{consignmentID}.
+func (h *handler) getConsignment(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "consignmentID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	consignment, err := h.svc.getConsignment(r.Context(), actor, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, consignment)
+}
+
+// approveForUnion handles POST /logistics/consignments/{consignmentID}/approve-union.
+func (h *handler) approveForUnion(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "consignmentID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	invoice, err := h.svc.approveForUnion(r.Context(), actor, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, invoice)
+}
+
+// getConsignmentInvoice handles GET /logistics/consignments/{consignmentID}/invoice.
+func (h *handler) getConsignmentInvoice(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "consignmentID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	invoice, err := h.svc.getConsignmentInvoice(r.Context(), actor, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, invoice)
+}
+
 // createTrip handles POST /logistics/trips.
 func (h *handler) createTrip(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())

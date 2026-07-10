@@ -28,8 +28,13 @@ type SettlementDetail struct {
 
 // CreateDBTRequestInput submits a scheme subsidy for PFMS/DBT routing
 // (blueprint §13). Subsidy money is strictly separate from milk payments.
+// scheme_name / scheme_name_hi are optional display labels carried through to
+// the request (the FE apply flow has a scheme name but not a numeric amount at
+// application time, so amount may be 0 until the subsidy is costed).
 type CreateDBTRequestInput struct {
 	SchemeCode    string             `json:"scheme_code"`
+	SchemeName    string             `json:"scheme_name,omitempty"`
+	SchemeNameHi  string             `json:"scheme_name_hi,omitempty"`
 	FarmerPartyID primitive.ObjectID `json:"farmer_party_id"`
 	Amount        float64            `json:"amount"`
 }

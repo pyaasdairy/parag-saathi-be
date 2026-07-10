@@ -85,7 +85,9 @@ func (s *service) societyStats(ctx context.Context, actor auth.Actor, dcsID prim
 	today := domain.DateKeyIST(now)
 	monthStart := monthStartIST(now)
 
-	days, err := s.repo.dcsPourDays(ctx, dcsID, monthStart)
+	// The 12-day trend needs a slightly wider window than the month for months
+	// early in their run — pull pours since the earlier of month-start / trend-start.
+	days, err := s.repo.dcsPourDays(ctx, dcsID, minDate(monthStart, trendSince(now)))
 	if err != nil {
 		return nil, httpx.Internal(err)
 	}
@@ -97,18 +99,42 @@ func (s *service) societyStats(ctx context.Context, actor auth.Actor, dcsID prim
 	if err != nil {
 		return nil, httpx.Internal(err)
 	}
+	avgFat, avgSNF, err := s.repo.dcsAvgFatSnf(ctx, dcsID, monthStart)
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
+	failures, err := s.repo.dcsRejectedConsignments(ctx, dcsID, thirtyDaysAgo(now))
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
+	openConsignment, err := s.repo.dcsHasOpenConsignment(ctx, dcsID, today)
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
 
 	stats := &SocietyStats{
-		DCSID:         dcsID.Hex(),
-		Date:          today,
-		Today:         dayTotalsFor(days, today),
-		Month:         periodTotalsSince(days, monthStart),
-		ActiveFarmers: activeFarmers,
-		MemberCount:   members,
+		DCSID:              dcsID.Hex(),
+		Date:               today,
+		Today:              dayTotalsFor(days, today),
+		Month:              periodTotalsSince(days, monthStart),
+		ActiveFarmers:      activeFarmers,
+		MemberCount:        members,
+		AvgFatPct:          avgFat,
+		AvgSNFPct:          avgSNF,
+		QualityFailures30d: failures,
+		OpenConsignment:    openConsignment,
+		Trend:              trend(days, now),
 	}
 	s.log.InfoContext(ctx, "society stats served",
 		slog.String("dcs_id", dcsID.Hex()), slog.Int("active_farmers", activeFarmers))
 	return stats, nil
+}
+
+// thirtyDaysAgo returns the IST day key 30 days before now — the window for the
+// society "quality failures" tile.
+func thirtyDaysAgo(now time.Time) string {
+	ist := time.FixedZone("IST", 5*3600+1800)
+	return now.In(ist).AddDate(0, 0, -30).Format("2006-01-02")
 }
 
 // --- pure helpers over the day rollups ---

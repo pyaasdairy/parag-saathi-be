@@ -179,6 +179,51 @@ func (r *repo) listConsignments(ctx context.Context, dcsID primitive.ObjectID, d
 	return items, total, nil
 }
 
+// consignmentBilling sums the billable amount and counts the distinct farmers
+// across a consignment's RECORDED pours — the DCS→Union B2B invoice line (fresh
+// milk is a single pooled line, GST-exempt). Missing/superseded pours drop out.
+func (r *repo) consignmentBilling(ctx context.Context, pourIDs []primitive.ObjectID) (totalAmount float64, farmerCount int, err error) {
+	if len(pourIDs) == 0 {
+		return 0, 0, nil
+	}
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "_id", Value: bson.D{{Key: "$in", Value: pourIDs}}},
+			{Key: "status", Value: domain.PourStatusRecorded},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "amount", Value: bson.D{{Key: "$sum", Value: "$amount"}}},
+			{Key: "farmers", Value: bson.D{{Key: "$addToSet", Value: "$farmer_party_id"}}},
+		}}},
+	}
+	cur, err := r.pours.Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, 0, fmt.Errorf("consignment billing: %w", err)
+	}
+	var rows []struct {
+		Amount  float64              `bson:"amount"`
+		Farmers []primitive.ObjectID `bson:"farmers"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return 0, 0, fmt.Errorf("decode consignment billing: %w", err)
+	}
+	if len(rows) == 0 {
+		return 0, 0, nil
+	}
+	return rows[0].Amount, len(rows[0].Farmers), nil
+}
+
+// markConsignmentUnionApproved stamps the DCS→Union B2B invoice fields onto a
+// consignment (idempotent set — the caller guards against re-approval).
+func (r *repo) markConsignmentUnionApproved(ctx context.Context, id primitive.ObjectID, set bson.D) error {
+	_, err := r.consignments.UpdateByID(ctx, id, bson.D{{Key: "$set", Value: set}})
+	if err != nil {
+		return fmt.Errorf("mark consignment union approved: %w", err)
+	}
+	return nil
+}
+
 // insertTrip stores a new route trip (the service pre-generates its ObjectID).
 func (r *repo) insertTrip(ctx context.Context, t *domain.RouteTrip) error {
 	if _, err := r.trips.InsertOne(ctx, t); err != nil {

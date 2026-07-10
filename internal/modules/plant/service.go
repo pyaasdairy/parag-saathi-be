@@ -30,6 +30,10 @@ import (
 // the frontend switches on it to show the quarantine screen (blueprint §8.3).
 const codeSafetyGateBlocked = "SAFETY_GATE_BLOCKED"
 
+// defaultShelfLifeDays is the fallback expiry window when a product-lot mint
+// derives expiry from a product that carries no explicit shelf_life_days.
+const defaultShelfLifeDays = 90
+
 // Service holds the plant module's business logic: lot pooling, the safety
 // gate, batch numbering, product lot packaging and QR minting.
 type Service struct {
@@ -730,10 +734,45 @@ func (s *Service) CreateProductLot(ctx context.Context, actor auth.Actor, req Cr
 			WithDetails(map[string]any{"batch_status": batch.Status, "block_reason": batch.BlockReason})
 	}
 
+	// When a product_id is supplied, the product master is the source of truth
+	// for the SKU metadata (the frontend pack sheet only picks a product); any
+	// explicit sku/name/unit_size on the request are overridden by the catalogue.
+	if !req.ProductID.IsZero() {
+		product, perr := s.repo.ProductByID(ctx, req.ProductID)
+		if errors.Is(perr, mongo.ErrNoDocuments) {
+			return nil, httpx.NotFound("product " + req.ProductID.Hex())
+		}
+		if perr != nil {
+			return nil, s.fail(ctx, "load product for lot", perr)
+		}
+		req.SKU = product.SKU
+		req.ProductName = product.Name
+		req.UnitSize = product.UnitSize
+		if req.MRP == 0 {
+			req.MRP = product.MRP
+		}
+		if req.ExpiryDate == "" {
+			shelf := product.ShelfLifeDays
+			if shelf <= 0 {
+				shelf = defaultShelfLifeDays
+			}
+			mfg := req.MfgDate
+			if mfg == "" {
+				mfg = domain.DateKeyIST(time.Now().UTC())
+			}
+			if t, terr := time.Parse("2006-01-02", mfg); terr == nil {
+				req.ExpiryDate = t.AddDate(0, 0, shelf).Format("2006-01-02")
+			}
+		}
+	}
+
 	now := time.Now().UTC()
 	mfgDate := req.MfgDate
 	if mfgDate == "" {
 		mfgDate = domain.DateKeyIST(now)
+	}
+	if req.ExpiryDate == "" {
+		return nil, httpx.BadRequest("MISSING_FIELD", "expiry_date is required (or send a product_id with a shelf life)")
 	}
 	if req.ExpiryDate <= mfgDate {
 		return nil, httpx.BadRequest("INVALID_EXPIRY", "expiry_date must be after mfg_date")
