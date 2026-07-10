@@ -253,3 +253,55 @@ func (h *handler) getTrip(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, trip)
 }
+
+// recordLocation handles POST /logistics/trips/{tripID}/location — one live GPS
+// ping from the van while en route.
+func (h *handler) recordLocation(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	tripID, err := httpx.PathID(r, "tripID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req locationRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	trip, err := h.svc.recordLocation(r.Context(), actor, tripID, req)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, trip)
+}
+
+// trackTrip handles GET /logistics/trips/{tripID}/track — the minimal live view
+// for a source Sachiv or the destination BMC.
+func (h *handler) trackTrip(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	tripID, err := httpx.PathID(r, "tripID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	track, err := h.svc.trackTrip(r.Context(), actor, tripID)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, track)
+}
+
+// listActiveTracking handles GET /logistics/trips/tracking — every IN_PROGRESS
+// trip the caller may watch (inbound vans for a BMC, DCS-bearing trips for a
+// Sachiv, all live trips for a union supervisor).
+func (h *handler) listActiveTracking(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	tracks, err := h.svc.listActiveTracking(r.Context(), actor)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, tracks)
+}

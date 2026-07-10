@@ -248,23 +248,6 @@ func run() error {
 		}
 	}
 
-	// ── Product master (find-or-insert by unique `sku`) ─────────────────────
-	// Demo catalogue rows so GET /admin/products and the FE catalogue read
-	// real data. NOTE: DBT requests are NOT seeded — a DBTRequest is strictly
-	// per-party (farmer_party_id + submitted_by), created via POST /dbt/requests.
-	products := []domain.Product{
-		{SKU: "PRG-FC-500", Name: "Parag Full Cream Milk 500ml", NameHi: "पराग फुल क्रीम दूध 500 मिली",
-			Category: "MILK", MRP: 33, UnitSize: "500ml", Active: true, CreatedAt: now, UpdatedAt: now},
-		{SKU: "PRG-TN-500", Name: "Parag Toned Milk 500ml", NameHi: "पराग टोंड दूध 500 मिली",
-			Category: "MILK", MRP: 28, UnitSize: "500ml", Active: true, CreatedAt: now, UpdatedAt: now},
-	}
-	for _, p := range products {
-		if err := upsertByFilter(ctx, db.Collection(mongodb.CollProducts),
-			bson.D{{Key: "sku", Value: p.SKU}}, p); err != nil {
-			return fmt.Errorf("product %s: %w", p.SKU, err)
-		}
-	}
-
 	fmt.Println("✔ seed complete:")
 	for _, o := range orgs {
 		fmt.Printf("  org %-14s %-28s %s\n", o.Code, o.Name, o.ID.Hex())

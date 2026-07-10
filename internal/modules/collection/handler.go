@@ -47,10 +47,25 @@ func (h *handler) createRateChart(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusCreated, chart)
 }
 
-// getActiveRateChart handles GET /collection/rate-charts/active?dcs_id=.
+// getActiveRateChart handles GET /collection/rate-charts/active?dcs_id= (pour
+// path) or ?org_unit_id= (admin masters view). org_unit_id wins if both given.
 func (h *handler) getActiveRateChart(w http.ResponseWriter, r *http.Request) {
+	if orgParam := r.URL.Query().Get("org_unit_id"); orgParam != "" {
+		orgID, err := httpx.ParseID(orgParam, "org_unit_id")
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		chart, err := h.svc.ResolveActiveChartForOrg(r.Context(), requestActor(r), orgID)
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, chart)
+		return
+	}
 	if r.URL.Query().Get("dcs_id") == "" {
-		httpx.Error(w, r, httpx.BadRequest("VALIDATION", "dcs_id query parameter is required"))
+		httpx.Error(w, r, httpx.BadRequest("VALIDATION", "dcs_id or org_unit_id query parameter is required"))
 		return
 	}
 	dcsID, err := httpx.ParseID(r.URL.Query().Get("dcs_id"), "dcs_id")

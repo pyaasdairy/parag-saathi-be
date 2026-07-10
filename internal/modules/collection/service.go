@@ -169,13 +169,37 @@ func (s *service) resolveActiveChartForDCS(ctx context.Context, dcsID primitive.
 	if dcs.Type != domain.OrgTypeDCS {
 		return nil, httpx.BadRequest("NOT_A_DCS", "org unit "+dcsID.Hex()+" is not a DCS")
 	}
+	return s.resolveActiveChartForOrgUnit(ctx, dcs)
+}
 
-	// Distance 0 = the DCS itself; Path is root→parent, so walk it backwards.
-	distance := map[primitive.ObjectID]int{dcs.ID: 0}
-	orgIDs := []primitive.ObjectID{dcs.ID}
-	for i := len(dcs.Path) - 1; i >= 0; i-- {
-		distance[dcs.Path[i]] = len(dcs.Path) - i
-		orgIDs = append(orgIDs, dcs.Path[i])
+// ResolveActiveChartForOrg returns the active chart covering an org unit
+// directly — the admin masters rate view is ORG-scoped (a union/federation
+// admin edits the chart they set), not DCS-scoped like the pour path. Scope is
+// enforced against the actor.
+func (s *service) ResolveActiveChartForOrg(ctx context.Context, actor auth.Actor, orgID primitive.ObjectID) (*domain.RateChart, error) {
+	org, err := s.d.Orgs.Get(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireInScope(ctx, actor, orgID, "resolve rate chart"); err != nil {
+		return nil, err
+	}
+	return s.resolveActiveChartForOrgUnit(ctx, org)
+}
+
+// resolveActiveChartForOrgUnit finds the active rate chart covering an org:
+// among active charts already effective on the org itself or any of its
+// ancestors (org_unit_id ∈ org.Path ∪ {org.ID}), the nearest org wins; ties
+// break to the latest effective_from. Works at any level — a DCS pour resolves
+// upward, a union/federation admin sees the chart they set. NotFound when no
+// chart covers the org. Scope enforcement is the caller's job.
+func (s *service) resolveActiveChartForOrgUnit(ctx context.Context, org *domain.OrgUnit) (*domain.RateChart, error) {
+	// Distance 0 = the org itself; Path is root→parent, so walk it backwards.
+	distance := map[primitive.ObjectID]int{org.ID: 0}
+	orgIDs := []primitive.ObjectID{org.ID}
+	for i := len(org.Path) - 1; i >= 0; i-- {
+		distance[org.Path[i]] = len(org.Path) - i
+		orgIDs = append(orgIDs, org.Path[i])
 	}
 
 	charts, err := s.repo.activeChartsForOrgs(ctx, orgIDs, time.Now().UTC())
@@ -195,7 +219,7 @@ func (s *service) resolveActiveChartForDCS(ctx context.Context, dcsID primitive.
 		}
 	}
 	if best == nil {
-		return nil, httpx.NotFound("active rate chart for DCS " + dcsID.Hex())
+		return nil, httpx.NotFound("active rate chart for org " + org.ID.Hex())
 	}
 	return best, nil
 }

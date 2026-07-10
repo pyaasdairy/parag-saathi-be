@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/pyaas/saathi-backend/internal/domain"
 )
 
 // createConsignmentRequest asks to pool one DCS shift's RECORDED pours.
@@ -34,6 +36,7 @@ type createTripRequest struct {
 // Lat/Lng are pointers so "absent" is distinguishable from zero.
 type pickupRequest struct {
 	TempC    *float64 `json:"temp_c"`
+	SealCode string   `json:"seal_code,omitempty"` // §6.4 anti-swap: verified against the consignment's dispatch seal
 	Lat      *float64 `json:"lat,omitempty"`
 	Lng      *float64 `json:"lng,omitempty"`
 	PhotoURI string   `json:"photo_uri,omitempty"`
@@ -51,6 +54,60 @@ type coldChainRequest struct {
 // deliverRequest hands the whole trip's load to a BMC.
 type deliverRequest struct {
 	BMCID primitive.ObjectID `json:"bmc_id"`
+}
+
+// locationRequest is one live GPS ping from the van while en route (§7.1). The
+// rider's device streams these; they refresh the trip's last-known position.
+type locationRequest struct {
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
+}
+
+// tripTrack is the minimal, privacy-safe live view a source Sachiv or the
+// destination BMC may read — where the van is now and how far along, NOT the
+// full multi-DCS manifest (pooling privacy).
+type tripTrack struct {
+	TripID           string     `json:"trip_id"`
+	RouteName        string     `json:"route_name"`
+	Status           string     `json:"status"`
+	Shift            string     `json:"shift"`
+	Date             string     `json:"date"`
+	VanRiderPartyID  string     `json:"van_rider_party_id"`
+	UnionID          string     `json:"union_id"`
+	LastGeoLat       float64    `json:"last_geo_lat,omitempty"`
+	LastGeoLng       float64    `json:"last_geo_lng,omitempty"`
+	LastLocationAt   *time.Time `json:"last_location_at,omitempty"`
+	DeliveredToBMCID string     `json:"delivered_to_bmc_id,omitempty"`
+	StopsTotal       int        `json:"stops_total"`
+	StopsCollected   int        `json:"stops_collected"`
+}
+
+// toTripTrack projects a RouteTrip onto the minimal track view.
+func toTripTrack(t *domain.RouteTrip) tripTrack {
+	collected := 0
+	for _, s := range t.Stops {
+		if s.PickedUpAt != nil {
+			collected++
+		}
+	}
+	tt := tripTrack{
+		TripID:          t.ID.Hex(),
+		RouteName:       t.RouteName,
+		Status:          t.Status,
+		Shift:           t.Shift,
+		Date:            t.Date,
+		VanRiderPartyID: t.VanRiderPartyID.Hex(),
+		UnionID:         t.UnionID.Hex(),
+		LastGeoLat:      t.LastGeoLat,
+		LastGeoLng:      t.LastGeoLng,
+		LastLocationAt:  t.LastLocationAt,
+		StopsTotal:      len(t.Stops),
+		StopsCollected:  collected,
+	}
+	if t.DeliveredToBMCID != nil {
+		tt.DeliveredToBMCID = t.DeliveredToBMCID.Hex()
+	}
+	return tt
 }
 
 // consignmentListQuery carries the GET /consignments filters. Zero ObjectID

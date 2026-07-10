@@ -150,15 +150,6 @@ func (r *repo) memberCount(ctx context.Context, dcsID primitive.ObjectID) (int, 
 	return int(n), nil
 }
 
-// animalCount counts the registered animals a farmer owns.
-func (r *repo) animalCount(ctx context.Context, farmerID primitive.ObjectID) (int, error) {
-	n, err := r.animals.CountDocuments(ctx, bson.D{{Key: "owner_party_id", Value: farmerID}})
-	if err != nil {
-		return 0, fmt.Errorf("animal count: %w", err)
-	}
-	return int(n), nil
-}
-
 // dcsAvgFatSnf returns the quantity-weighted average fat% and SNF% over a DCS's
 // RECORDED pours since `sinceDate` (both 0 when there are no pours).
 func (r *repo) dcsAvgFatSnf(ctx context.Context, dcsID primitive.ObjectID, sinceDate string) (avgFat, avgSNF float64, err error) {

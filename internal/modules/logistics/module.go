@@ -48,11 +48,23 @@ func Register(r chi.Router, d *deps.Deps) {
 				domain.RoleVanRider, domain.RoleUnionFieldSupervisor, domain.RoleUnionPresident,
 				domain.RoleStateAuditor,
 			)
+			// Live tracking is visible to the source Sachiv/Adhyaksh and the
+			// destination BMC too — the service scopes each to trips they own.
+			trackReaders := middleware.RequireRoles(
+				domain.RoleVanRider, domain.RoleUnionFieldSupervisor, domain.RoleUnionPresident,
+				domain.RoleStateAuditor, domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh,
+				domain.RoleBMCOperator,
+			)
 			r.With(middleware.RequireRoles(domain.RoleUnionFieldSupervisor, domain.RoleVanRider)).
 				Post("/", h.createTrip)
 			r.With(riderOnly).Post("/{tripID}/stops/{consignmentID}/pickup", h.pickupStop)
 			r.With(riderOnly).Post("/{tripID}/cold-chain", h.logColdChain)
+			r.With(riderOnly).Post("/{tripID}/location", h.recordLocation)
 			r.With(riderOnly).Post("/{tripID}/deliver", h.deliverTrip)
+			// Static "/tracking" is registered before "/{tripID}" so chi matches
+			// it literally, not as a trip id.
+			r.With(trackReaders).Get("/tracking", h.listActiveTracking)
+			r.With(trackReaders).Get("/{tripID}/track", h.trackTrip)
 			r.With(tripReaders).Get("/", h.listTrips)
 			r.With(tripReaders).Get("/{tripID}", h.getTrip)
 		})

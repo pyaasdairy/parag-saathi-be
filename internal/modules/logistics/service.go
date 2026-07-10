@@ -606,8 +606,17 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 // stamped with time+temperature, the consignment moves DISPATCHED→PICKED_UP,
 // and the trip moves to IN_PROGRESS on its first pickup.
 func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, consignmentID primitive.ObjectID, req pickupRequest) (*domain.RouteTrip, error) {
-	if err := validateTemp(req.TempC); err != nil {
-		return nil, err
+	// §6.4: at pickup the van records qty/geo/time and verifies the seal;
+	// TEMPERATURE is logged by the chilling branch (BMC), NOT the van — so temp_c
+	// is OPTIONAL here (validate it only when the rider does supply it).
+	if req.TempC != nil {
+		if err := validateTemp(req.TempC); err != nil {
+			return nil, err
+		}
+	}
+	temp := 0.0
+	if req.TempC != nil {
+		temp = *req.TempC
 	}
 	actorID, err := s.actorID(actor)
 	if err != nil {
@@ -622,6 +631,23 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 			slog.String("trip_id", tripID.Hex()), slog.String("consignment_id", consignmentID.Hex()),
 			slog.String("code", aerr.Code), slog.String("actor_party_id", actor.PartyID))
 		return nil, aerr
+	}
+
+	// §6.4 seal verification (anti-swap): if the consignment was sealed at dispatch
+	// and the rider supplies a seal, a MISMATCH blocks a clean pickup.
+	if req.SealCode != "" {
+		consignment, err := s.loadConsignment(ctx, consignmentID)
+		if err != nil {
+			return nil, err
+		}
+		// Case-insensitive: the minted seal mixes cases (lowercase ObjectID hex +
+		// uppercase CRC) and the rider types it by hand, so compare with EqualFold.
+		if consignment.SealCode != "" && !strings.EqualFold(req.SealCode, consignment.SealCode) {
+			s.log.WarnContext(ctx, "stop pickup rejected: seal mismatch",
+				slog.String("consignment_id", consignmentID.Hex()), slog.String("actor_party_id", actor.PartyID))
+			return nil, httpx.Unprocessable("SEAL_MISMATCH",
+				"seal does not match the dispatched consignment — do not collect")
+		}
 	}
 
 	// Guard the consignment transition atomically; only a DISPATCHED
@@ -644,7 +670,7 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 	}
 
 	now := time.Now().UTC()
-	if err := s.repo.markStopPickedUp(ctx, trip.ID, consignmentID, now, *req.TempC, req.Notes, req.Lat, req.Lng, req.PhotoURI); err != nil {
+	if err := s.repo.markStopPickedUp(ctx, trip.ID, consignmentID, now, temp, req.Notes, req.Lat, req.Lng, req.PhotoURI); err != nil {
 		return nil, s.internal(ctx, "pickup stop: mark stop picked up", err)
 	}
 
@@ -657,7 +683,7 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 		},
 		Actor:     provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
 		OrgUnitID: trip.UnionID.Hex(),
-		Payload:   map[string]any{"temp_c": *req.TempC},
+		Payload:   map[string]any{"temp_c": temp},
 	})
 	if err != nil {
 		return nil, s.internal(ctx, "pickup stop: append provenance", err)
@@ -669,7 +695,7 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 	trip.Status = domain.TripStatusInProgress
 	if i := findStop(trip, consignmentID); i >= 0 {
 		trip.Stops[i].PickedUpAt = &now
-		trip.Stops[i].TempC = *req.TempC
+		trip.Stops[i].TempC = temp
 		trip.Stops[i].Notes = req.Notes
 		if req.Lat != nil && req.Lng != nil {
 			trip.Stops[i].Lat, trip.Stops[i].Lng = *req.Lat, *req.Lng
@@ -679,7 +705,7 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 	s.log.InfoContext(ctx, "stop picked up",
 		slog.String("trip_id", trip.ID.Hex()),
 		slog.String("consignment_id", consignmentID.Hex()),
-		slog.Float64("temp_c", *req.TempC),
+		slog.Float64("temp_c", temp),
 		slog.String("actor_party_id", actor.PartyID))
 	return trip, nil
 }
@@ -906,6 +932,135 @@ func (s *service) loadConsignment(ctx context.Context, id primitive.ObjectID) (*
 		return nil, s.internal(ctx, "load consignment", err)
 	}
 	return c, nil
+}
+
+// ---------------------------------------------------------------------------
+// Live van tracking (§7.1) — the source Sachiv and the destination BMC watch
+// the sealed load move; the rider's device streams GPS pings while en route.
+// ---------------------------------------------------------------------------
+
+// recordLocation refreshes the van's last-known position. Only the trip's own
+// rider may ping it, and only before the load has been delivered.
+func (s *service) recordLocation(ctx context.Context, actor auth.Actor, tripID primitive.ObjectID, req locationRequest) (*domain.RouteTrip, error) {
+	trip, err := s.loadTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
+	actorID, err := s.actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	if trip.VanRiderPartyID != actorID {
+		return nil, httpx.Forbidden("only the trip's van rider may report its location")
+	}
+	if trip.Status == domain.TripStatusDelivered {
+		return nil, httpx.Conflict("TRIP_NOT_LIVE", "the trip has already been delivered")
+	}
+	now := time.Now().UTC()
+	if err := s.repo.recordTripLocation(ctx, tripID, req.Lat, req.Lng, now); err != nil {
+		return nil, s.internal(ctx, "record trip location", err)
+	}
+	trip.LastGeoLat, trip.LastGeoLng, trip.LastLocationAt = req.Lat, req.Lng, &now
+	return trip, nil
+}
+
+// trackTrip returns the minimal live view of one trip to a caller entitled to
+// watch it: the rider, a Sachiv/Adhyaksh of a stop's DCS, the destination (or
+// same-union) BMC, or a union supervisor/president/auditor.
+func (s *service) trackTrip(ctx context.Context, actor auth.Actor, tripID primitive.ObjectID) (*tripTrack, error) {
+	trip, err := s.loadTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeTrack(ctx, actor, trip); err != nil {
+		return nil, err
+	}
+	tt := toTripTrack(trip)
+	return &tt, nil
+}
+
+// listActiveTracking returns the minimal live views of every IN_PROGRESS trip
+// the caller may watch, derived from their org: a BMC operator sees inbound
+// vans in their union; a Sachiv/Adhyaksh sees trips carrying their DCS; a
+// supervisor/president sees all live trips in their union.
+func (s *service) listActiveTracking(ctx context.Context, actor auth.Actor) ([]tripTrack, error) {
+	unionID, err := s.actorUnion(ctx, actor)
+	if err != nil {
+		return nil, err
+	}
+	trips, err := s.repo.activeTripsForUnion(ctx, unionID)
+	if err != nil {
+		return nil, s.internal(ctx, "list active tracking", err)
+	}
+	out := make([]tripTrack, 0, len(trips))
+	for i := range trips {
+		if s.authorizeTrack(ctx, actor, &trips[i]) == nil {
+			out = append(out, toTripTrack(&trips[i]))
+		}
+	}
+	return out, nil
+}
+
+// authorizeTrack enforces who may watch a given trip's live location.
+func (s *service) authorizeTrack(ctx context.Context, actor auth.Actor, trip *domain.RouteTrip) error {
+	switch actor.RoleCode {
+	case domain.RoleVanRider:
+		if actorID, err := s.actorID(actor); err == nil && trip.VanRiderPartyID == actorID {
+			return nil
+		}
+	case domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh:
+		if orgID, err := primitive.ObjectIDFromHex(actor.OrgUnitID); err == nil {
+			for _, st := range trip.Stops {
+				if st.DCSID == orgID {
+					return nil
+				}
+			}
+		}
+	case domain.RoleBMCOperator:
+		// The BMC either received this load or sits under the trip's union.
+		if orgID, err := primitive.ObjectIDFromHex(actor.OrgUnitID); err == nil {
+			if trip.DeliveredToBMCID != nil && *trip.DeliveredToBMCID == orgID {
+				return nil
+			}
+			if org, err := s.orgs.Get(ctx, orgID); err == nil {
+				if org.ParentID != nil && *org.ParentID == trip.UnionID {
+					return nil
+				}
+				for _, anc := range org.Path {
+					if anc == trip.UnionID {
+						return nil
+					}
+				}
+			}
+		}
+	case domain.RoleUnionFieldSupervisor, domain.RoleUnionPresident, domain.RoleStateAuditor:
+		if err := s.orgs.RequireInScope(ctx, actor, trip.UnionID); err == nil {
+			return nil
+		}
+	}
+	return httpx.Forbidden("you are not entitled to track this trip")
+}
+
+// actorUnion resolves the MILK_UNION the actor operates under: their own org if
+// it is the union, else the union ancestor in its path (BMC/DCS → parent union).
+func (s *service) actorUnion(ctx context.Context, actor auth.Actor) (primitive.ObjectID, error) {
+	orgID, err := primitive.ObjectIDFromHex(actor.OrgUnitID)
+	if err != nil {
+		return primitive.NilObjectID, httpx.BadRequest("NO_ORG", "no org unit on the active role")
+	}
+	org, err := s.orgs.Get(ctx, orgID)
+	if err != nil {
+		return primitive.NilObjectID, err
+	}
+	if org.Type == domain.OrgTypeMilkUnion {
+		return org.ID, nil
+	}
+	for _, anc := range org.Path {
+		if a, err := s.orgs.Get(ctx, anc); err == nil && a.Type == domain.OrgTypeMilkUnion {
+			return a.ID, nil
+		}
+	}
+	return primitive.NilObjectID, httpx.BadRequest("NO_UNION", "no union in the org hierarchy")
 }
 
 // loadTrip fetches a trip, mapping a miss to 404.

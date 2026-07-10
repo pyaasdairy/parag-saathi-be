@@ -334,3 +334,32 @@ func (r *repo) listTrips(ctx context.Context, unionID primitive.ObjectID, date s
 	}
 	return items, total, nil
 }
+
+// recordTripLocation refreshes the van's last-known position (live tracking).
+func (r *repo) recordTripLocation(ctx context.Context, tripID primitive.ObjectID, lat, lng float64, at time.Time) error {
+	_, err := r.trips.UpdateByID(ctx, tripID, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "last_geo_lat", Value: lat},
+		{Key: "last_geo_lng", Value: lng},
+		{Key: "last_location_at", Value: at},
+	}}})
+	if err != nil {
+		return fmt.Errorf("record trip location: %w", err)
+	}
+	return nil
+}
+
+// activeTripsForUnion returns the union's IN_PROGRESS trips (newest first) — the
+// set the destination BMC watches as inbound vans and a supervisor oversees.
+func (r *repo) activeTripsForUnion(ctx context.Context, unionID primitive.ObjectID) ([]domain.RouteTrip, error) {
+	cur, err := r.trips.Find(ctx,
+		bson.D{{Key: "union_id", Value: unionID}, {Key: "status", Value: domain.TripStatusInProgress}},
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("active trips for union: %w", err)
+	}
+	items := []domain.RouteTrip{}
+	if err := cur.All(ctx, &items); err != nil {
+		return nil, fmt.Errorf("decode active trips: %w", err)
+	}
+	return items, nil
+}

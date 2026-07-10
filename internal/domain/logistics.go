@@ -97,6 +97,11 @@ type RouteTrip struct {
 	Stops            []RouteStop         `bson:"stops"         json:"stops"`
 	ColdChain        []ColdChainEntry    `bson:"cold_chain,omitempty" json:"cold_chain,omitempty"`
 	Status           string              `bson:"status"        json:"status"`
+	// Live location of the van, refreshed while the trip is IN_PROGRESS so the
+	// source Sachiv and the destination BMC can watch the load move (§7.1).
+	LastGeoLat       float64             `bson:"last_geo_lat,omitempty"     json:"last_geo_lat,omitempty"`
+	LastGeoLng       float64             `bson:"last_geo_lng,omitempty"     json:"last_geo_lng,omitempty"`
+	LastLocationAt   *time.Time          `bson:"last_location_at,omitempty" json:"last_location_at,omitempty"`
 	DeliveredToBMCID *primitive.ObjectID `bson:"delivered_to_bmc_id,omitempty" json:"delivered_to_bmc_id,omitempty"`
 	DeliveredAt      *time.Time          `bson:"delivered_at,omitempty"        json:"delivered_at,omitempty"`
 	ProvenanceSeq    int64               `bson:"provenance_seq,omitempty"      json:"provenance_seq,omitempty"`
