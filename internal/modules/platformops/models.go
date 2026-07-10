@@ -52,7 +52,14 @@ type AdminStats struct {
 	PendingKYC            int64         `json:"pending_kyc"`
 	PendingInvoices       int64         `json:"pending_invoices"`
 	BlockedQCSubjects     int64         `json:"blocked_qc_subjects"`
-	GeneratedAt           time.Time     `json:"generated_at"`
+	// SettledAmount30d is the total money disbursed by EXECUTED settlement
+	// batches in the last 30 days; OpenBatches is the count of processing
+	// batches not yet COMPLETED or BLOCKED; FailedBatches30d is the count of
+	// BLOCKED batches created in the last 30 days.
+	SettledAmount30d float64 `json:"settled_amount_30d"`
+	OpenBatches      int64   `json:"open_batches"`
+	FailedBatches30d int64   `json:"failed_batches_30d"`
+	GeneratedAt      time.Time `json:"generated_at"`
 }
 
 // UpsertProductRequest is the PUT /admin/products body. SKU is the upsert key;

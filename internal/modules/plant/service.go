@@ -434,7 +434,47 @@ func (s *Service) ListBMCLots(ctx context.Context, actor auth.Actor, f BMCLotLis
 	if err != nil {
 		return nil, 0, s.fail(ctx, "list bmc lots", err)
 	}
+	for i := range lots {
+		s.enrichBMCLot(ctx, &lots[i])
+	}
 	return lots, total, nil
+}
+
+// enrichBMCLot fills a lot's read-time fields: a human silo-lot code and the
+// §7.4 pooling-honesty contributor set (society ids + display names). Best
+// effort — a directory miss leaves a name out but never fails the listing.
+func (s *Service) enrichBMCLot(ctx context.Context, lot *domain.BMCLot) {
+	lot.SiloLotCode = siloLotCode(lot)
+	ids, err := s.repo.DistinctDCSIDsForConsignments(ctx, lot.ConsignmentIDs)
+	if err != nil {
+		s.log.WarnContext(ctx, "bmc lot enrichment: contributor resolve failed",
+			slog.String("bmc_lot_id", lot.ID.Hex()), slog.Any("err", err))
+		return
+	}
+	lot.ContributingDCSIDs = ids
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if org, oerr := s.orgs.Get(ctx, id); oerr == nil && org != nil {
+			names = append(names, org.Name)
+		}
+	}
+	lot.ContributingDCSNames = names
+}
+
+// siloLotCode synthesises a human-readable silo-lot code
+// LOT-<YYYYMMDD>-<M|E>-<idsuffix> for a BMC lot (the domain carries no explicit
+// code) so the branch console always has a non-empty handle to show.
+func siloLotCode(lot *domain.BMCLot) string {
+	shift := "M"
+	if lot.Shift == domain.ShiftEvening {
+		shift = "E"
+	}
+	day := strings.ReplaceAll(lot.Date, "-", "")
+	suffix := lot.ID.Hex()
+	if len(suffix) >= 6 {
+		suffix = suffix[len(suffix)-6:]
+	}
+	return "LOT-" + day + "-" + shift + "-" + suffix
 }
 
 // --- processing batches ---
@@ -691,7 +731,34 @@ func (s *Service) GetBatch(ctx context.Context, actor auth.Actor, id primitive.O
 	if err := s.requireScope(ctx, actor, batch.PlantID, "get batch"); err != nil {
 		return nil, err
 	}
+	// Read-time enrichment: the id of the QC certificate issued for this batch
+	// (if any), so the lab console drives issued-state off a real lookup rather
+	// than re-inviting a duplicate issue. Best effort — never fails the read.
+	if certID, cerr := s.repo.CertificateIDForBatch(ctx, batch.ID); cerr != nil {
+		s.log.WarnContext(ctx, "get batch: certificate lookup failed",
+			slog.String("batch_id", batch.ID.Hex()), slog.Any("err", cerr))
+	} else {
+		batch.CertificateID = certID
+	}
 	return batch, nil
+}
+
+// ListProductLots pages the product lots yielded by one batch (scope-checked
+// through the batch's plant) — the plant/lab console's read of a completed
+// batch's packaged outputs.
+func (s *Service) ListProductLots(ctx context.Context, actor auth.Actor, batchID primitive.ObjectID, page httpx.Page) ([]domain.ProductLot, int64, error) {
+	batch, err := s.getBatch(ctx, batchID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := s.requireScope(ctx, actor, batch.PlantID, "list product lots"); err != nil {
+		return nil, 0, err
+	}
+	lots, total, err := s.repo.ProductLotsByBatch(ctx, batchID, page)
+	if err != nil {
+		return nil, 0, s.fail(ctx, "list product lots", err)
+	}
+	return lots, total, nil
 }
 
 // ListBatches pages batches by plant/status.
@@ -1062,10 +1129,11 @@ func (s *Service) IssueQR(ctx context.Context, actor auth.Actor, productLotID pr
 	return qr, nil
 }
 
-// ListQRs pages QRs, optionally narrowed to one product lot (scope-checked
-// through the lot's plant).
-func (s *Service) ListQRs(ctx context.Context, actor auth.Actor, f QRListFilter, page httpx.Page) ([]domain.BatchQR, int64, error) {
-	if !f.ProductLotID.IsZero() {
+// ListQRs pages QRs, narrowed either to one product lot or to a whole batch's
+// product lots (scope-checked through the lot's / batch's plant).
+func (s *Service) ListQRs(ctx context.Context, actor auth.Actor, f QRListFilter, batchID primitive.ObjectID, page httpx.Page) ([]domain.BatchQR, int64, error) {
+	switch {
+	case !f.ProductLotID.IsZero():
 		lot, err := s.getProductLot(ctx, f.ProductLotID)
 		if err != nil {
 			return nil, 0, err
@@ -1073,6 +1141,22 @@ func (s *Service) ListQRs(ctx context.Context, actor auth.Actor, f QRListFilter,
 		if err := s.requireScope(ctx, actor, lot.PlantID, "list qrs"); err != nil {
 			return nil, 0, err
 		}
+	case !batchID.IsZero():
+		batch, err := s.getBatch(ctx, batchID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if err := s.requireScope(ctx, actor, batch.PlantID, "list qrs"); err != nil {
+			return nil, 0, err
+		}
+		lotIDs, err := s.repo.ProductLotIDsByBatch(ctx, batchID)
+		if err != nil {
+			return nil, 0, s.fail(ctx, "resolve batch product lots", err)
+		}
+		if len(lotIDs) == 0 {
+			return []domain.BatchQR{}, 0, nil
+		}
+		f.ProductLotIDs = lotIDs
 	}
 	qrs, total, err := s.repo.ListQRs(ctx, f, page)
 	if err != nil {

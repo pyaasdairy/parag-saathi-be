@@ -24,6 +24,18 @@ var requestableTiers = map[string]bool{
 	domain.KYCTierHigh:     true,
 }
 
+// validDocTypes is the closed set of KYC document types a submission may name
+// (mirrors the frontend KycDocType union). Every doorstep enrolment must pick
+// one — the reviewer needs to know which document backs the identity.
+var validDocTypes = map[string]bool{
+	"AADHAAR":            true,
+	"AADHAAR_DIGILOCKER": true,
+	"DIGILOCKER":         true,
+	"VOTER_ID":           true,
+	"DRIVING_LICENSE":    true,
+	"PAN":                true,
+}
+
 // submitRequest is the field executive's assisted-onboarding submission. Beyond
 // the identity essentials it carries the rich doorstep capture (village, cattle,
 // vehicle, staff id, document, photo URLs) which is stored verbatim on the queue
@@ -66,6 +78,9 @@ func (r submitRequest) validate() error {
 	}
 	if !requestableTiers[r.RequestedTier] {
 		return httpx.BadRequest("INVALID_TIER", "requested_tier must be one of MINIMAL, FARMER, STANDARD, RIDER, HIGH")
+	}
+	if !validDocTypes[r.DocumentType] {
+		return httpx.Unprocessable("DOC_TYPE_REQUIRED", "document_type is required and must be a valid KYC document type")
 	}
 	if len(r.Note) > 1000 {
 		return httpx.BadRequest("INVALID_NOTE", "note must be at most 1000 characters")

@@ -27,6 +27,11 @@ type Animal struct {
 	Sex             string             `bson:"sex,omitempty"       json:"sex,omitempty"`
 	BirthDate       *time.Time         `bson:"birth_date,omitempty" json:"birth_date,omitempty"`
 	LactationStatus string             `bson:"lactation_status,omitempty" json:"lactation_status,omitempty"` // DRY, LACTATING
+	// LactationNo is the animal's current lactation cycle number (1 = first
+	// calving); AvgDailyYieldLitres is its recent average daily milk yield —
+	// both surface on the farmer's cattle card.
+	LactationNo         int     `bson:"lactation_no,omitempty"          json:"lactation_no,omitempty"`
+	AvgDailyYieldLitres float64 `bson:"avg_daily_yield_litres,omitempty" json:"avg_daily_yield_litres,omitempty"`
 	CollarEnabled   bool               `bson:"collar_enabled" json:"collar_enabled"`
 	Status          string             `bson:"status"         json:"status"`
 	CreatedAt       time.Time          `bson:"created_at"     json:"created_at"`

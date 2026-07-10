@@ -345,15 +345,21 @@ type roleHolderRow struct {
 // of roleCode inside orgUnitID, each paired with the org unit of their (newest)
 // matching assignment — backing the reviewer's "sachivs in this DCS" picker.
 // total is the count of distinct matching parties.
-func (r *repository) listRoleHoldersInOrg(ctx context.Context, roleCode string, orgUnitID primitive.ObjectID, page httpx.Page) ([]roleHolderRow, int64, error) {
+func (r *repository) listRoleHoldersInOrg(ctx context.Context, roleCode string, orgUnitIDs []primitive.ObjectID, page httpx.Page) ([]roleHolderRow, int64, error) {
 	assignFilter := bson.D{
 		{Key: "role_code", Value: roleCode},
 		{Key: "status", Value: domain.RoleAssignmentActive},
 	}
-	// A zero org means "federation-wide" (already authorised in the service) —
-	// omit the org filter entirely rather than matching the zero ObjectID.
-	if !orgUnitID.IsZero() {
-		assignFilter = append(assignFilter, bson.E{Key: "org_unit_id", Value: orgUnitID})
+	// An empty org set means "federation-wide" (already authorised in the
+	// service) — omit the org filter entirely. Otherwise match any org in the
+	// caller's scoped subtree (the node itself plus its descendants).
+	switch len(orgUnitIDs) {
+	case 0:
+		// federation-wide
+	case 1:
+		assignFilter = append(assignFilter, bson.E{Key: "org_unit_id", Value: orgUnitIDs[0]})
+	default:
+		assignFilter = append(assignFilter, bson.E{Key: "org_unit_id", Value: bson.D{{Key: "$in", Value: orgUnitIDs}}})
 	}
 	// Newest assignment first so the picker surfaces recent grants at the top;
 	// dedupe preserves first-seen order (a party's newest matching assignment

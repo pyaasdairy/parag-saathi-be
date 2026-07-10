@@ -314,13 +314,25 @@ func (r *repository) recordedTestNames(ctx context.Context, subjectType string, 
 	return names, nil
 }
 
-// insertCertificate persists a new QC certificate document. A duplicate
-// certificate_number (unique index) surfaces as a 409 so a retry storm cannot
-// mint colliding certificates.
+// findCertificateByBatch returns the certificate already issued for a batch, or
+// mongo.ErrNoDocuments when none exists — the idempotency guard behind a single
+// certificate per batch.
+func (r *repository) findCertificateByBatch(ctx context.Context, batchID primitive.ObjectID) (*domain.QCCertificate, error) {
+	var cert domain.QCCertificate
+	if err := r.certificates.FindOne(ctx, bson.D{{Key: "batch_id", Value: batchID}}).Decode(&cert); err != nil {
+		return nil, err
+	}
+	return &cert, nil
+}
+
+// insertCertificate persists a new QC certificate document. The per-batch
+// idempotency guard runs in the service before this insert; a certificate_number
+// collision (unique index) still surfaces as a 409 so a retry storm cannot mint
+// colliding certificates.
 func (r *repository) insertCertificate(ctx context.Context, cert *domain.QCCertificate) error {
 	if _, err := r.certificates.InsertOne(ctx, cert); err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return httpx.Conflict("CERTIFICATE_NUMBER_TAKEN", "certificate number "+cert.CertificateNumber+" already issued")
+			return httpx.Conflict("ALREADY_ISSUED", "a certificate has already been issued for this batch")
 		}
 		return httpx.Internal(fmt.Errorf("insert qc certificate: %w", err))
 	}

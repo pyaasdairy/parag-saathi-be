@@ -41,6 +41,29 @@ func newRepository(db *mongo.Database) *repository {
 
 // --- Onboarding requests ---
 
+// partyExistsByPhone reports whether a party already exists for the phone —
+// the ALREADY_REGISTERED guard (one phone = one Party, §4.1).
+func (r *repository) partyExistsByPhone(ctx context.Context, phone string) (bool, error) {
+	n, err := r.parties.CountDocuments(ctx, bson.D{{Key: "phone", Value: phone}}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, httpx.Internal(fmt.Errorf("count parties by phone: %w", err))
+	}
+	return n > 0, nil
+}
+
+// pendingRequestExistsByPhone reports whether a PENDING onboarding request
+// already exists for the phone — the ALREADY_PENDING guard.
+func (r *repository) pendingRequestExistsByPhone(ctx context.Context, phone string) (bool, error) {
+	n, err := r.requests.CountDocuments(ctx, bson.D{
+		{Key: "phone", Value: phone},
+		{Key: "status", Value: domain.OnboardingStatusPending},
+	}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, httpx.Internal(fmt.Errorf("count pending requests by phone: %w", err))
+	}
+	return n > 0, nil
+}
+
 // insertRequest stores a fresh onboarding request.
 func (r *repository) insertRequest(ctx context.Context, req domain.OnboardingRequest) error {
 	if _, err := r.requests.InsertOne(ctx, req); err != nil {

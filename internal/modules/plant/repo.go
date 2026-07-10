@@ -2,6 +2,7 @@ package plant
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -27,6 +28,7 @@ type Repo struct {
 	qrs          *mongo.Collection
 	counters     *mongo.Collection
 	products     *mongo.Collection // read-only view into the product master (derive lot SKU metadata)
+	certificates *mongo.Collection // read-only: resolve a batch's issued QC certificate id
 }
 
 // NewRepo binds the repo to the shared database.
@@ -40,7 +42,67 @@ func NewRepo(db *mongo.Database) *Repo {
 		qrs:          db.Collection(mongodb.CollBatchQRs),
 		counters:     db.Collection(mongodb.CollCounters),
 		products:     db.Collection(mongodb.CollProducts),
+		certificates: db.Collection(mongodb.CollQCCertificates),
 	}
+}
+
+// CertificateIDForBatch returns the hex id of the QC certificate issued for a
+// batch, or "" when none exists — read-time enrichment so the lab console can
+// drive its issued-state off a real lookup instead of a duplicate issue.
+func (r *Repo) CertificateIDForBatch(ctx context.Context, batchID primitive.ObjectID) (string, error) {
+	var doc struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	err := r.certificates.FindOne(ctx, bson.D{{Key: "batch_id", Value: batchID}},
+		options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return doc.ID.Hex(), nil
+}
+
+// ProductLotsByBatch returns the product lots yielded by a batch, newest first.
+func (r *Repo) ProductLotsByBatch(ctx context.Context, batchID primitive.ObjectID, page httpx.Page) ([]domain.ProductLot, int64, error) {
+	filter := bson.D{{Key: "batch_id", Value: batchID}}
+	total, err := r.productLots.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	cur, err := r.productLots.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "created_at", Value: -1}}).
+		SetSkip(page.Offset).SetLimit(page.Limit))
+	if err != nil {
+		return nil, 0, err
+	}
+	out := []domain.ProductLot{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
+}
+
+// ProductLotIDsByBatch returns the ids of every product lot yielded by a batch
+// — the set a batch-scoped QR listing filters on.
+func (r *Repo) ProductLotIDsByBatch(ctx context.Context, batchID primitive.ObjectID) ([]primitive.ObjectID, error) {
+	cur, err := r.productLots.Find(ctx, bson.D{{Key: "batch_id", Value: batchID}},
+		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+	out := make([]primitive.ObjectID, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.ID)
+	}
+	return out, nil
 }
 
 // ProductByID loads one product-master row (mongo.ErrNoDocuments when absent) —
@@ -436,16 +498,21 @@ func (r *Repo) TouchActiveLot(ctx context.Context, lotID primitive.ObjectID) (bo
 	return res.MatchedCount > 0, nil
 }
 
-// QRListFilter narrows the QR listing. A zero ProductLotID is ignored.
+// QRListFilter narrows the QR listing. A zero ProductLotID is ignored;
+// ProductLotIDs (set by a batch-scoped listing) narrows to a lot set via $in.
 type QRListFilter struct {
-	ProductLotID primitive.ObjectID
+	ProductLotID  primitive.ObjectID
+	ProductLotIDs []primitive.ObjectID
 }
 
 // ListQRs returns a page of QRs plus the total match count.
 func (r *Repo) ListQRs(ctx context.Context, f QRListFilter, page httpx.Page) ([]domain.BatchQR, int64, error) {
 	filter := bson.D{}
-	if !f.ProductLotID.IsZero() {
+	switch {
+	case !f.ProductLotID.IsZero():
 		filter = append(filter, bson.E{Key: "product_lot_id", Value: f.ProductLotID})
+	case len(f.ProductLotIDs) > 0:
+		filter = append(filter, bson.E{Key: "product_lot_id", Value: bson.D{{Key: "$in", Value: f.ProductLotIDs}}})
 	}
 	total, err := r.qrs.CountDocuments(ctx, filter)
 	if err != nil {

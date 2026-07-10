@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -633,6 +634,22 @@ func (s *service) issueCertificate(ctx context.Context, actor auth.Actor, batchI
 			"batch is in status "+batch.Status+" — a certificate can only be issued for a PASSED or COMPLETED batch")
 	}
 
+	// Idempotency guard (§8.3): a batch may hold exactly one regulatory
+	// certificate. If one already exists, refuse the re-issue rather than mint a
+	// second FSSAI certificate for the same batch.
+	if existing, ferr := s.repo.findCertificateByBatch(ctx, batchID); ferr == nil {
+		s.log.WarnContext(ctx, "qc certificate rejected: already issued",
+			slog.String("batch_id", batchID.Hex()),
+			slog.String("certificate_number", existing.CertificateNumber),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Conflict("ALREADY_ISSUED",
+			"a certificate ("+existing.CertificateNumber+") has already been issued for this batch")
+	} else if !errors.Is(ferr, mongo.ErrNoDocuments) {
+		s.log.ErrorContext(ctx, "qc certificate: existing lookup failed",
+			slog.String("batch_id", batchID.Hex()), slog.Any("err", ferr))
+		return nil, httpx.Internal(ferr)
+	}
+
 	// FSSAI licence is best-effort enrichment: resolve the plant org unit but
 	// never fail issuance over the directory lookup. The OrgUnit model carries
 	// no licence field today, so this resolves to "" until one is populated.
@@ -704,10 +721,10 @@ func (s *service) issueCertificate(ctx context.Context, actor auth.Actor, batchI
 }
 
 // plantFSSAILicNo extracts the plant's FSSAI licence number from the org unit.
-// The OrgUnit model has no licence field yet, so this returns "" — the seam is
-// here for when the directory carries it.
-func plantFSSAILicNo(_ *domain.OrgUnit) string {
-	return ""
+// Empty when the directory has none on file — the certificate then omits it and
+// the console renders "-" rather than a fabricated licence.
+func plantFSSAILicNo(org *domain.OrgUnit) string {
+	return org.FSSAILicNo
 }
 
 // traceBack is the root-cause tool: for a (typically failed) batch it resolves

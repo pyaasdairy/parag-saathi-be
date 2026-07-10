@@ -285,31 +285,46 @@ func (s *service) dispatchConsignment(ctx context.Context, actor auth.Actor, id 
 	return consignment, nil
 }
 
-// listConsignments returns a scoped page of consignments. DCS-scoped actors
-// default to their own society; wide read roles (SUPER_ADMIN, STATE_AUDITOR)
-// may list unfiltered; everyone else must name a dcs_id inside their scope.
+// listConsignments returns a scoped page of consignments. A named dcs_id (in
+// scope) filters to that society; a DCS-scoped actor (Sachiv/Adhyaksh) defaults
+// to their own society; a VAN_RIDER or BMC_OPERATOR — who carry no single DCS —
+// default to every society under their MILK_UNION (so a rider can plan a route
+// and a BMC operator can open a silo lot); wide read roles (SUPER_ADMIN,
+// STATE_AUDITOR) list unfiltered; everyone else must name a dcs_id in scope.
 func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q consignmentListQuery, page httpx.Page) ([]domain.DCSConsignment, int64, error) {
-	dcsID := q.DCSID
-	if dcsID.IsZero() {
-		switch {
-		case actor.OrgType == domain.OrgTypeDCS && actor.OrgUnitID != "":
-			id, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
-			if err != nil {
-				return nil, 0, err
-			}
-			dcsID = id
-		case actor.RoleCode == domain.RoleSuperAdmin || actor.RoleCode == domain.RoleStateAuditor:
-			// federation-wide read roles may scan unfiltered (still paged)
-		default:
-			return nil, 0, httpx.BadRequest("DCS_ID_REQUIRED", "dcs_id query parameter is required for your role")
-		}
-	}
-	if !dcsID.IsZero() {
-		if err := s.orgs.RequireInScope(ctx, actor, dcsID); err != nil {
+	var dcsIDs []primitive.ObjectID // nil => unfiltered (wide read roles)
+	switch {
+	case !q.DCSID.IsZero():
+		if err := s.orgs.RequireInScope(ctx, actor, q.DCSID); err != nil {
 			s.log.WarnContext(ctx, "consignment list denied: DCS out of scope",
-				slog.String("dcs_id", dcsID.Hex()), slog.String("actor_party_id", actor.PartyID))
+				slog.String("dcs_id", q.DCSID.Hex()), slog.String("actor_party_id", actor.PartyID))
 			return nil, 0, err
 		}
+		dcsIDs = []primitive.ObjectID{q.DCSID}
+	case actor.OrgType == domain.OrgTypeDCS && actor.OrgUnitID != "":
+		id, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+		if err != nil {
+			return nil, 0, err
+		}
+		dcsIDs = []primitive.ObjectID{id}
+	case actor.RoleCode == domain.RoleVanRider || actor.RoleCode == domain.RoleBMCOperator:
+		// Union scope: resolve the actor's MILK_UNION, then every DCS beneath it.
+		unionID, err := s.actorUnion(ctx, actor)
+		if err != nil {
+			return nil, 0, err
+		}
+		ids, err := s.orgs.DescendantIDs(ctx, unionID, domain.OrgTypeDCS)
+		if err != nil {
+			return nil, 0, s.internal(ctx, "list consignments: resolve union DCS", err)
+		}
+		if len(ids) == 0 {
+			return []domain.DCSConsignment{}, 0, nil
+		}
+		dcsIDs = ids
+	case actor.RoleCode == domain.RoleSuperAdmin || actor.RoleCode == domain.RoleStateAuditor:
+		// federation-wide read roles may scan unfiltered (still paged)
+	default:
+		return nil, 0, httpx.BadRequest("DCS_ID_REQUIRED", "dcs_id query parameter is required for your role")
 	}
 	if q.Date != "" {
 		if _, err := resolveDate(q.Date, time.Time{}); err != nil {
@@ -319,7 +334,7 @@ func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q cons
 	if q.Status != "" && !isConsignmentStatus(q.Status) {
 		return nil, 0, httpx.BadRequest("INVALID_STATUS", "unknown consignment status "+q.Status)
 	}
-	items, total, err := s.repo.listConsignments(ctx, dcsID, q.Date, q.Status, page)
+	items, total, err := s.repo.listConsignments(ctx, dcsIDs, q.Date, q.Status, page)
 	if err != nil {
 		return nil, 0, s.internal(ctx, "list consignments", err)
 	}
@@ -861,16 +876,31 @@ func (s *service) listTrips(ctx context.Context, actor auth.Actor, q tripListQue
 		}
 		riderPartyID = actorID // riders only ever see their own trips
 	} else {
+		// A caller-supplied union_id must be scope-checked; a union defaulted from
+		// the actor's own org is inherently authorised (it is derived from their
+		// token) and must NOT be re-checked — a BMC operator's union is their
+		// PARENT org, which would fail a downward scope test.
+		explicitUnion := !unionID.IsZero()
 		if unionID.IsZero() &&
 			actor.RoleCode != domain.RoleSuperAdmin && actor.RoleCode != domain.RoleStateAuditor &&
 			actor.OrgUnitID != "" {
-			id, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
-			if err != nil {
-				return nil, 0, err
+			if actor.RoleCode == domain.RoleBMCOperator {
+				// A BMC operator's org is the chilling centre, not the union — trips
+				// carry union_id, so resolve up to the MILK_UNION to see inbound vans.
+				u, err := s.actorUnion(ctx, actor)
+				if err != nil {
+					return nil, 0, err
+				}
+				unionID = u
+			} else {
+				id, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+				if err != nil {
+					return nil, 0, err
+				}
+				unionID = id // supervisors/presidents default to their union
 			}
-			unionID = id // supervisors/presidents default to their union
 		}
-		if !unionID.IsZero() {
+		if explicitUnion && !unionID.IsZero() {
 			if err := s.orgs.RequireInScope(ctx, actor, unionID); err != nil {
 				s.log.WarnContext(ctx, "trip list denied: union out of scope",
 					slog.String("union_id", unionID.Hex()), slog.String("actor_party_id", actor.PartyID))

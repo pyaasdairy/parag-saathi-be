@@ -40,6 +40,7 @@ type repository struct {
 	qcResults     *mongo.Collection
 	products      *mongo.Collection
 	settings      *mongo.Collection
+	settlements   *mongo.Collection // read-only: settled-amount aggregate for the control tower
 }
 
 // newRepository binds the repository to its collections.
@@ -58,6 +59,7 @@ func newRepository(db *mongo.Database) *repository {
 		qcResults:     db.Collection(mongodb.CollQCResults),
 		products:      db.Collection(mongodb.CollProducts),
 		settings:      db.Collection(mongodb.CollSettings),
+		settlements:   db.Collection(mongodb.CollSettlements),
 	}
 }
 
@@ -86,10 +88,18 @@ func auditFilter(f auditLogFilter) bson.D {
 	return filter
 }
 
-// listAuditLogs returns a page of audit entries, newest first, plus the total
-// matching count for pagination meta.
+// listAuditLogs returns a page of DOMAIN governance entries (who-did-what),
+// newest first, plus the total matching count. Raw HTTP access-log entries
+// (action "http.*", written by the mutation-audit middleware) are excluded
+// unless the caller explicitly filters on an action — the governance console
+// wants business events, not a request log.
 func (r *repository) listAuditLogs(ctx context.Context, f auditLogFilter, page httpx.Page) ([]audit.Entry, int64, error) {
 	filter := auditFilter(f)
+	if f.Action == "" {
+		filter = append(filter, bson.E{Key: "action", Value: bson.D{
+			{Key: "$not", Value: primitive.Regex{Pattern: "^http\\.", Options: ""}},
+		}})
+	}
 
 	total, err := r.auditLogs.CountDocuments(ctx, filter)
 	if err != nil {
@@ -370,7 +380,60 @@ func (r *repository) adminStats(ctx context.Context, dayKey string) (*AdminStats
 		return nil, err
 	}
 	stats.TodayLitres = litres
+
+	// Open batches = processing batches not yet terminal (neither COMPLETED nor
+	// BLOCKED) — production in flight.
+	if stats.OpenBatches, err = r.count(ctx, r.batches,
+		bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{
+			domain.BatchStatusCompleted, domain.BatchStatusBlocked,
+		}}}}}, "open batches"); err != nil {
+		return nil, err
+	}
+	// Failed batches (last 30 days) = BLOCKED batches created within the window.
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+	if stats.FailedBatches30d, err = r.count(ctx, r.batches,
+		bson.D{
+			{Key: "status", Value: domain.BatchStatusBlocked},
+			{Key: "created_at", Value: bson.D{{Key: "$gte", Value: cutoff}}},
+		}, "failed batches 30d"); err != nil {
+		return nil, err
+	}
+	// Settled amount (last 30 days) = Σ total_amount of EXECUTED settlement
+	// batches executed within the window.
+	settled, err := r.sumSettledAmount(ctx, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	stats.SettledAmount30d = settled
 	return stats, nil
+}
+
+// sumSettledAmount sums total_amount over settlement batches EXECUTED since
+// cutoff — the control-tower "settled in the last 30 days" figure.
+func (r *repository) sumSettledAmount(ctx context.Context, cutoff time.Time) (float64, error) {
+	cur, err := r.settlements.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "status", Value: domain.SettlementStatusExecuted},
+			{Key: "executed_at", Value: bson.D{{Key: "$gte", Value: cutoff}}},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "amount", Value: bson.D{{Key: "$sum", Value: "$total_amount"}}},
+		}}},
+	})
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("sum settled amount: %w", err))
+	}
+	var rows []struct {
+		Amount float64 `bson:"amount"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return 0, httpx.Internal(fmt.Errorf("decode settled amount: %w", err))
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].Amount, nil
 }
 
 // sumTodayLitres sums quantity_litres over the day's pours in a single bounded

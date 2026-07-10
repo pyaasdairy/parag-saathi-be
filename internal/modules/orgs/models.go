@@ -46,11 +46,18 @@ type Member struct {
 	PartyID          primitive.ObjectID `json:"party_id"`
 	Phone            string             `json:"phone,omitempty"`
 	FullName         string             `json:"full_name,omitempty"`
+	FullNameHi       string             `json:"full_name_hi,omitempty"`
+	Village          string             `json:"village,omitempty"`
 	KYCTier          string             `json:"kyc_tier,omitempty"`
 	RoleCode         string             `json:"role_code"`
 	RoleAssignmentID primitive.ObjectID `json:"role_assignment_id"`
 	ValidFrom        time.Time          `json:"valid_from"`
 	ValidTo          *time.Time         `json:"valid_to,omitempty"`
+	// AnimalCount is the roster member's count of ACTIVE animals owned;
+	// PouredToday reports whether they poured at this DCS today. Both are
+	// populated only for FARMER rows (the collection console's grain).
+	AnimalCount int  `json:"animal_count"`
+	PouredToday bool `json:"poured_today"`
 }
 
 // ListMeta echoes pagination inputs plus the platform-wide Total (full

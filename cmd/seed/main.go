@@ -71,10 +71,16 @@ func run() error {
 	plant, err := upsertOrg(ctx, db, domain.OrgUnit{
 		Type: domain.OrgTypeProcessingPlant, Name: "Parag Dairy Plant, Lucknow", NameHi: "पराग डेयरी प्लांट, लखनऊ", Code: "PLANT-LKO-01",
 		ParentID: &union.ID, Path: []primitive.ObjectID{federation.ID, union.ID},
-		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
+		FSSAILicNo: "12718011000123", District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
 		return err
+	}
+	// Refresh the plant's FSSAI licence on an existing org too (upsertOrg only
+	// $setOnInsert-s), so a reseed backfills fssai_lic_no for the certificate.
+	if _, err := db.Collection(mongodb.CollOrgUnits).UpdateByID(ctx, plant.ID,
+		bson.D{{Key: "$set", Value: bson.D{{Key: "fssai_lic_no", Value: "12718011000123"}, {Key: "updated_at", Value: now}}}}); err != nil {
+		return fmt.Errorf("plant fssai refresh: %w", err)
 	}
 	bmc, err := upsertOrg(ctx, db, domain.OrgUnit{
 		Type: domain.OrgTypeBMC, Name: "BMC Malihabad", NameHi: "बीएमसी मलिहाबाद", Code: "BMC-LKO-007",
@@ -104,35 +110,47 @@ func run() error {
 
 	// ── Parties (find-or-insert by unique `phone`) + role assignments ───────
 	type seedParty struct {
-		phone, name, lang, tier, role string
-		org                           primitive.ObjectID
+		phone, name, nameHi, village, lang, tier, role string
+		org                                            primitive.ObjectID
 	}
 	seeds := []seedParty{
-		{cfg.SeedAdminPhone, "Platform Admin", "en", domain.KYCTierHighest, domain.RoleSuperAdmin, federation.ID},
-		{"9000000001", "Ramesh Kumar", "hi", domain.KYCTierHigh, domain.RoleSamitiSacheev, dcs1.ID},
-		{"9000000002", "Sunita Devi", "hi", domain.KYCTierHigh, domain.RoleSamitiAdhyaksh, dcs1.ID},
-		{"9000000003", "Anil Verma", "hi", domain.KYCTierStandard, domain.RoleMilkTester, dcs1.ID},
-		{"9000000011", "Mahesh Yadav", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs1.ID},
-		{"9000000012", "Geeta Devi", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs1.ID},
-		{"9000000021", "Salim Khan", "hi", domain.KYCTierRider, domain.RoleVanRider, union.ID},
-		{"9000000031", "Vikas Singh", "hi", domain.KYCTierStandard, domain.RoleBMCOperator, bmc.ID},
-		{"9000000041", "Rajeev Ranjan", "hi", domain.KYCTierHigh, domain.RolePlantOperator, plant.ID},
-		{"9000000042", "Priya Sharma", "en", domain.KYCTierHigh, domain.RolePlantLabAnalyst, plant.ID},
-		{"9000000061", "Dr. A. K. Verma", "hi", domain.KYCTierHigh, domain.RoleVeterinarian, union.ID},
+		{cfg.SeedAdminPhone, "Platform Admin", "", "", "en", domain.KYCTierHighest, domain.RoleSuperAdmin, federation.ID},
+		{"9000000001", "Ramesh Kumar", "रमेश कुमार", "Kasmandi Kalan", "hi", domain.KYCTierHigh, domain.RoleSamitiSacheev, dcs1.ID},
+		{"9000000002", "Sunita Devi", "सुनीता देवी", "Kasmandi Kalan", "hi", domain.KYCTierHigh, domain.RoleSamitiAdhyaksh, dcs1.ID},
+		{"9000000003", "Anil Verma", "अनिल वर्मा", "Kasmandi Kalan", "hi", domain.KYCTierStandard, domain.RoleMilkTester, dcs1.ID},
+		{"9000000011", "Mahesh Yadav", "महेश यादव", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs1.ID},
+		{"9000000012", "Geeta Devi", "गीता देवी", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs1.ID},
+		{"9000000021", "Salim Khan", "सलीम खान", "Malihabad", "hi", domain.KYCTierRider, domain.RoleVanRider, union.ID},
+		{"9000000031", "Vikas Singh", "विकास सिंह", "Malihabad", "hi", domain.KYCTierStandard, domain.RoleBMCOperator, bmc.ID},
+		{"9000000041", "Rajeev Ranjan", "राजीव रंजन", "", "hi", domain.KYCTierHigh, domain.RolePlantOperator, plant.ID},
+		{"9000000042", "Priya Sharma", "प्रिया शर्मा", "", "en", domain.KYCTierHigh, domain.RolePlantLabAnalyst, plant.ID},
+		{"9000000061", "Dr. A. K. Verma", "डॉ. ए. के. वर्मा", "", "hi", domain.KYCTierHigh, domain.RoleVeterinarian, union.ID},
 		// Organising Manager — the ground-level field worker who captures and
 		// first-level-approves KYC (Dairy Development Department pattern).
-		{"9000000071", "Kavita Nishad", "hi", domain.KYCTierHigh, domain.RoleOrganisingManager, union.ID},
-		{"9000000051", "Arjun Mehta", "en", domain.KYCTierMinimal, domain.RoleConsumer, federation.ID},
+		{"9000000071", "Kavita Nishad", "कविता निषाद", "", "hi", domain.KYCTierHigh, domain.RoleOrganisingManager, union.ID},
+		{"9000000051", "Arjun Mehta", "अर्जुन मेहता", "", "en", domain.KYCTierMinimal, domain.RoleConsumer, federation.ID},
 	}
 
 	var mahesh, geeta, sacheev primitive.ObjectID
 	for _, sp := range seeds {
 		party, err := upsertParty(ctx, db, domain.Party{
-			Phone: sp.phone, FullName: sp.name, PreferredLanguage: sp.lang,
-			KYCTier: sp.tier, Status: domain.PartyStatusActive, CreatedAt: now, UpdatedAt: now,
+			Phone: sp.phone, FullName: sp.name, FullNameHi: sp.nameHi, Village: sp.village,
+			PreferredLanguage: sp.lang,
+			KYCTier:           sp.tier, Status: domain.PartyStatusActive, CreatedAt: now, UpdatedAt: now,
 		})
 		if err != nil {
 			return fmt.Errorf("party %s: %w", sp.name, err)
+		}
+		// Refresh the demographic display fields on an existing party too (the
+		// upsert only $setOnInsert-s), so a reseed after this schema change
+		// backfills full_name_hi / village on already-seeded parties.
+		if _, err := db.Collection(mongodb.CollParties).UpdateByID(ctx, party.ID,
+			bson.D{{Key: "$set", Value: bson.D{
+				{Key: "full_name_hi", Value: sp.nameHi},
+				{Key: "village", Value: sp.village},
+				{Key: "updated_at", Value: now},
+			}}}); err != nil {
+			return fmt.Errorf("party refresh %s: %w", sp.name, err)
 		}
 		if err := upsertRoleAssignment(ctx, db, domain.RoleAssignment{
 			PartyID: party.ID, RoleCode: sp.role, OrgUnitID: sp.org,
@@ -213,14 +231,34 @@ func run() error {
 	}
 
 	// ── Sample animals (find-or-insert by unique pashu_aadhaar) ─────────────
+	sahiwalBirth := now.AddDate(-4, -2, 0) // ~4y2m old
+	murrahBirth := now.AddDate(-6, -5, 0)  // ~6y5m old
 	animals := []domain.Animal{
-		{PashuAadhaar: "356729481027", OwnerPartyID: mahesh, DCSID: dcs1.ID, Species: "COW", Breed: "Sahiwal", Sex: "F", LactationStatus: "LACTATING", Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},
-		{PashuAadhaar: "356729481034", OwnerPartyID: geeta, DCSID: dcs1.ID, Species: "BUFFALO", Breed: "Murrah", Sex: "F", LactationStatus: "LACTATING", Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},
+		{PashuAadhaar: "356729481027", OwnerPartyID: mahesh, DCSID: dcs1.ID, Species: "COW", Breed: "Sahiwal", Sex: "F",
+			BirthDate: &sahiwalBirth, LactationStatus: "LACTATING", LactationNo: 3, AvgDailyYieldLitres: 8.5,
+			Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},
+		{PashuAadhaar: "356729481034", OwnerPartyID: geeta, DCSID: dcs1.ID, Species: "BUFFALO", Breed: "Murrah", Sex: "F",
+			BirthDate: &murrahBirth, LactationStatus: "LACTATING", LactationNo: 4, AvgDailyYieldLitres: 6.2,
+			Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},
 	}
 	for _, a := range animals {
 		if err := upsertByFilter(ctx, db.Collection(mongodb.CollAnimals),
 			bson.D{{Key: "pashu_aadhaar", Value: a.PashuAadhaar}}, a); err != nil {
 			return fmt.Errorf("animal %s: %w", a.PashuAadhaar, err)
+		}
+		// Refresh the demographics on an existing animal too (upsertByFilter only
+		// $setOnInsert-s), so a reseed backfills birth_date / lactation_no /
+		// avg_daily_yield_litres on already-seeded animals.
+		if _, err := db.Collection(mongodb.CollAnimals).UpdateOne(ctx,
+			bson.D{{Key: "pashu_aadhaar", Value: a.PashuAadhaar}},
+			bson.D{{Key: "$set", Value: bson.D{
+				{Key: "birth_date", Value: a.BirthDate},
+				{Key: "lactation_status", Value: a.LactationStatus},
+				{Key: "lactation_no", Value: a.LactationNo},
+				{Key: "avg_daily_yield_litres", Value: a.AvgDailyYieldLitres},
+				{Key: "updated_at", Value: now},
+			}}}); err != nil {
+			return fmt.Errorf("animal refresh %s: %w", a.PashuAadhaar, err)
 		}
 	}
 

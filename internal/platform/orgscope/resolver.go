@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
@@ -82,6 +83,63 @@ func (r *Resolver) GetByCode(ctx context.Context, code string) (*domain.OrgUnit,
 		return nil, httpx.Internal(err)
 	}
 	return &org, nil
+}
+
+// DescendantIDs returns the ObjectIDs of every org unit of orgType at-or-below
+// rootID in the hierarchy (rootID itself included when it is of that type),
+// resolved via the denormalised ancestor Path. It backs union-scoped listings
+// (a van rider / BMC operator has no single DCS but may see every DCS under
+// their union). Not cached — used on cold list paths, not the hot scope check.
+func (r *Resolver) DescendantIDs(ctx context.Context, rootID primitive.ObjectID, orgType string) ([]primitive.ObjectID, error) {
+	filter := bson.D{
+		{Key: "type", Value: orgType},
+		{Key: "$or", Value: bson.A{
+			bson.D{{Key: "_id", Value: rootID}},
+			bson.D{{Key: "path", Value: rootID}},
+		}},
+	}
+	cur, err := r.coll.Find(ctx, filter,
+		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
+	defer cur.Close(ctx)
+	var rows []struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, httpx.Internal(err)
+	}
+	out := make([]primitive.ObjectID, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.ID)
+	}
+	return out, nil
+}
+
+// SubtreeIDs returns rootID plus every org unit beneath it (any type), resolved
+// via the denormalised ancestor Path. It backs scoped directory reads that span
+// a subtree — e.g. a union executive listing the Sachivs held at the union's
+// member DCS units, not only at the union node itself. Not cached (cold path).
+func (r *Resolver) SubtreeIDs(ctx context.Context, rootID primitive.ObjectID) ([]primitive.ObjectID, error) {
+	cur, err := r.coll.Find(ctx, bson.D{{Key: "path", Value: rootID}},
+		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
+	defer cur.Close(ctx)
+	var rows []struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, httpx.Internal(err)
+	}
+	out := make([]primitive.ObjectID, 0, len(rows)+1)
+	out = append(out, rootID)
+	for _, row := range rows {
+		out = append(out, row.ID)
+	}
+	return out, nil
 }
 
 // Invalidate drops a cached entry (call after updates).

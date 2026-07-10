@@ -259,6 +259,24 @@ func (h *Handler) CreateProductLot(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusCreated, lot)
 }
 
+// ListProductLots handles GET /plant/product-lots?batch_id= — the packaged
+// outputs of one completed batch.
+func (h *Handler) ListProductLots(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	batchID, err := httpx.ParseID(r.URL.Query().Get("batch_id"), "batch_id")
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("MISSING_FIELD", "batch_id query parameter is required"))
+		return
+	}
+	page := httpx.ParsePage(r)
+	lots, total, err := h.svc.ListProductLots(r.Context(), actor, batchID, page)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSONMeta(w, http.StatusOK, lots, ListMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
+}
+
 // RecallProductLot handles POST /plant/product-lots/{id}/recall.
 func (h *Handler) RecallProductLot(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
@@ -304,10 +322,11 @@ func (h *Handler) IssueQR(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusCreated, qr)
 }
 
-// ListQRs handles GET /plant/qrs?product_lot_id=.
+// ListQRs handles GET /plant/qrs?product_lot_id= (one lot) or ?batch_id= (all
+// of a batch's lots).
 func (h *Handler) ListQRs(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())
-	var productLotID primitive.ObjectID
+	var productLotID, batchID primitive.ObjectID
 	if hex := r.URL.Query().Get("product_lot_id"); hex != "" {
 		id, err := httpx.ParseID(hex, "product_lot_id")
 		if err != nil {
@@ -316,10 +335,18 @@ func (h *Handler) ListQRs(w http.ResponseWriter, r *http.Request) {
 		}
 		productLotID = id
 	}
+	if hex := r.URL.Query().Get("batch_id"); hex != "" {
+		id, err := httpx.ParseID(hex, "batch_id")
+		if err != nil {
+			httpx.Error(w, r, err)
+			return
+		}
+		batchID = id
+	}
 	page := httpx.ParsePage(r)
 	qrs, total, err := h.svc.ListQRs(r.Context(), actor, QRListFilter{
 		ProductLotID: productLotID,
-	}, page)
+	}, batchID, page)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

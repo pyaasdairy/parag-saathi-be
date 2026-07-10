@@ -48,6 +48,9 @@ type OrgUnit struct {
 	ParentID  *primitive.ObjectID  `bson:"parent_id,omitempty" json:"parent_id,omitempty"`
 	Path      []primitive.ObjectID `bson:"path"          json:"path"`
 	Village   string               `bson:"village,omitempty"  json:"village,omitempty"` // the village a DCS serves
+	// FSSAILicNo is the FSSAI licence number of a PROCESSING_PLANT — printed on
+	// the quality certificate for independent verification (blueprint §8.3).
+	FSSAILicNo string              `bson:"fssai_lic_no,omitempty" json:"fssai_lic_no,omitempty"`
 	District  string               `bson:"district,omitempty" json:"district,omitempty"`
 	State     string               `bson:"state,omitempty"    json:"state,omitempty"`
 	GeoLat    float64              `bson:"geo_lat,omitempty"  json:"geo_lat,omitempty"`

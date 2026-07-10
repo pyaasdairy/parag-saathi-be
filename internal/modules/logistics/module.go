@@ -46,7 +46,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			riderOnly := middleware.RequireRoles(domain.RoleVanRider)
 			tripReaders := middleware.RequireRoles(
 				domain.RoleVanRider, domain.RoleUnionFieldSupervisor, domain.RoleUnionPresident,
-				domain.RoleStateAuditor,
+				domain.RoleStateAuditor, domain.RoleBMCOperator,
 			)
 			// Live tracking is visible to the source Sachiv/Adhyaksh and the
 			// destination BMC too — the service scopes each to trips they own.

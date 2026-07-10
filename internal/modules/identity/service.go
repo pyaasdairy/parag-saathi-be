@@ -495,7 +495,12 @@ func (s *service) listPartiesByRole(ctx context.Context, actor auth.Actor, roleC
 			orgUnitID = own
 		}
 	}
-	// A named org must be within the caller's scope.
+	// A named org must be within the caller's scope. Match the org SUBTREE, not
+	// the exact node: role holders sit at descendants (a union executive's
+	// Sachivs are held at member DCS units, not at the union itself), so an exact
+	// org_unit_id match would return an empty picker — RequireInScope already
+	// authorises the descendants.
+	var orgFilter []primitive.ObjectID // nil => federation-wide (no org filter)
 	if !orgUnitID.IsZero() {
 		if err := s.deps.Orgs.RequireInScope(ctx, actor, orgUnitID); err != nil {
 			s.log.WarnContext(ctx, "list parties by role denied: out of scope",
@@ -504,8 +509,13 @@ func (s *service) listPartiesByRole(ctx context.Context, actor auth.Actor, roleC
 				slog.String("role_code", roleCode))
 			return nil, 0, err
 		}
+		ids, err := s.deps.Orgs.SubtreeIDs(ctx, orgUnitID)
+		if err != nil {
+			return nil, 0, err
+		}
+		orgFilter = ids
 	}
-	holders, total, err := s.repo.listRoleHoldersInOrg(ctx, roleCode, orgUnitID, page)
+	holders, total, err := s.repo.listRoleHoldersInOrg(ctx, roleCode, orgFilter, page)
 	if err != nil {
 		return nil, 0, err
 	}

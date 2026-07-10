@@ -220,6 +220,11 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			idx(bson.D{{Key: "region_scope", Value: asc}}, nil),
 		},
 		CollQCCertificates: {
+			// One regulatory certificate per batch is enforced in the service
+			// (findCertificateByBatch → 409 ALREADY_ISSUED before insert). The
+			// batch_id index stays non-unique so a boot over historical data that
+			// predates the guard (possible duplicate certs) never fails index
+			// creation; certificate_number remains globally unique.
 			idx(bson.D{{Key: "batch_id", Value: asc}}, nil),
 			idx(bson.D{{Key: "certificate_number", Value: asc}}, options.Index().SetUnique(true)),
 		},

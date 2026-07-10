@@ -56,7 +56,7 @@ func Register(r chi.Router, d *deps.Deps) {
 				r.Post("/{id}/supersede", h.supersedePour)
 			})
 			r.With(middleware.RequireRoles(
-				domain.RoleSamitiSacheev, domain.RoleMilkTester,
+				domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh, domain.RoleMilkTester,
 				domain.RoleUnionFieldSupervisor, domain.RoleFarmer, domain.RoleStateAuditor,
 			)).Get("/", h.listPours)
 		})

@@ -70,6 +70,25 @@ func (s *service) submit(ctx context.Context, actor auth.Actor, req submitReques
 		return nil, err
 	}
 
+	// Duplicate guards (mirrors the FE mock contract): a phone that already owns
+	// a Party is ALREADY_REGISTERED; a phone with a still-PENDING request is
+	// ALREADY_PENDING — either way the doorstep enrolment must not create a
+	// second queue item.
+	if registered, err := s.repo.partyExistsByPhone(ctx, req.Phone); err != nil {
+		return nil, err
+	} else if registered {
+		s.log.WarnContext(ctx, "onboarding submit rejected: phone already registered",
+			slog.String("phone", req.Phone), slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Conflict("ALREADY_REGISTERED", "a party already exists for this phone number")
+	}
+	if pending, err := s.repo.pendingRequestExistsByPhone(ctx, req.Phone); err != nil {
+		return nil, err
+	} else if pending {
+		s.log.WarnContext(ctx, "onboarding submit rejected: request already pending",
+			slog.String("phone", req.Phone), slog.String("actor_party_id", actor.PartyID))
+		return nil, httpx.Conflict("ALREADY_PENDING", "an onboarding request for this phone is already pending review")
+	}
+
 	now := time.Now().UTC()
 	request := domain.OnboardingRequest{
 		ID:              primitive.NewObjectID(),

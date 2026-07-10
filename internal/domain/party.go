@@ -20,6 +20,8 @@ type Party struct {
 	ID                primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	Phone             string             `bson:"phone"         json:"phone"`
 	FullName          string             `bson:"full_name,omitempty"          json:"full_name,omitempty"`
+	FullNameHi        string             `bson:"full_name_hi,omitempty"       json:"full_name_hi,omitempty"` // vernacular display name
+	Village           string             `bson:"village,omitempty"            json:"village,omitempty"`       // home village (self-reported)
 	PreferredLanguage string             `bson:"preferred_language,omitempty" json:"preferred_language,omitempty"` // "hi", "en", ...
 	KYCTier           string             `bson:"kyc_tier"      json:"kyc_tier"`
 	Status            string             `bson:"status"        json:"status"`

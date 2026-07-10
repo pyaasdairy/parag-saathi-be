@@ -150,11 +150,17 @@ func (r *repo) setConsignmentProvenanceSeq(ctx context.Context, id primitive.Obj
 }
 
 // listConsignments returns a filtered, newest-first page plus the total count.
-// A zero dcsID means "no DCS filter".
-func (r *repo) listConsignments(ctx context.Context, dcsID primitive.ObjectID, date, status string, page httpx.Page) ([]domain.DCSConsignment, int64, error) {
+// A nil/empty dcsIDs means "no DCS filter" (wide read roles); a single id
+// filters to that society; many ids ($in) scope to a union's member societies.
+func (r *repo) listConsignments(ctx context.Context, dcsIDs []primitive.ObjectID, date, status string, page httpx.Page) ([]domain.DCSConsignment, int64, error) {
 	filter := bson.D{}
-	if !dcsID.IsZero() {
-		filter = append(filter, bson.E{Key: "dcs_id", Value: dcsID})
+	switch len(dcsIDs) {
+	case 0:
+		// no DCS filter
+	case 1:
+		filter = append(filter, bson.E{Key: "dcs_id", Value: dcsIDs[0]})
+	default:
+		filter = append(filter, bson.E{Key: "dcs_id", Value: bson.D{{Key: "$in", Value: dcsIDs}}})
 	}
 	if date != "" {
 		filter = append(filter, bson.E{Key: "date", Value: date})

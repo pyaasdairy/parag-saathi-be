@@ -39,6 +39,12 @@ type BMCLot struct {
 	DispatchedAt  *time.Time           `bson:"dispatched_at,omitempty" json:"dispatched_at,omitempty"`
 	ProvenanceSeq int64                `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
 	CreatedAt     time.Time            `bson:"created_at" json:"created_at"`
+	// Read-time enrichment (never persisted): a human silo-lot code and the
+	// §7.4 pooling-honesty contributor set (society ids + display names),
+	// resolved when the lot is listed for the BMC/plant console.
+	SiloLotCode          string               `bson:"-" json:"silo_lot_code,omitempty"`
+	ContributingDCSIDs   []primitive.ObjectID `bson:"-" json:"contributing_dcs_ids,omitempty"`
+	ContributingDCSNames []string             `bson:"-" json:"contributing_dcs_names,omitempty"`
 }
 
 // Processing batch statuses — same gate discipline as BMC lots.
@@ -71,6 +77,10 @@ type ProcessingBatch struct {
 	CreatedBy          primitive.ObjectID   `bson:"created_by"    json:"created_by"`
 	ProvenanceSeq      int64                `bson:"provenance_seq,omitempty" json:"provenance_seq,omitempty"`
 	CreatedAt          time.Time            `bson:"created_at"    json:"created_at"`
+	// CertificateID is read-time enrichment (never persisted): the id of the QC
+	// certificate issued for this batch, resolved on GET so the lab console can
+	// drive its issued-state off a real lookup rather than a duplicate issue.
+	CertificateID string `bson:"-" json:"certificate_id,omitempty"`
 }
 
 // Product lot statuses.

@@ -65,6 +65,10 @@ func Register(r chi.Router, d *deps.Deps) {
 		pr.Route("/product-lots", func(plr chi.Router) {
 			plr.With(middleware.RequireRoles(
 				domain.RolePlantOperator, domain.RolePlantLabAnalyst,
+				domain.RoleUnionFieldSupervisor, domain.RoleStateAuditor,
+			)).Get("/", h.ListProductLots)
+			plr.With(middleware.RequireRoles(
+				domain.RolePlantOperator, domain.RolePlantLabAnalyst,
 			)).Post("/", h.CreateProductLot)
 			plr.With(middleware.RequireRoles(
 				domain.RolePCDFAdmin, domain.RolePlantLabAnalyst,

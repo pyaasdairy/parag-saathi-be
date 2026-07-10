@@ -334,7 +334,8 @@ func (s *service) List(ctx context.Context, orgType, district, code string, page
 // with party identity fields (GET /orgs/{id}/members) — two indexed queries,
 // no $lookup.
 func (s *service) Members(ctx context.Context, actor auth.Actor, id primitive.ObjectID, page httpx.Page) ([]Member, int64, error) {
-	if _, err := s.repo.getOrg(ctx, id); err != nil {
+	org, err := s.repo.getOrg(ctx, id)
+	if err != nil {
 		return nil, 0, s.fail(ctx, "get org unit", err)
 	}
 	if err := s.scope.RequireInScope(ctx, actor, id); err != nil {
@@ -362,6 +363,25 @@ func (s *service) Members(ctx context.Context, actor auth.Actor, id primitive.Ob
 		return nil, 0, s.fail(ctx, "fetch member parties", err)
 	}
 
+	// Roster enrichment (§8.1 collection console): per FARMER row, the count of
+	// ACTIVE animals owned and whether they poured at this DCS today. Both are
+	// batched — one grouped animal count, one distinct pour read — over the
+	// farmer party ids on this page.
+	farmerIDs := make([]primitive.ObjectID, 0, len(partyIDs))
+	for _, a := range assignments {
+		if a.RoleCode == domain.RoleFarmer {
+			farmerIDs = append(farmerIDs, a.PartyID)
+		}
+	}
+	animalCounts, err := s.repo.activeAnimalCountsByOwners(ctx, farmerIDs)
+	if err != nil {
+		return nil, 0, s.fail(ctx, "count member animals", err)
+	}
+	pouredToday, err := s.repo.pouredTodayByFarmers(ctx, id, domain.DateKeyIST(time.Now().UTC()), farmerIDs)
+	if err != nil {
+		return nil, 0, s.fail(ctx, "resolve poured-today farmers", err)
+	}
+
 	members := make([]Member, 0, len(assignments))
 	for _, a := range assignments {
 		m := Member{
@@ -370,11 +390,21 @@ func (s *service) Members(ctx context.Context, actor auth.Actor, id primitive.Ob
 			RoleAssignmentID: a.ID,
 			ValidFrom:        a.ValidFrom,
 			ValidTo:          a.ValidTo,
+			// Village is the DCS's village — the members share the society's locale.
+			Village: org.Village,
 		}
 		if p, ok := parties[a.PartyID]; ok {
 			m.Phone = p.Phone
 			m.FullName = p.FullName
+			m.FullNameHi = p.FullNameHi
 			m.KYCTier = p.KYCTier
+			if p.Village != "" {
+				m.Village = p.Village
+			}
+		}
+		if a.RoleCode == domain.RoleFarmer {
+			m.AnimalCount = animalCounts[a.PartyID]
+			m.PouredToday = pouredToday[a.PartyID]
 		}
 		members = append(members, m)
 	}
