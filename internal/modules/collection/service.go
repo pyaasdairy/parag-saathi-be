@@ -465,6 +465,7 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 		FatPct:            req.FatPct,
 		SNFPct:            req.SNFPct,
 		CLR:               req.CLR,
+		TemperatureC:      req.TemperatureC,
 		RatePerLitre:      rate,
 		Amount:            amount,
 		RateChartID:       chart.ID,
@@ -776,6 +777,7 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID pr
 		FatPct:            fat,
 		SNFPct:            snf,
 		CLR:               old.CLR,
+		TemperatureC:      old.TemperatureC, // a correction keeps the original cold-chain reading
 		RatePerLitre:      rate,
 		Amount:            amount,
 		RateChartID:       chart.ID,

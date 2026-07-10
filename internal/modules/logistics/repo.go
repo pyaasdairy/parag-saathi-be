@@ -196,17 +196,28 @@ func (r *repo) findTripByID(ctx context.Context, id primitive.ObjectID) (*domain
 	return &t, nil
 }
 
-// markStopPickedUp stamps the matched stop with pickup time/temperature and
-// moves the trip to IN_PROGRESS (idempotent once it is already there).
-func (r *repo) markStopPickedUp(ctx context.Context, tripID, consignmentID primitive.ObjectID, at time.Time, tempC float64, notes string) error {
+// markStopPickedUp stamps the matched stop with pickup time/temperature (plus
+// optional geo/photo evidence) and moves the trip to IN_PROGRESS (idempotent
+// once it is already there). Nil lat/lng and an empty photoURI are "not
+// captured" and leave the stop untouched.
+func (r *repo) markStopPickedUp(ctx context.Context, tripID, consignmentID primitive.ObjectID, at time.Time, tempC float64, notes string, lat, lng *float64, photoURI string) error {
+	set := bson.D{
+		{Key: "stops.$.picked_up_at", Value: at},
+		{Key: "stops.$.temp_c", Value: tempC},
+		{Key: "stops.$.notes", Value: notes},
+		{Key: "status", Value: domain.TripStatusInProgress},
+	}
+	if lat != nil && lng != nil {
+		set = append(set,
+			bson.E{Key: "stops.$.lat", Value: *lat},
+			bson.E{Key: "stops.$.lng", Value: *lng})
+	}
+	if photoURI != "" {
+		set = append(set, bson.E{Key: "stops.$.photo_uri", Value: photoURI})
+	}
 	_, err := r.trips.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: tripID}, {Key: "stops.consignment_id", Value: consignmentID}},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "stops.$.picked_up_at", Value: at},
-			{Key: "stops.$.temp_c", Value: tempC},
-			{Key: "stops.$.notes", Value: notes},
-			{Key: "status", Value: domain.TripStatusInProgress},
-		}}})
+		bson.D{{Key: "$set", Value: set}})
 	if err != nil {
 		return fmt.Errorf("mark stop picked up: %w", err)
 	}

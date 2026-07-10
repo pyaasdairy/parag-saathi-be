@@ -69,8 +69,9 @@ type listMeta struct {
 type QCQueueItem struct {
 	SubjectType    string             `json:"subject_type"` // domain.QCSubject*
 	SubjectID      primitive.ObjectID `json:"subject_id"`
-	Stage          string             `json:"stage"`     // the QC stage this subject is gated at
-	Reference      string             `json:"reference"` // human label (lot date/shift or batch number)
+	Stage          string             `json:"stage"`                  // the QC stage this subject is gated at
+	Reference      string             `json:"reference"`              // human label (lot date/shift or batch number)
+	InputLitres    float64            `json:"input_litres,omitempty"` // batch input / lot pooled litres, when known
 	OrgUnitID      primitive.ObjectID `json:"org_unit_id"`
 	MandatoryTests []string           `json:"mandatory_tests"`
 	RecordedTests  []string           `json:"recorded_tests"`

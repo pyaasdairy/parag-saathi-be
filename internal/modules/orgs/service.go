@@ -156,7 +156,9 @@ func (s *service) Create(ctx context.Context, actor auth.Actor, req CreateOrgReq
 		ID:        primitive.NewObjectID(),
 		Type:      req.Type,
 		Name:      name,
+		NameHi:    strings.TrimSpace(req.NameHi),
 		Code:      code,
+		Village:   strings.TrimSpace(req.Village),
 		District:  strings.TrimSpace(req.District),
 		State:     strings.TrimSpace(req.State),
 		Path:      []primitive.ObjectID{},
@@ -203,7 +205,8 @@ func hexOrEmpty(id *primitive.ObjectID) string {
 	return id.Hex()
 }
 
-// Update patches name/district/active/geo on an org unit (PATCH /orgs/{id}).
+// Update patches name/name_hi/village/district/active/geo on an org unit
+// (PATCH /orgs/{id}).
 // Type or parent moves are rejected — restructuring the tree is out of scope
 // for v1 because Path denormalisation across a subtree is not transactional.
 func (s *service) Update(ctx context.Context, actor auth.Actor, id primitive.ObjectID, req UpdateOrgRequest) (*domain.OrgUnit, error) {
@@ -225,6 +228,12 @@ func (s *service) Update(ctx context.Context, actor auth.Actor, id primitive.Obj
 			return nil, httpx.BadRequest("INVALID_NAME", "name cannot be empty")
 		}
 		set = append(set, bson.E{Key: "name", Value: name})
+	}
+	if req.NameHi != nil {
+		set = append(set, bson.E{Key: "name_hi", Value: strings.TrimSpace(*req.NameHi)})
+	}
+	if req.Village != nil {
+		set = append(set, bson.E{Key: "village", Value: strings.TrimSpace(*req.Village)})
 	}
 	if req.District != nil {
 		set = append(set, bson.E{Key: "district", Value: strings.TrimSpace(*req.District)})

@@ -140,6 +140,8 @@ func (s *service) upsertProduct(ctx context.Context, actor auth.Actor, req Upser
 	set := bson.D{
 		{Key: "sku", Value: sku},
 		{Key: "name", Value: name},
+		{Key: "name_hi", Value: strings.TrimSpace(req.NameHi)},
+		{Key: "category", Value: strings.TrimSpace(req.Category)},
 		{Key: "mrp", Value: req.MRP},
 		{Key: "unit_size", Value: strings.TrimSpace(req.UnitSize)},
 		{Key: "active", Value: active},

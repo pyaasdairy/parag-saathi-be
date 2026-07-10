@@ -8,6 +8,7 @@ type FarmerSummary struct {
 	Month           PeriodTotals `json:"month"`
 	PendingAmount   float64      `json:"pending_amount"`   // issued-but-unpaid invoice total
 	PendingInvoices int          `json:"pending_invoices"` // count of unpaid invoices
+	AnimalCount     int          `json:"animal_count"`     // farmer's ACTIVE animals
 	Trend           []DayTotals  `json:"trend"`            // most-recent days first
 }
 

@@ -537,7 +537,7 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 	items := make([]QCQueueItem, 0, len(lots)+len(batches))
 	for _, lot := range lots {
 		item, err := s.queueItem(ctx, domain.QCSubjectBMCLot, lot.ID, domain.QCStageBMCRapid,
-			lot.Date+" "+lot.Shift, lot.BMCID, lot.CreatedAt)
+			lot.Date+" "+lot.Shift, lot.TotalQuantityLitres, lot.BMCID, lot.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -545,7 +545,7 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 	}
 	for _, batch := range batches {
 		item, err := s.queueItem(ctx, domain.QCSubjectProcessingBatch, batch.ID, domain.QCStagePlantLab,
-			batch.BatchNumber, batch.PlantID, batch.CreatedAt)
+			batch.BatchNumber, batch.InputLitres, batch.PlantID, batch.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -557,7 +557,7 @@ func (s *service) qcQueue(ctx context.Context) (*QCQueueResponse, error) {
 
 // queueItem builds one queue row: it derives the stage's mandatory tests and
 // splits them against the parameters already on file for the subject.
-func (s *service) queueItem(ctx context.Context, subjectType string, subjectID primitive.ObjectID, stage, reference string, orgUnitID primitive.ObjectID, createdAt time.Time) (QCQueueItem, error) {
+func (s *service) queueItem(ctx context.Context, subjectType string, subjectID primitive.ObjectID, stage, reference string, inputLitres float64, orgUnitID primitive.ObjectID, createdAt time.Time) (QCQueueItem, error) {
 	recordedSet, err := s.repo.recordedTestNames(ctx, subjectType, subjectID)
 	if err != nil {
 		s.log.ErrorContext(ctx, "qc queue: recorded tests lookup failed",
@@ -581,6 +581,7 @@ func (s *service) queueItem(ctx context.Context, subjectType string, subjectID p
 		SubjectID:      subjectID,
 		Stage:          stage,
 		Reference:      reference,
+		InputLitres:    inputLitres,
 		OrgUnitID:      orgUnitID,
 		MandatoryTests: mandatory,
 		RecordedTests:  recorded,

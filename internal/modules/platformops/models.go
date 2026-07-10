@@ -61,6 +61,8 @@ type AdminStats struct {
 type UpsertProductRequest struct {
 	SKU      string  `json:"sku"`
 	Name     string  `json:"name"`
+	NameHi   string  `json:"name_hi"`
+	Category string  `json:"category"` // MILK | DAHI | PANEER | GHEE | BUTTER | OTHER
 	MRP      float64 `json:"mrp"`
 	UnitSize string  `json:"unit_size"`
 	Active   *bool   `json:"active"`

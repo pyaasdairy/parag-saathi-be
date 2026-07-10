@@ -18,6 +18,8 @@ type Product struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	SKU       string             `bson:"sku"        json:"sku"` // unique business key, e.g. "MILK-TP-500"
 	Name      string             `bson:"name"       json:"name"`
+	NameHi    string             `bson:"name_hi,omitempty"  json:"name_hi,omitempty"`  // Hindi display name
+	Category  string             `bson:"category,omitempty" json:"category,omitempty"` // MILK | DAHI | PANEER | GHEE | BUTTER | OTHER
 	MRP       float64            `bson:"mrp"        json:"mrp"`
 	UnitSize  string             `bson:"unit_size"  json:"unit_size"` // e.g. "500ml", "1L", "200g"
 	Active    bool               `bson:"active"     json:"active"`

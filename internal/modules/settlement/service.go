@@ -48,8 +48,10 @@ func actorObjectID(actor auth.Actor) (primitive.ObjectID, error) {
 // batch it initiated. Then the batch must still be awaiting approval.
 func validateApproval(b domain.SettlementBatch, approverPartyID primitive.ObjectID) error {
 	if b.InitiatedBy == approverPartyID {
-		return httpx.Forbidden("dual-control violation: the settlement initiator cannot approve their own batch (§8.1/§18-B)").
+		appErr := httpx.Forbidden("dual-control violation: the settlement initiator cannot approve their own batch (§8.1/§18-B)").
 			WithDetails(map[string]string{"reason": "DUAL_CONTROL_VIOLATION"})
+		appErr.Code = "DUAL_CONTROL_VIOLATION"
+		return appErr
 	}
 	if b.Status != domain.SettlementStatusPendingApproval {
 		return httpx.Conflict("INVALID_STATUS", "settlement batch is "+b.Status+", expected "+domain.SettlementStatusPendingApproval)

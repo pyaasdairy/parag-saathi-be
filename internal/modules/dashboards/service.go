@@ -54,6 +54,10 @@ func (s *service) farmerSummary(ctx context.Context, actor auth.Actor, farmerID 
 	if err != nil {
 		return nil, httpx.Internal(err)
 	}
+	animals, err := s.repo.animalCount(ctx, farmerID)
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
 
 	sum := &FarmerSummary{
 		FarmerPartyID:   farmerID.Hex(),
@@ -61,6 +65,7 @@ func (s *service) farmerSummary(ctx context.Context, actor auth.Actor, farmerID 
 		Month:           periodTotalsSince(days, monthStart),
 		PendingAmount:   round2(pendAmt),
 		PendingInvoices: pendCount,
+		AnimalCount:     animals,
 		Trend:           trend(days, now),
 	}
 	s.log.InfoContext(ctx, "farmer summary served",
