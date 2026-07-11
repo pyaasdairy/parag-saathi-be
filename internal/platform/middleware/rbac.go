@@ -24,7 +24,9 @@ func RequireRoles(roles ...string) func(http.Handler) http.Handler {
 				return
 			}
 			if actor.Kind != auth.TokenKindRole {
-				httpx.Error(w, r, httpx.Forbidden("a role token is required — select a role first (POST /api/v1/auth/role/select)"))
+				appErr := httpx.Forbidden("a role token is required — select a role first (POST /api/v1/auth/role/select)")
+				appErr.Code = "ROLE_TOKEN_REQUIRED" // distinct code: the app re-selects the role and retries
+				httpx.Error(w, r, appErr)
 				return
 			}
 			if actor.RoleCode == domain.RoleSuperAdmin {
