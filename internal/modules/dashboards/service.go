@@ -68,11 +68,47 @@ func (s *service) farmerSummary(ctx context.Context, actor auth.Actor, farmerID 
 		AnimalCount:     animals,
 		Trend:           trend(days, now),
 	}
+	// F2: the farmer's assigned Sachiv — best-effort enrichment; the summary
+	// never fails (and never fabricates) when the chain doesn't resolve.
+	sum.Sachiv = s.assignedSachiv(ctx, farmerID)
 	s.log.InfoContext(ctx, "farmer summary served",
 		slog.String("farmer_party_id", farmerID.Hex()),
 		slog.Float64("today_qty", sum.Today.QuantityLitres),
 		slog.Float64("pending_amount", sum.PendingAmount))
 	return sum, nil
+}
+
+// assignedSachiv resolves the farmer's assigned society secretary (F2): the
+// farmer's own FARMER assignment names their DCS, whose newest ACTIVE
+// SAMITI_SACHEEV is the assigned Sachiv. Every step is best-effort: nil (the
+// block is omitted) when the chain doesn't resolve — never fabricated data.
+func (s *service) assignedSachiv(ctx context.Context, farmerID primitive.ObjectID) *SachivInfo {
+	dcsID, err := s.repo.farmerDCS(ctx, farmerID)
+	if err != nil || dcsID.IsZero() {
+		return nil
+	}
+	sachivID, err := s.repo.sachivPartyAtDCS(ctx, dcsID)
+	if err != nil || sachivID.IsZero() {
+		return nil
+	}
+	party, err := s.repo.partyByID(ctx, sachivID)
+	if err != nil || party == nil {
+		return nil
+	}
+	info := &SachivInfo{
+		PartyID: sachivID.Hex(),
+		Name:    party.FullName,
+		NameHi:  party.FullNameHi,
+		Phone:   party.Phone,
+		Village: party.Village,
+	}
+	if org, oerr := s.deps.Orgs.Get(ctx, dcsID); oerr == nil && org != nil {
+		info.DCSName = org.Name
+		if org.Village != "" {
+			info.Village = org.Village // the society's village is the canonical display
+		}
+	}
+	return info
 }
 
 // societyStats builds the DCS console aggregate. Caller must be in the DCS's

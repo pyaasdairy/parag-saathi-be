@@ -25,6 +25,19 @@ type RecordQCResultRequest struct {
 	Stage       string             `json:"stage"` // domain.QCStageBMCRapid | domain.QCStagePlantLab
 	Tests       []QCTestInput      `json:"tests"`
 	LabRef      string             `json:"lab_ref,omitempty"`
+	// Verdict/Hold request a HOLD (§13.5): the subject is QUARANTINED pending
+	// resolution instead of PASSED/BLOCKED. A panel with a hard FSSAI failure
+	// can never be held — it always REJECTs. PASS/REJECT are derived from the
+	// tests server-side and cannot be requested.
+	Verdict string `json:"verdict,omitempty"` // only "HOLD" is honoured
+	Hold    bool   `json:"hold,omitempty"`
+}
+
+// ResolveQCResultRequest is the POST /quality/qc-results/{id}/resolve body —
+// the analyst's HOLD→PASS/REJECT decision on a quarantined subject.
+type ResolveQCResultRequest struct {
+	Verdict string `json:"verdict"` // PASS | REJECT
+	Notes   string `json:"notes,omitempty"`
 }
 
 // QCLimit is one FSSAI gate limit, shaped for client display.
@@ -63,6 +76,28 @@ type QCRecordedPayload struct {
 	SubjectID   string `json:"subject_id"`
 	Stage       string `json:"stage"`
 	OverallPass bool   `json:"overall_pass"`
+	Verdict     string `json:"verdict,omitempty"` // PASS | HOLD | REJECT
+}
+
+// BatchQCRecordedEvent is published on eventbus.TopicBatchQCRecorded after a
+// per-samiti batch QC verdict (F7) — platformops notifies the samiti sachiv
+// and the receiving plant's operator. IDs travel as hex strings.
+type BatchQCRecordedEvent struct {
+	ConsignmentID    string   `json:"consignment_id"`
+	BatchCode        string   `json:"batch_code"`
+	DCSID            string   `json:"dcs_id"`
+	PlantID          string   `json:"plant_id,omitempty"`
+	Verdict          string   `json:"verdict"` // PASS | HOLD | REJECT
+	FailedParameters []string `json:"failed_parameters,omitempty"`
+}
+
+// BatchQRMintedEvent is published on eventbus.TopicBatchQRMinted when a
+// passing batch auto-mints its public QR — platformops notifies the sachiv.
+type BatchQRMintedEvent struct {
+	ConsignmentID string `json:"consignment_id"`
+	BatchCode     string `json:"batch_code"`
+	DCSID         string `json:"dcs_id"`
+	Token         string `json:"token"`
 }
 
 // listMeta is the pagination metadata attached to list responses.

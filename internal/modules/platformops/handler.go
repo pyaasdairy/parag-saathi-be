@@ -218,6 +218,43 @@ func (h *handler) listNotifications(w http.ResponseWriter, r *http.Request) {
 	httpx.JSONMeta(w, http.StatusOK, notifications, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
 }
 
+// listMyNotifications handles GET /notifications/me — any authenticated
+// party's own inbox, newest first, paged.
+func (h *handler) listMyNotifications(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	page := httpx.ParsePage(r)
+	notifications, total, err := h.svc.listMyNotifications(r.Context(), actor, page)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSONMeta(w, http.StatusOK, notifications, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
+}
+
+// markNotificationRead handles POST /notifications/{id}/read.
+func (h *handler) markNotificationRead(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	notification, err := h.svc.markNotificationRead(r.Context(), actor, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, notification)
+}
+
 // runWorker handles POST /notifications/worker/run — the manual mock-SMS
 // dispatch trigger (deterministic demo; production = cron/queue consumer).
 func (h *handler) runWorker(w http.ResponseWriter, r *http.Request) {

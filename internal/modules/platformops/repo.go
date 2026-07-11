@@ -177,6 +177,52 @@ func (r *repository) listNotifications(ctx context.Context, phone, status string
 	return notifications, total, nil
 }
 
+// listNotificationsForParty returns one party's own notifications, newest
+// first, plus the total count — the GET /notifications/me inbox read.
+func (r *repository) listNotificationsForParty(ctx context.Context, partyID primitive.ObjectID, page httpx.Page) ([]StoredNotification, int64, error) {
+	filter := bson.D{{Key: "party_id", Value: partyID}}
+
+	total, err := r.notifications.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("count party notifications: %w", err))
+	}
+
+	cur, err := r.notifications.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "queued_at", Value: -1}}).
+		SetSkip(page.Offset).
+		SetLimit(page.Limit),
+	)
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("list party notifications: %w", err))
+	}
+	notifications := []StoredNotification{}
+	if err := cur.All(ctx, &notifications); err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("decode party notifications: %w", err))
+	}
+	return notifications, total, nil
+}
+
+// markNotificationRead stamps read_at on one of the party's OWN notifications
+// (the party filter makes cross-party reads impossible by construction) and
+// returns the updated document. Already-read documents are returned as-is —
+// the operation is idempotent; a foreign or unknown id is NotFound.
+func (r *repository) markNotificationRead(ctx context.Context, id, partyID primitive.ObjectID, now time.Time) (*StoredNotification, error) {
+	var n StoredNotification
+	err := r.notifications.FindOneAndUpdate(ctx,
+		bson.D{{Key: "_id", Value: id}, {Key: "party_id", Value: partyID}},
+		// $min keeps the FIRST read time on concurrent/repeated reads.
+		bson.D{{Key: "$min", Value: bson.D{{Key: "read_at", Value: now}}}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&n)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("notification")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("mark notification read: %w", err))
+	}
+	return &n, nil
+}
+
 // claimQueuedNotification atomically claims the oldest QUEUED document
 // (QUEUED→SENT, sent_at, provider_ref) and returns it, or nil when the queue
 // is drained. FindOneAndUpdate makes the claim race-safe across concurrent

@@ -3,8 +3,10 @@ package onboarding
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -26,6 +28,14 @@ func httpxNotFound(err error) bool {
 
 // defaultLanguage is the vernacular fallback when a party has no preference.
 const defaultLanguage = "hi"
+
+// Sachiv governance cap knob — the same app_settings key the identity grant
+// path enforces (identity.sachivCapSettingKey), mirrored here so the approval
+// saga cannot be used to bypass the per-DCS ceiling (§5.2).
+const (
+	sachivCapSettingKey = "sachiv_cap"
+	defaultSachivCap    = 2
+)
 
 // service holds every business rule of the onboarding module.
 type service struct {
@@ -191,15 +201,61 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 			slog.String("org_unit_id", request.OrgUnitID.Hex()))
 		return nil, err
 	}
+	// The granted role may demand a higher tier than the captured
+	// requested_tier (domain.RequiredKYCTier — e.g. PLANT_OPERATOR needs HIGH).
+	// The saga vouches the party up to that tier (Developer Note §2, mirroring
+	// identity's vouch-on-grant), so authority and the tier write below are both
+	// evaluated against the EFFECTIVE tier — otherwise approve would mint a role
+	// its holder can never select (403 KYC_TIER_INSUFFICIENT).
+	effectiveTier := request.RequestedTier
+	if reqTier := domain.RequiredKYCTier[request.RequestedRole]; reqTier != "" && !domain.KYCTierSatisfies(effectiveTier, reqTier) {
+		effectiveTier = reqTier
+	}
 	// Tier authority mirrors the KYC review console (§5.2): the reviewer's role
-	// must be permitted to clear the requested tier.
-	if !domain.CanApproveKYCTier(actor.RoleCode, request.RequestedTier) {
+	// must be permitted to clear the tier this approval will vouch.
+	if !domain.CanApproveKYCTier(actor.RoleCode, effectiveTier) {
 		s.log.WarnContext(ctx, "onboarding approve rejected: tier not approvable",
 			slog.String("request_id", id.Hex()), slog.String("reviewer_role", actor.RoleCode),
-			slog.String("requested_tier", request.RequestedTier))
-		appErr := httpx.Forbidden("your role may not approve onboarding at the " + request.RequestedTier + " tier")
+			slog.String("requested_tier", request.RequestedTier),
+			slog.String("effective_tier", effectiveTier))
+		appErr := httpx.Forbidden("your role may not approve onboarding at the " + effectiveTier + " tier")
 		appErr.Code = "KYC_TIER_NOT_APPROVABLE"
 		return nil, appErr
+	}
+	// Org-type + Sachiv-cap gates (§5): approval grants a role, so it must pass
+	// the SAME governance guards as the identity grant path — the onboarding
+	// queue can never be a side door around them. Checked before the atomic
+	// claim so a rejected saga leaves the request PENDING for correction.
+	targetOrg, err := s.deps.Orgs.Get(ctx, request.OrgUnitID)
+	if err != nil {
+		return nil, err
+	}
+	if !domain.RoleAllowedAtOrgType(request.RequestedRole, targetOrg.Type) {
+		s.log.WarnContext(ctx, "onboarding approve rejected: role not allowed at org type",
+			slog.String("request_id", id.Hex()),
+			slog.String("requested_role", request.RequestedRole),
+			slog.String("org_type", targetOrg.Type))
+		allowed := strings.Join(domain.RoleAllowedOrgTypes[request.RequestedRole], ", ")
+		return nil, httpx.BadRequest("INVALID_ORG_TYPE",
+			request.RequestedRole+" may only be assigned at org type "+allowed+", not "+targetOrg.Type)
+	}
+	if request.RequestedRole == domain.RoleSamitiSacheev {
+		capValue, err := s.repo.getIntSetting(ctx, sachivCapSettingKey, defaultSachivCap)
+		if err != nil {
+			return nil, err
+		}
+		appointed, err := s.repo.countActiveRoleHoldersInOrg(ctx, domain.RoleSamitiSacheev, request.OrgUnitID)
+		if err != nil {
+			return nil, err
+		}
+		if appointed >= capValue {
+			s.log.WarnContext(ctx, "onboarding approve rejected: sachiv cap reached",
+				slog.String("request_id", id.Hex()),
+				slog.String("org_unit_id", request.OrgUnitID.Hex()),
+				slog.Int("appointed", appointed), slog.Int("cap", capValue))
+			return nil, httpx.Conflict("SACHIV_CAP_REACHED",
+				fmt.Sprintf("this DCS already has %d of %d permitted Sachivs", appointed, capValue))
+		}
 	}
 
 	// Claim the request FIRST (atomic PENDING→APPROVED) so a concurrent approve
@@ -237,8 +293,9 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 		return nil, err
 	}
 
-	// 3. Raise the party's KYC tier upward only.
-	newTier := upgradedKYCTier(party.KYCTier, claimed.RequestedTier)
+	// 3. Raise the party's KYC tier upward only — to the effective tier, so the
+	// granted role is immediately activatable (vouch-on-grant, Developer Note §2).
+	newTier := upgradedKYCTier(party.KYCTier, effectiveTier)
 	if newTier != party.KYCTier {
 		if err := s.repo.updatePartyKYCTier(ctx, party.ID, newTier, now); err != nil {
 			return nil, err
@@ -273,21 +330,30 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 	}
 
 	// 6. Notify the new party (best-effort — a notify failure never fails the
-	// saga, which is already durably committed).
+	// saga, which is already durably committed). Params carry human-readable
+	// names (role + org name), never bare ids (onboarding.approved).
 	language := party.PreferredLanguage
 	if language == "" {
 		language = defaultLanguage
+	}
+	orgName := claimed.OrgUnitID.Hex()
+	if org, orgErr := s.deps.Orgs.Get(ctx, claimed.OrgUnitID); orgErr == nil && org != nil {
+		orgName = org.Name
 	}
 	pid := party.ID
 	if err := s.repo.insertNotification(ctx, domain.Notification{
 		PartyID:     &pid,
 		Phone:       party.Phone,
 		Channel:     domain.ChannelSMS,
-		TemplateKey: domain.TemplateKYCApproved,
+		TemplateKey: domain.TemplateOnboardingApproved,
 		Language:    language,
-		Params:      map[string]string{"tier": claimed.RequestedTier},
-		Status:      domain.NotificationQueued,
-		QueuedAt:    now,
+		Params: map[string]string{
+			"role":     claimed.RequestedRole,
+			"org_name": orgName,
+			"tier":     claimed.RequestedTier,
+		},
+		Status:   domain.NotificationQueued,
+		QueuedAt: now,
 	}); err != nil {
 		s.log.ErrorContext(ctx, "onboarding approve: party notify failed",
 			slog.String("request_id", id.Hex()), slog.String("party_id", party.ID.Hex()), slog.Any("err", err))
@@ -349,6 +415,24 @@ func (s *service) reject(ctx context.Context, actor auth.Actor, id primitive.Obj
 			return nil, httpx.Conflict("ONBOARDING_NOT_PENDING", "onboarding request is not pending review")
 		}
 		return nil, err
+	}
+
+	// Notify the applicant (onboarding.rejected): phone-addressed — no party
+	// exists yet for a rejected request. Best-effort.
+	if err := s.repo.insertNotification(ctx, domain.Notification{
+		Phone:       updated.Phone,
+		Channel:     domain.ChannelSMS,
+		TemplateKey: domain.TemplateOnboardingRejected,
+		Language:    defaultLanguage,
+		Params: map[string]string{
+			"role":   updated.RequestedRole,
+			"reason": reason,
+		},
+		Status:   domain.NotificationQueued,
+		QueuedAt: now,
+	}); err != nil {
+		s.log.ErrorContext(ctx, "onboarding reject: applicant notify failed",
+			slog.String("request_id", id.Hex()), slog.Any("err", err))
 	}
 
 	s.deps.Audit.Record(ctx, audit.Entry{

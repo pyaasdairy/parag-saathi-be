@@ -189,6 +189,25 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	// Evaluate against the FSSAI limits (domain owns the rules).
 	overallPass, failures, evaluated := domain.EvaluateQCTests(toDomainTests(req.Tests))
 
+	// Verdict machine (§13.5): tests derive PASS/REJECT; the analyst may
+	// request a HOLD (quarantine pending resolution) — but a panel with a hard
+	// FSSAI failure can never be softened to a hold: the safety gate REJECTs.
+	verdict := domain.QCVerdictPass
+	if !overallPass {
+		verdict = domain.QCVerdictReject
+	}
+	holdRequested := req.Hold || strings.EqualFold(strings.TrimSpace(req.Verdict), domain.QCVerdictHold)
+	if holdRequested && overallPass {
+		verdict = domain.QCVerdictHold
+		overallPass = false // a HOLD is not a pass: no certificate, subject cannot advance
+	}
+	if holdRequested && verdict == domain.QCVerdictReject {
+		s.log.WarnContext(ctx, "qc hold request overridden by FSSAI failure: recording REJECT",
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
+	}
+
 	// A PASS verdict requires every mandatory test of the stage to be present
 	// AND within limits — the gate cannot be satisfied by a contentless
 	// submission (blueprint §8.3). A failing partial submission still records
@@ -217,6 +236,7 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 		Stage:          req.Stage,
 		Tests:          evaluated,
 		OverallPass:    overallPass,
+		Verdict:        verdict,
 		AnalystPartyID: analystID,
 		LabRef:         req.LabRef,
 		RecordedAt:     now,
@@ -228,14 +248,17 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	defer cancel()
 
 	blockReason := ""
-	if overallPass {
+	switch verdict {
+	case domain.QCVerdictPass:
 		seq, err := s.repo.nextCertificateSeq(wctx, req.Stage)
 		if err != nil {
 			s.logInternal(ctx, "issue qc certificate seq", req, err)
 			return nil, err
 		}
 		result.CertificateNumber = certificateNumber(req.Stage, seq)
-	} else {
+	case domain.QCVerdictHold:
+		blockReason = "QC HOLD — quarantined pending analyst resolution"
+	default: // REJECT
 		result.FailureReasons = failures
 		blockReason = strings.Join(failures, "; ")
 	}
@@ -277,13 +300,20 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 		Actor:      ledgerActor,
 		OrgUnitID:  subject.orgUnitID.Hex(),
 	}
-	if overallPass {
+	switch verdict {
+	case domain.QCVerdictPass:
 		gateEvent.Type = domain.EventGatePassed
 		gateEvent.Refs = []provenance.Ref{
 			{EntityType: subject.entityType, EntityID: req.SubjectID.Hex(), Relation: "certifies"},
 		}
 		gateEvent.Payload = map[string]any{"certificate_number": result.CertificateNumber}
-	} else {
+	case domain.QCVerdictHold:
+		gateEvent.Type = domain.EventGateHold
+		gateEvent.Refs = []provenance.Ref{
+			{EntityType: subject.entityType, EntityID: req.SubjectID.Hex(), Relation: "holds"},
+		}
+		gateEvent.Payload = map[string]any{"reason": blockReason}
+	default: // REJECT
 		gateEvent.Type = domain.EventGateBlocked
 		gateEvent.Refs = []provenance.Ref{
 			{EntityType: subject.entityType, EntityID: req.SubjectID.Hex(), Relation: "blocks"},
@@ -304,7 +334,7 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 	// LAST: apply the verdict. The conditional QC_PENDING filter remains the
 	// concurrency guard — a lost race voids OUR result (dangling evidence is
 	// auditable and harmless, unlike a dangling status flip).
-	gated, err := s.applyGate(wctx, req.SubjectType, req.SubjectID, resultID, overallPass, blockReason)
+	gated, err := s.applyGate(wctx, req.SubjectType, req.SubjectID, resultID, verdict, blockReason)
 	if err != nil {
 		s.logInternal(ctx, "apply gate verdict", req, err)
 		return nil, err
@@ -331,9 +361,11 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 		SubjectID:   req.SubjectID.Hex(),
 		Stage:       req.Stage,
 		OverallPass: overallPass,
+		Verdict:     verdict,
 	})
 
-	if overallPass {
+	switch verdict {
+	case domain.QCVerdictPass:
 		s.log.InfoContext(ctx, "qc gate passed",
 			slog.String("qc_result_id", resultID.Hex()),
 			slog.String("subject_type", req.SubjectType),
@@ -341,7 +373,16 @@ func (s *service) recordQCResult(ctx context.Context, actor auth.Actor, req Reco
 			slog.String("stage", req.Stage),
 			slog.String("certificate_number", result.CertificateNumber),
 			slog.String("actor_party_id", actor.PartyID))
-	} else {
+	case domain.QCVerdictHold:
+		// HOLD is a quarantine, not a terminal block: no supervisor safety SMS
+		// storm, the subject waits for resolve/re-test (§13.5).
+		s.log.WarnContext(ctx, "qc gate hold: subject quarantined pending resolution",
+			slog.String("qc_result_id", resultID.Hex()),
+			slog.String("subject_type", req.SubjectType),
+			slog.String("subject_id", req.SubjectID.Hex()),
+			slog.String("stage", req.Stage),
+			slog.String("actor_party_id", actor.PartyID))
+	default: // REJECT
 		// Gate block is a WARN: the subject is quarantined and can never advance.
 		s.log.WarnContext(ctx, "qc gate blocked: subject quarantined",
 			slog.String("qc_result_id", resultID.Hex()),
@@ -406,24 +447,193 @@ func (s *service) loadGateSubject(ctx context.Context, subjectType string, subje
 }
 
 // applyGate routes the conditional verdict write to the subject's collection,
-// mapping the verdict onto that subject kind's status constants.
-func (s *service) applyGate(ctx context.Context, subjectType string, subjectID, resultID primitive.ObjectID, pass bool, blockReason string) (bool, error) {
+// mapping the PASS|HOLD|REJECT verdict onto that subject kind's status
+// constants (PASSED | QUARANTINED | BLOCKED).
+func (s *service) applyGate(ctx context.Context, subjectType string, subjectID, resultID primitive.ObjectID, verdict, blockReason string) (bool, error) {
 	switch subjectType {
 	case domain.QCSubjectBMCLot:
 		status := domain.BMCLotStatusBlocked
-		if pass {
+		switch verdict {
+		case domain.QCVerdictPass:
 			status = domain.BMCLotStatusPassed
+		case domain.QCVerdictHold:
+			status = domain.BMCLotStatusQuarantined
 		}
 		return s.repo.gateBMCLot(ctx, subjectID, resultID, status, blockReason)
 	case domain.QCSubjectProcessingBatch:
 		status := domain.BatchStatusBlocked
-		if pass {
+		switch verdict {
+		case domain.QCVerdictPass:
 			status = domain.BatchStatusPassed
+		case domain.QCVerdictHold:
+			status = domain.BatchStatusQuarantined
 		}
 		return s.repo.gateBatch(ctx, subjectID, resultID, status, blockReason)
 	default:
 		return false, httpx.BadRequest("INVALID_SUBJECT_TYPE", "subject_type is not gate-eligible")
 	}
+}
+
+// resolveQCResult is the HOLD→PASS/REJECT transition (§13.5): an analyst
+// resolves a quarantined subject. Only a HOLD result can be resolved; the
+// subject must still be QUARANTINED; a PASS resolution demands the stage's
+// mandatory tests on file with no failures (the gate is never satisfied by a
+// contentless resolution).
+func (s *service) resolveQCResult(ctx context.Context, actor auth.Actor, resultID primitive.ObjectID, req ResolveQCResultRequest) (*domain.QCResult, error) {
+	verdict := strings.ToUpper(strings.TrimSpace(req.Verdict))
+	if verdict != domain.QCVerdictPass && verdict != domain.QCVerdictReject {
+		return nil, httpx.BadRequest("INVALID_VERDICT", "verdict must be PASS or REJECT")
+	}
+	analystID, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.repo.findResultByID(ctx, resultID)
+	if err != nil {
+		return nil, err
+	}
+	if result.Superseded {
+		return nil, httpx.Conflict("RESULT_SUPERSEDED", "this result was superseded — resolve the live result instead")
+	}
+	if domain.EffectiveQCVerdict(result.Verdict, result.OverallPass) != domain.QCVerdictHold {
+		return nil, httpx.Conflict("RESULT_NOT_HOLD", "only a HOLD result can be resolved")
+	}
+	// Same stage×role pairing as recording: the stage's analyst owns the resolve.
+	requiredRole, ok := requiredRoleForStage(result.Stage)
+	if !ok {
+		return nil, httpx.Conflict("INVALID_STAGE", "result carries an unknown stage "+result.Stage)
+	}
+	if actor.RoleCode != requiredRole && actor.RoleCode != domain.RoleSuperAdmin {
+		return nil, httpx.Forbidden("STAGE_ROLE_MISMATCH: stage " + result.Stage + " holds may only be resolved by " + requiredRole)
+	}
+	// Subject must still be QUARANTINED, and inside the actor's org scope.
+	subjectOrg, err := s.subjectOrgUnit(ctx, result.SubjectType, result.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	if subjectOrg.IsZero() {
+		return nil, httpx.Conflict("SUBJECT_MISSING", "the held subject no longer resolves")
+	}
+	if err := s.deps.Orgs.RequireInScope(ctx, actor, subjectOrg); err != nil {
+		s.log.WarnContext(ctx, "qc resolve scope denied",
+			slog.String("qc_result_id", resultID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	certificate := ""
+	blockReason := ""
+	if verdict == domain.QCVerdictPass {
+		// A PASS resolution must satisfy the same evidence bar as a recorded
+		// PASS: every mandatory test present, none failing.
+		present := make([]QCTestInput, 0, len(result.Tests))
+		for _, t := range result.Tests {
+			if !t.Pass {
+				return nil, httpx.Unprocessable("TESTS_FAILING",
+					"the held result carries a failing test — it cannot be resolved as PASS")
+			}
+			present = append(present, QCTestInput{Name: t.Name})
+		}
+		if missing := missingMandatoryTests(result.Stage, present); len(missing) > 0 {
+			return nil, httpx.Unprocessable("MISSING_MANDATORY_TESTS",
+				"stage "+result.Stage+" cannot PASS without its mandatory tests").
+				WithDetails(map[string]any{"missing_tests": missing})
+		}
+		seq, err := s.repo.nextCertificateSeq(ctx, result.Stage)
+		if err != nil {
+			return nil, err
+		}
+		certificate = certificateNumber(result.Stage, seq)
+	} else {
+		blockReason = strings.TrimSpace(req.Notes)
+		if blockReason == "" {
+			blockReason = "HOLD resolved as REJECT"
+		}
+	}
+
+	// Detach: resolution write sequence must complete once started.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+
+	// Flip the subject QUARANTINED → PASSED/BLOCKED first (the conditional
+	// filter is the concurrency guard: only one resolution can win).
+	resolved, err := s.repo.resolveSubjectGate(wctx, result.SubjectType, result.SubjectID, verdict, blockReason)
+	if err != nil {
+		return nil, err
+	}
+	if !resolved {
+		return nil, httpx.Conflict("SUBJECT_NOT_QUARANTINED", "subject is no longer QUARANTINED — it was resolved concurrently")
+	}
+
+	updated, err := s.repo.resolveResult(wctx, resultID, verdict, certificate, blockReason, req.Notes, analystID, now)
+	if err != nil {
+		return nil, err
+	}
+
+	ledgerActor := provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode}
+	entityType := domain.EntityBMCLot
+	if result.SubjectType == domain.QCSubjectProcessingBatch {
+		entityType = domain.EntityBatch
+	}
+	gateType := domain.EventGatePassed
+	relation := "certifies"
+	payload := map[string]any{"certificate_number": certificate, "resolved_from": "HOLD", "notes": req.Notes}
+	if verdict == domain.QCVerdictReject {
+		gateType, relation = domain.EventGateBlocked, "blocks"
+		payload = map[string]any{"failure_reasons": []string{blockReason}, "resolved_from": "HOLD"}
+	}
+	if _, err := s.deps.Ledger.Append(wctx, provenance.AppendInput{
+		Type:       domain.EventGateResolved,
+		EntityType: domain.EntityQCResult,
+		EntityID:   resultID.Hex(),
+		Refs: []provenance.Ref{
+			{EntityType: entityType, EntityID: result.SubjectID.Hex(), Relation: "resolves"},
+		},
+		Actor:     ledgerActor,
+		OrgUnitID: subjectOrg.Hex(),
+		Payload:   map[string]any{"verdict": verdict, "notes": req.Notes},
+	}); err != nil {
+		return nil, httpx.Internal(err)
+	}
+	if _, err := s.deps.Ledger.Append(wctx, provenance.AppendInput{
+		Type:       gateType,
+		EntityType: domain.EntityQCResult,
+		EntityID:   resultID.Hex(),
+		Refs: []provenance.Ref{
+			{EntityType: entityType, EntityID: result.SubjectID.Hex(), Relation: relation},
+		},
+		Actor:     ledgerActor,
+		OrgUnitID: subjectOrg.Hex(),
+		Payload:   payload,
+	}); err != nil {
+		return nil, httpx.Internal(err)
+	}
+
+	s.deps.Bus.Publish(eventbus.TopicQCRecorded, QCRecordedPayload{
+		SubjectType: result.SubjectType,
+		SubjectID:   result.SubjectID.Hex(),
+		Stage:       result.Stage,
+		OverallPass: verdict == domain.QCVerdictPass,
+		Verdict:     verdict,
+	})
+	if verdict == domain.QCVerdictReject {
+		s.deps.Bus.Publish(eventbus.TopicGateBlocked, GateBlockedPayload{
+			SubjectType:    result.SubjectType,
+			SubjectID:      result.SubjectID,
+			QCResultID:     resultID,
+			Stage:          result.Stage,
+			FailureReasons: []string{blockReason},
+		})
+	}
+
+	s.log.InfoContext(ctx, "qc hold resolved",
+		slog.String("qc_result_id", resultID.Hex()),
+		slog.String("subject_type", result.SubjectType),
+		slog.String("subject_id", result.SubjectID.Hex()),
+		slog.String("verdict", verdict),
+		slog.String("actor_party_id", actor.PartyID))
+	return updated, nil
 }
 
 // listQCResults returns a page of results, newest first. When the filter
@@ -441,7 +651,20 @@ func (s *service) listQCResults(ctx context.Context, actor auth.Actor, subjectTy
 			return nil, 0, err
 		}
 	}
-	return s.repo.listResults(ctx, subjectType, subjectID, page)
+	results, total, err := s.repo.listResults(ctx, subjectType, subjectID, page)
+	if err != nil {
+		return nil, 0, err
+	}
+	fillVerdicts(results)
+	return results, total, nil
+}
+
+// fillVerdicts back-fills the PASS|HOLD|REJECT verdict on legacy results that
+// pre-date the field, so every read exposes the three-state machine (§13.5).
+func fillVerdicts(results []domain.QCResult) {
+	for i := range results {
+		results[i].Verdict = domain.EffectiveQCVerdict(results[i].Verdict, results[i].OverallPass)
+	}
 }
 
 // getQCResult returns one result (its tests carry the stored pass verdicts),
@@ -454,6 +677,7 @@ func (s *service) getQCResult(ctx context.Context, actor auth.Actor, resultID pr
 	if err := s.requireSubjectScope(ctx, actor, result.SubjectType, result.SubjectID); err != nil {
 		return nil, err
 	}
+	result.Verdict = domain.EffectiveQCVerdict(result.Verdict, result.OverallPass)
 	return result, nil
 }
 
@@ -835,6 +1059,7 @@ func (s *service) traceBack(ctx context.Context, actor auth.Actor, batchID primi
 			slog.String("batch_id", batchID.Hex()), slog.Any("err", err))
 		return nil, err
 	}
+	fillVerdicts(results)
 
 	return &TraceBackResponse{
 		BatchID:               batchID,

@@ -44,6 +44,10 @@ type SamitiInfo struct {
 	Litres float64 `json:"volume_litres"`
 	// Share is Litres / (sum of all contributing DCS litres), in [0,1].
 	Share float64 `json:"volume_share"`
+	// Society coordinates (when registered on the org) so the public trace can
+	// map the contributing samitis — society granularity only, never a farm.
+	GeoLat *float64 `json:"geo_lat,omitempty"`
+	GeoLng *float64 `json:"geo_lng,omitempty"`
 }
 
 // FarmerPublicInfo is one CONSENTED farmer on the public roster (§6.7): named

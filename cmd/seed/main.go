@@ -106,7 +106,40 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2}
+	// A SECOND samiti in the SAME village as DCS-01842 (per-samiti batch flow
+	// worst case: one village, two societies, each with its own batch code).
+	dcs3, err := upsertOrg(ctx, db, domain.OrgUnit{
+		Type: domain.OrgTypeDCS, Name: "DCS Kasmandi Kalan II", NameHi: "डीसीएस कसमंडी कलां II", Code: "DCS-01843",
+		ParentID: &bmc.ID, Path: []primitive.ObjectID{federation.ID, union.ID, bmc.ID},
+		Village: "Kasmandi Kalan", District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		return err
+	}
+	// Backfill centre coordinates on existing orgs too (upsertOrg only
+	// $setOnInsert-s), so a reseed gives the public trace map + the on-device
+	// nearby-centre ranking their org geo. Society granularity, never a farm.
+	for _, g := range []struct {
+		org      *domain.OrgUnit
+		lat, lng float64
+	}{
+		{plant, 26.8560, 80.9490},
+		{bmc, 26.9220, 80.7100},
+		{dcs1, 26.9330, 80.7126},
+		{dcs2, 26.9927, 80.7509},
+		{dcs3, 26.9341, 80.7150},
+	} {
+		if _, err := db.Collection(mongodb.CollOrgUnits).UpdateByID(ctx, g.org.ID,
+			bson.D{{Key: "$set", Value: bson.D{
+				{Key: "geo_lat", Value: g.lat},
+				{Key: "geo_lng", Value: g.lng},
+				{Key: "updated_at", Value: now},
+			}}}); err != nil {
+			return fmt.Errorf("org geo refresh %s: %w", g.org.Code, err)
+		}
+	}
+
+	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2, dcs3}
 
 	// ── Parties (find-or-insert by unique `phone`) + role assignments ───────
 	type seedParty struct {
@@ -120,6 +153,10 @@ func run() error {
 		{"9000000003", "Anil Verma", "अनिल वर्मा", "Kasmandi Kalan", "hi", domain.KYCTierStandard, domain.RoleMilkTester, dcs1.ID},
 		{"9000000011", "Mahesh Yadav", "महेश यादव", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs1.ID},
 		{"9000000012", "Geeta Devi", "गीता देवी", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs1.ID},
+		// DCS-01843 (same village, second samiti): its own Sachiv + two farmers.
+		{"9000000004", "Shyam Lal", "श्याम लाल", "Kasmandi Kalan", "hi", domain.KYCTierHigh, domain.RoleSamitiSacheev, dcs3.ID},
+		{"9000000013", "Dinesh Kumar", "दिनेश कुमार", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs3.ID},
+		{"9000000014", "Kamla Devi", "कमला देवी", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs3.ID},
 		{"9000000021", "Salim Khan", "सलीम खान", "Malihabad", "hi", domain.KYCTierRider, domain.RoleVanRider, union.ID},
 		{"9000000031", "Vikas Singh", "विकास सिंह", "Malihabad", "hi", domain.KYCTierStandard, domain.RoleBMCOperator, bmc.ID},
 		{"9000000041", "Rajeev Ranjan", "राजीव रंजन", "", "hi", domain.KYCTierHigh, domain.RolePlantOperator, plant.ID},
@@ -131,7 +168,7 @@ func run() error {
 		{"9000000051", "Arjun Mehta", "अर्जुन मेहता", "", "en", domain.KYCTierMinimal, domain.RoleConsumer, federation.ID},
 	}
 
-	var mahesh, geeta, sacheev primitive.ObjectID
+	var mahesh, geeta, sacheev, dinesh, kamla primitive.ObjectID
 	for _, sp := range seeds {
 		party, err := upsertParty(ctx, db, domain.Party{
 			Phone: sp.phone, FullName: sp.name, FullNameHi: sp.nameHi, Village: sp.village,
@@ -165,6 +202,10 @@ func run() error {
 			mahesh = party.ID
 		case "9000000012":
 			geeta = party.ID
+		case "9000000013":
+			dinesh = party.ID
+		case "9000000014":
+			kamla = party.ID
 		}
 		fmt.Printf("  party %-16s %-22s %s\n", sp.phone, sp.role, party.ID.Hex())
 	}
@@ -184,7 +225,7 @@ func run() error {
 
 	// Verified bank accounts for the producing farmers so settlement can
 	// actually pay them (payouts require a reviewer-VERIFIED bank; §18-B).
-	for _, farmer := range []primitive.ObjectID{mahesh, geeta} {
+	for _, farmer := range []primitive.ObjectID{mahesh, geeta, dinesh, kamla} {
 		if farmer.IsZero() {
 			continue
 		}
@@ -240,6 +281,13 @@ func run() error {
 		{PashuAadhaar: "356729481034", OwnerPartyID: geeta, DCSID: dcs1.ID, Species: "BUFFALO", Breed: "Murrah", Sex: "F",
 			BirthDate: &murrahBirth, LactationStatus: "LACTATING", LactationNo: 4, AvgDailyYieldLitres: 6.2,
 			Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},
+		// DCS-01843 farmers' animals.
+		{PashuAadhaar: "356729481041", OwnerPartyID: dinesh, DCSID: dcs3.ID, Species: "COW", Breed: "Gir", Sex: "F",
+			BirthDate: &sahiwalBirth, LactationStatus: "LACTATING", LactationNo: 2, AvgDailyYieldLitres: 7.8,
+			Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},
+		{PashuAadhaar: "356729481058", OwnerPartyID: kamla, DCSID: dcs3.ID, Species: "BUFFALO", Breed: "Murrah", Sex: "F",
+			BirthDate: &murrahBirth, LactationStatus: "LACTATING", LactationNo: 3, AvgDailyYieldLitres: 6.9,
+			Status: domain.AnimalStatusActive, CreatedAt: now, UpdatedAt: now},
 	}
 	for _, a := range animals {
 		if err := upsertByFilter(ctx, db.Collection(mongodb.CollAnimals),
@@ -293,6 +341,7 @@ func run() error {
 	fmt.Printf("  super admin phone: %s (OTP_DEV_MODE returns the OTP in the login response)\n", cfg.SeedAdminPhone)
 	fmt.Println("  demo phones: sacheev 9000000001 · adhyaksh 9000000002 · farmer 9000000011 · rider 9000000021")
 	fmt.Println("               bmc-op 9000000031 · plant-op 9000000041 · lab 9000000042 · org-manager 9000000071")
+	fmt.Println("               DCS-01843 (same village): sacheev 9000000004 · farmers 9000000013 / 9000000014")
 	return nil
 }
 

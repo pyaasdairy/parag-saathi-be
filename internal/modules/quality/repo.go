@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -25,18 +26,24 @@ type repository struct {
 	batches      *mongo.Collection
 	counters     *mongo.Collection
 	certificates *mongo.Collection
-	consignments *mongo.Collection // read-only: per-society trace-back attribution
+	consignments *mongo.Collection // per-samiti batches: F7 QC queue reads + the sanctioned QC verdict write
+	// Per-samiti batch QC (F7): this module owns the consignment_qc results and
+	// the auto-minted consignment batch QRs.
+	consignmentQC *mongo.Collection
+	batchQRs      *mongo.Collection
 }
 
 // newRepository binds the repository to its collections.
 func newRepository(db *mongo.Database) *repository {
 	return &repository{
-		results:      db.Collection(mongodb.CollQCResults),
-		bmcLots:      db.Collection(mongodb.CollBMCLots),
-		batches:      db.Collection(mongodb.CollBatches),
-		counters:     db.Collection(mongodb.CollCounters),
-		certificates: db.Collection(mongodb.CollQCCertificates),
-		consignments: db.Collection(mongodb.CollConsignments),
+		results:       db.Collection(mongodb.CollQCResults),
+		bmcLots:       db.Collection(mongodb.CollBMCLots),
+		batches:       db.Collection(mongodb.CollBatches),
+		counters:      db.Collection(mongodb.CollCounters),
+		certificates:  db.Collection(mongodb.CollQCCertificates),
+		consignments:  db.Collection(mongodb.CollConsignments),
+		consignmentQC: db.Collection(mongodb.CollConsignmentQC),
+		batchQRs:      db.Collection(mongodb.CollConsignmentBatchQRs),
 	}
 }
 
@@ -253,6 +260,73 @@ func gateSubjectDoc(ctx context.Context, coll *mongo.Collection, subjectID primi
 		return false, httpx.Internal(fmt.Errorf("gate %s subject %s: %w", coll.Name(), subjectID.Hex(), err))
 	}
 	return res.MatchedCount == 1, nil
+}
+
+// resolveSubjectGate flips a QUARANTINED subject to PASSED (verdict PASS) or
+// BLOCKED (verdict REJECT) — the HOLD-resolution counterpart of gateSubjectDoc.
+// The QUARANTINED filter is the concurrency guard; the qc_result_ids roster is
+// NOT re-pushed (the hold gate already listed the result). Returns false when
+// the subject was resolved concurrently.
+func (r *repository) resolveSubjectGate(ctx context.Context, subjectType string, subjectID primitive.ObjectID, verdict, blockReason string) (bool, error) {
+	var coll *mongo.Collection
+	var quarantined, passed, blocked string
+	switch subjectType {
+	case domain.QCSubjectBMCLot:
+		coll = r.bmcLots
+		quarantined, passed, blocked = domain.BMCLotStatusQuarantined, domain.BMCLotStatusPassed, domain.BMCLotStatusBlocked
+	case domain.QCSubjectProcessingBatch:
+		coll = r.batches
+		quarantined, passed, blocked = domain.BatchStatusQuarantined, domain.BatchStatusPassed, domain.BatchStatusBlocked
+	default:
+		return false, httpx.BadRequest("INVALID_SUBJECT_TYPE", "subject_type is not gate-eligible")
+	}
+	newStatus := blocked
+	set := bson.D{{Key: "status", Value: newStatus}}
+	if verdict == domain.QCVerdictPass {
+		newStatus = passed
+		set = bson.D{{Key: "status", Value: newStatus}, {Key: "block_reason", Value: ""}}
+	} else if blockReason != "" {
+		set = append(set, bson.E{Key: "block_reason", Value: blockReason})
+	}
+	res, err := coll.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: subjectID}, {Key: "status", Value: quarantined}},
+		bson.D{{Key: "$set", Value: set}},
+	)
+	if err != nil {
+		return false, httpx.Internal(fmt.Errorf("resolve %s gate %s: %w", coll.Name(), subjectID.Hex(), err))
+	}
+	return res.MatchedCount == 1, nil
+}
+
+// resolveResult stamps the HOLD resolution onto the QC result document and
+// returns the updated document.
+func (r *repository) resolveResult(ctx context.Context, resultID primitive.ObjectID, verdict, certificate, blockReason, notes string, resolvedBy primitive.ObjectID, at time.Time) (*domain.QCResult, error) {
+	set := bson.D{
+		{Key: "verdict", Value: verdict},
+		{Key: "overall_pass", Value: verdict == domain.QCVerdictPass},
+		{Key: "resolved_by", Value: resolvedBy},
+		{Key: "resolved_at", Value: at},
+		{Key: "resolution_notes", Value: notes},
+	}
+	if certificate != "" {
+		set = append(set, bson.E{Key: "certificate_number", Value: certificate})
+	}
+	if verdict == domain.QCVerdictReject && blockReason != "" {
+		set = append(set, bson.E{Key: "failure_reasons", Value: []string{blockReason}})
+	}
+	var updated domain.QCResult
+	err := r.results.FindOneAndUpdate(ctx,
+		bson.D{{Key: "_id", Value: resultID}},
+		bson.D{{Key: "$set", Value: set}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&updated)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, httpx.NotFound("qc result")
+	}
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("resolve qc result %s: %w", resultID.Hex(), err))
+	}
+	return &updated, nil
 }
 
 // listBMCLotsByStatus returns every BMC lot in the given status, newest first.

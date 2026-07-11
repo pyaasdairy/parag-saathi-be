@@ -43,19 +43,21 @@ const (
 
 // validEntityTypes is the closed set of traceable entity types (domain.Entity*).
 var validEntityTypes = map[string]struct{}{
-	domain.EntityMilkPour:        {},
-	domain.EntityAnalyzerReading: {},
-	domain.EntityInvoice:         {},
-	domain.EntityConsignment:     {},
-	domain.EntityRouteTrip:       {},
-	domain.EntityBMCLot:          {},
-	domain.EntityBatch:           {},
-	domain.EntityProductLot:      {},
-	domain.EntityBatchQR:         {},
-	domain.EntityQCResult:        {},
-	domain.EntitySettlement:      {},
-	domain.EntityAnimal:          {},
-	domain.EntityParty:           {},
+	domain.EntityMilkPour:           {},
+	domain.EntityAnalyzerReading:    {},
+	domain.EntityInvoice:            {},
+	domain.EntityConsignment:        {},
+	domain.EntityRouteTrip:          {},
+	domain.EntityBMCLot:             {},
+	domain.EntityBatch:              {},
+	domain.EntityProductLot:         {},
+	domain.EntityBatchQR:            {},
+	domain.EntityConsignmentQC:      {},
+	domain.EntityConsignmentBatchQR: {},
+	domain.EntityQCResult:           {},
+	domain.EntitySettlement:         {},
+	domain.EntityAnimal:             {},
+	domain.EntityParty:              {},
 }
 
 // Service resolves consumer QR scans and official trace queries. All reads,
@@ -342,13 +344,19 @@ func (s *Service) buildSourcing(ctx context.Context, events []provenance.Event) 
 		if totalLitres > 0 {
 			share = litres / totalLitres
 		}
-		samitis = append(samitis, SamitiInfo{
+		info := SamitiInfo{
 			Name:     org.Name,
 			Code:     org.Code,
 			District: org.District,
 			Litres:   round2(litres),
 			Share:    round4(share),
-		})
+		}
+		// Only emit coordinates the org actually carries — never fabricate.
+		if org.GeoLat != 0 || org.GeoLng != 0 {
+			lat, lng := org.GeoLat, org.GeoLng
+			info.GeoLat, info.GeoLng = &lat, &lng
+		}
+		samitis = append(samitis, info)
 		if org.District != "" {
 			districts[org.District] = struct{}{}
 		}

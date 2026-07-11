@@ -12,6 +12,7 @@ const (
 	ChannelSMS  = "SMS"
 	ChannelIVR  = "IVR"
 	ChannelPush = "PUSH"
+	ChannelApp  = "APP" // in-app inbox only (served on GET /notifications/me)
 )
 
 // Notification statuses (outbox pattern: write locally, provider worker sends).
@@ -29,9 +30,21 @@ const (
 	TemplateSafetyBlock    = "SAFETY_BLOCK"    // supervisor alert on gate failure
 	TemplateOTP            = "OTP"
 	TemplateMVUDispatched  = "MVU_DISPATCHED"
+	TemplateMVUClosed      = "MVU_CLOSED" // "the MVU visit for your animal is complete"
 	TemplateKYCApproved    = "KYC_APPROVED" // "your KYC was approved — you can now use your role"
 	TemplateKYCRejected    = "KYC_REJECTED"
 	TemplateKYCPending     = "KYC_PENDING" // reviewer alert: "a KYC verification is pending your review"
+
+	// Role/onboarding lifecycle (params carry human-readable names, not ids).
+	TemplateRoleGranted         = "ROLE_GRANTED"         // to the grantee: role + org name
+	TemplateOnboardingApproved  = "ONBOARDING_APPROVED"  // to the onboarded party: role + org name
+	TemplateOnboardingRejected  = "ONBOARDING_REJECTED"  // to the applicant phone: role + reason
+
+	// Per-samiti batch lifecycle (params: batch_code, samiti/plant names).
+	TemplateConsignmentAccepted = "CONSIGNMENT_PLANT_ACCEPTED" // to the samiti sachiv
+	TemplateConsignmentRejected = "CONSIGNMENT_PLANT_REJECTED" // to the samiti sachiv
+	TemplateQCResult            = "QC_RESULT"                  // to sachiv + plant operator: PASS|HOLD|FAIL
+	TemplateBatchQRMinted       = "BATCH_QR_MINTED"            // to the samiti sachiv: public QR live
 )
 
 // Notification is one queued vernacular message to a party.
@@ -48,4 +61,7 @@ type Notification struct {
 	Error       string              `bson:"error,omitempty"        json:"error,omitempty"`
 	QueuedAt    time.Time           `bson:"queued_at" json:"queued_at"`
 	SentAt      *time.Time          `bson:"sent_at,omitempty" json:"sent_at,omitempty"`
+	// ReadAt is stamped when the addressed party marks the notification read
+	// in-app (POST /notifications/{id}/read); nil = unread.
+	ReadAt *time.Time `bson:"read_at,omitempty" json:"read_at,omitempty"`
 }

@@ -26,6 +26,7 @@ type repository struct {
 	kycRecords    *mongo.Collection
 	assignments   *mongo.Collection
 	notifications *mongo.Collection
+	settings      *mongo.Collection
 }
 
 // newRepository binds the repository to the module's collections.
@@ -36,6 +37,7 @@ func newRepository(db *mongo.Database) *repository {
 		kycRecords:    db.Collection(mongodb.CollKYCRecords),
 		assignments:   db.Collection(mongodb.CollRoleAssignments),
 		notifications: db.Collection(mongodb.CollNotifications),
+		settings:      db.Collection(mongodb.CollSettings),
 	}
 }
 
@@ -252,6 +254,38 @@ func (r *repository) activeAssignmentExists(ctx context.Context, partyID primiti
 		return false, httpx.Internal(fmt.Errorf("count active assignments: %w", err))
 	}
 	return n > 0, nil
+}
+
+// countActiveRoleHoldersInOrg counts ACTIVE assignments of one role at a single
+// org unit — the per-DCS denominator the Sachiv governance cap is enforced
+// against (mirrors the identity grant path so approval is never a side door).
+func (r *repository) countActiveRoleHoldersInOrg(ctx context.Context, roleCode string, orgUnitID primitive.ObjectID) (int, error) {
+	n, err := r.assignments.CountDocuments(ctx, bson.D{
+		{Key: "role_code", Value: roleCode},
+		{Key: "org_unit_id", Value: orgUnitID},
+		{Key: "status", Value: domain.RoleAssignmentActive},
+	})
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("count active %s at org: %w", roleCode, err))
+	}
+	return int(n), nil
+}
+
+// getIntSetting reads a keyed int setting from app_settings, returning
+// (fallback, nil) when the key is unset — same reader as identity's, so the
+// approval saga honours the same governance knob.
+func (r *repository) getIntSetting(ctx context.Context, key string, fallback int) (int, error) {
+	var doc struct {
+		IntValue int `bson:"int_value"`
+	}
+	err := r.settings.FindOne(ctx, bson.D{{Key: "key", Value: key}}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return fallback, nil
+	}
+	if err != nil {
+		return 0, httpx.Internal(fmt.Errorf("get setting %s: %w", key, err))
+	}
+	return doc.IntValue, nil
 }
 
 // insertAssignment stores a new role assignment.

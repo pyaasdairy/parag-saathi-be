@@ -142,6 +142,30 @@ func (r *Resolver) SubtreeIDs(ctx context.Context, rootID primitive.ObjectID) ([
 	return out, nil
 }
 
+// UnionAncestor resolves the MILK_UNION at-or-above orgID in the hierarchy:
+// the org itself when it is a union, else the union ancestor in its Path.
+// Returns the zero ObjectID (no error) when the hierarchy carries no union —
+// callers decide whether that is a 400 or a fail-closed 403.
+func (r *Resolver) UnionAncestor(ctx context.Context, orgID primitive.ObjectID) (primitive.ObjectID, error) {
+	org, err := r.Get(ctx, orgID)
+	if err != nil {
+		return primitive.NilObjectID, err
+	}
+	if org.Type == domain.OrgTypeMilkUnion {
+		return org.ID, nil
+	}
+	for _, anc := range org.Path {
+		a, err := r.Get(ctx, anc)
+		if err != nil {
+			continue
+		}
+		if a.Type == domain.OrgTypeMilkUnion {
+			return a.ID, nil
+		}
+	}
+	return primitive.NilObjectID, nil
+}
+
 // Invalidate drops a cached entry (call after updates).
 func (r *Resolver) Invalidate(id primitive.ObjectID) {
 	r.mu.Lock()

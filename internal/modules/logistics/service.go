@@ -16,6 +16,7 @@ import (
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
+	"github.com/pyaas/saathi-backend/internal/platform/eventbus"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 	"github.com/pyaas/saathi-backend/internal/platform/orgscope"
 	"github.com/pyaas/saathi-backend/internal/platform/provenance"
@@ -37,6 +38,10 @@ const (
 	// Physical sanity bounds for a hand-held transit thermometer reading.
 	minPlausibleTempC = -30.0
 	maxPlausibleTempC = 70.0
+
+	// maxPlausibleVolumeLitres bounds the rider-measured pickup volume (F4) —
+	// far above any real van load, it only rejects fat-finger entries.
+	maxPlausibleVolumeLitres = 100000.0
 )
 
 // service holds all logistics business logic: consignment aggregation,
@@ -45,12 +50,13 @@ type service struct {
 	repo   *repo
 	orgs   *orgscope.Resolver
 	ledger *provenance.Ledger
+	bus    *eventbus.Bus
 	log    *slog.Logger
 }
 
 // newService wires the service to its collaborators.
-func newService(repo *repo, orgs *orgscope.Resolver, ledger *provenance.Ledger, log *slog.Logger) *service {
-	return &service{repo: repo, orgs: orgs, ledger: ledger, log: log}
+func newService(repo *repo, orgs *orgscope.Resolver, ledger *provenance.Ledger, bus *eventbus.Bus, log *slog.Logger) *service {
+	return &service{repo: repo, orgs: orgs, ledger: ledger, bus: bus, log: log}
 }
 
 // actorID parses the actor's party ObjectID out of its JWT hex string.
@@ -308,11 +314,13 @@ func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q cons
 		}
 		dcsIDs = []primitive.ObjectID{id}
 	case actor.RoleCode == domain.RoleVanRider || actor.RoleCode == domain.RoleBMCOperator ||
-		actor.RoleCode == domain.RoleUnionFieldSupervisor || actor.RoleCode == domain.RoleUnionPresident:
+		actor.RoleCode == domain.RoleUnionFieldSupervisor || actor.RoleCode == domain.RoleUnionPresident ||
+		actor.RoleCode == domain.RolePlantOperator || actor.RoleCode == domain.RolePlantLabAnalyst:
 		// Union scope: resolve the actor's MILK_UNION, then every DCS beneath it.
 		// Riders/BMC operators plan routes and open silo lots; union oversight
 		// roles (field supervisor, president) list every society's consignments
-		// without enumerating dcs_ids.
+		// without enumerating dcs_ids; plant operators/lab analysts work the F6
+		// intake queue and the F7 batch-QC queue of delivered per-samiti batches.
 		unionID, err := s.actorUnion(ctx, actor)
 		if err != nil {
 			return nil, 0, err
@@ -346,11 +354,26 @@ func (s *service) listConsignments(ctx context.Context, actor auth.Actor, q cons
 }
 
 // getConsignment returns one consignment, enforcing the caller's org scope over
-// its DCS — the single-item read backing the FE getLot call.
+// its DCS — the single-item read backing the FE getLot call. Plant-tier roles
+// (operator/lab analyst) sit in a SIBLING branch of the DCS, so their scope is
+// the same-union rule rather than ancestor containment.
 func (s *service) getConsignment(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*domain.DCSConsignment, error) {
 	consignment, err := s.loadConsignment(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if actor.RoleCode == domain.RolePlantOperator || actor.RoleCode == domain.RolePlantLabAnalyst {
+		orgID, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+		if err != nil {
+			return nil, err
+		}
+		if err := s.requireSameUnion(ctx, orgID, consignment.DCSID); err != nil {
+			s.log.WarnContext(ctx, "consignment read denied: outside plant union",
+				slog.String("consignment_id", id.Hex()), slog.String("dcs_id", consignment.DCSID.Hex()),
+				slog.String("actor_party_id", actor.PartyID))
+			return nil, err
+		}
+		return consignment, nil
 	}
 	if err := s.orgs.RequireInScope(ctx, actor, consignment.DCSID); err != nil {
 		s.log.WarnContext(ctx, "consignment read denied: DCS out of scope",
@@ -622,8 +645,10 @@ func (s *service) createTrip(ctx context.Context, actor auth.Actor, req createTr
 }
 
 // pickupStop records the trip's rider collecting one consignment: the stop is
-// stamped with time+temperature, the consignment moves DISPATCHED→PICKED_UP,
-// and the trip moves to IN_PROGRESS on its first pickup.
+// stamped with time+temperature (plus the F4 evidence — milk-collection photo,
+// analyser photo, measured volume), the consignment moves DISPATCHED→PICKED_UP,
+// the backend MINTS the per-samiti batch code, and the trip moves to
+// IN_PROGRESS on its first pickup.
 func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, consignmentID primitive.ObjectID, req pickupRequest) (*domain.RouteTrip, error) {
 	// §6.4: at pickup the van records qty/geo/time and verifies the seal;
 	// TEMPERATURE is logged by the chilling branch (BMC), NOT the van — so temp_c
@@ -632,6 +657,11 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 		if err := validateTemp(req.TempC); err != nil {
 			return nil, err
 		}
+	}
+	if req.MeasuredVolumeLitres != nil &&
+		(*req.MeasuredVolumeLitres <= 0 || *req.MeasuredVolumeLitres > maxPlausibleVolumeLitres) {
+		return nil, httpx.BadRequest("INVALID_MEASURED_VOLUME",
+			fmt.Sprintf("measured_volume_litres must be between 0 and %.0f", maxPlausibleVolumeLitres))
 	}
 	temp := 0.0
 	if req.TempC != nil {
@@ -652,13 +682,14 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 		return nil, aerr
 	}
 
+	consignment, err := s.loadConsignment(ctx, consignmentID)
+	if err != nil {
+		return nil, err
+	}
+
 	// §6.4 seal verification (anti-swap): if the consignment was sealed at dispatch
 	// and the rider supplies a seal, a MISMATCH blocks a clean pickup.
 	if req.SealCode != "" {
-		consignment, err := s.loadConsignment(ctx, consignmentID)
-		if err != nil {
-			return nil, err
-		}
 		// Case-insensitive: the minted seal mixes cases (lowercase ObjectID hex +
 		// uppercase CRC) and the rider types it by hand, so compare with EqualFold.
 		if consignment.SealCode != "" && !strings.EqualFold(req.SealCode, consignment.SealCode) {
@@ -669,30 +700,76 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 		}
 	}
 
-	// Guard the consignment transition atomically; only a DISPATCHED
-	// consignment can board the van.
-	matched, err := s.repo.markConsignmentPickedUp(ctx, consignmentID, trip.ID)
+	// Mint the per-samiti batch code (F4) BEFORE the transition so the mint and
+	// the status flip land in one atomic write:
+	// PARAG-<DDMMYYYY>-<HHMM>-<distinct farmer count>-<samiti ref>, IST.
+	now := time.Now().UTC()
+	farmerCount, err := s.repo.distinctFarmerCount(ctx, consignment.PourIDs)
 	if err != nil {
-		return nil, s.internal(ctx, "pickup stop: mark consignment picked up", err)
+		return nil, s.internal(ctx, "pickup stop: distinct farmer count", err)
 	}
-	if !matched {
-		consignment, err := s.loadConsignment(ctx, consignmentID)
-		if err != nil {
-			return nil, err
+	ref := samitiRefFallback(consignment.DCSID)
+	if org, oerr := s.orgs.Get(ctx, consignment.DCSID); oerr == nil && org != nil {
+		if d := digitsOf(org.Code); d != "" {
+			ref = d
 		}
-		s.log.WarnContext(ctx, "stop pickup rejected: consignment not DISPATCHED",
-			slog.String("trip_id", tripID.Hex()), slog.String("consignment_id", consignmentID.Hex()),
-			slog.String("consignment_status", consignment.Status),
-			slog.String("actor_party_id", actor.PartyID))
-		return nil, httpx.Conflict("CONSIGNMENT_NOT_DISPATCHED",
-			"consignment is "+consignment.Status+"; only DISPATCHED consignments can be picked up")
 	}
 
-	now := time.Now().UTC()
-	if err := s.repo.markStopPickedUp(ctx, trip.ID, consignmentID, now, temp, req.Notes, req.Lat, req.Lng, req.PhotoURI); err != nil {
+	// Guard the consignment transition atomically; only a DISPATCHED
+	// consignment can board the van. The unique batch_code index protects
+	// "unique per samiti per pickup" — the rare same-samiti-same-minute-same-
+	// farmer-count collision (e.g. two shift consignments collected back to
+	// back) is disambiguated by advancing the minted minute and retrying.
+	var batchCode string
+	for attempt := 0; ; attempt++ {
+		batchCode = mintBatchCode(now.Add(time.Duration(attempt)*time.Minute), farmerCount, ref)
+		pickupSet := bson.D{
+			{Key: "batch_code", Value: batchCode},
+			{Key: "batch_minted_at", Value: now},
+			{Key: "picked_up_at", Value: now},
+		}
+		if req.MeasuredVolumeLitres != nil {
+			pickupSet = append(pickupSet, bson.E{Key: "measured_volume_litres", Value: round2(*req.MeasuredVolumeLitres)})
+		}
+		if req.AnalyzerPhotoURI != "" {
+			pickupSet = append(pickupSet, bson.E{Key: "analyzer_photo_uri", Value: req.AnalyzerPhotoURI})
+		}
+		if req.PhotoURI != "" {
+			pickupSet = append(pickupSet, bson.E{Key: "pickup_photo_uri", Value: req.PhotoURI})
+		}
+		matched, err := s.repo.markConsignmentPickedUp(ctx, consignmentID, trip.ID, pickupSet)
+		if err != nil {
+			if mongo.IsDuplicateKeyError(err) && attempt < 4 {
+				s.log.WarnContext(ctx, "pickup stop: batch code collision, advancing mint minute",
+					slog.String("batch_code", batchCode), slog.Int("attempt", attempt))
+				continue
+			}
+			return nil, s.internal(ctx, "pickup stop: mark consignment picked up", err)
+		}
+		if !matched {
+			consignment, err := s.loadConsignment(ctx, consignmentID)
+			if err != nil {
+				return nil, err
+			}
+			s.log.WarnContext(ctx, "stop pickup rejected: consignment not DISPATCHED",
+				slog.String("trip_id", tripID.Hex()), slog.String("consignment_id", consignmentID.Hex()),
+				slog.String("consignment_status", consignment.Status),
+				slog.String("actor_party_id", actor.PartyID))
+			return nil, httpx.Conflict("CONSIGNMENT_NOT_DISPATCHED",
+				"consignment is "+consignment.Status+"; only DISPATCHED consignments can be picked up")
+		}
+		break
+	}
+
+	if err := s.repo.markStopPickedUp(ctx, trip.ID, consignmentID, now, temp, req.Notes,
+		req.Lat, req.Lng, req.PhotoURI, req.AnalyzerPhotoURI, req.MeasuredVolumeLitres, batchCode); err != nil {
 		return nil, s.internal(ctx, "pickup stop: mark stop picked up", err)
 	}
 
+	payload := map[string]any{"temp_c": temp, "batch_code": batchCode, "farmer_count": farmerCount}
+	if req.MeasuredVolumeLitres != nil {
+		payload["measured_volume_litres"] = round2(*req.MeasuredVolumeLitres)
+	}
 	event, err := s.ledger.Append(ctx, provenance.AppendInput{
 		Type:       domain.EventConsignmentPickedUp,
 		EntityType: domain.EntityConsignment,
@@ -702,7 +779,7 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 		},
 		Actor:     provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
 		OrgUnitID: trip.UnionID.Hex(),
-		Payload:   map[string]any{"temp_c": temp},
+		Payload:   payload,
 	})
 	if err != nil {
 		return nil, s.internal(ctx, "pickup stop: append provenance", err)
@@ -720,10 +797,15 @@ func (s *service) pickupStop(ctx context.Context, actor auth.Actor, tripID, cons
 			trip.Stops[i].Lat, trip.Stops[i].Lng = *req.Lat, *req.Lng
 		}
 		trip.Stops[i].PhotoURI = req.PhotoURI
+		trip.Stops[i].AnalyzerPhotoURI = req.AnalyzerPhotoURI
+		trip.Stops[i].MeasuredVolumeLitres = req.MeasuredVolumeLitres
+		trip.Stops[i].BatchCode = batchCode
 	}
 	s.log.InfoContext(ctx, "stop picked up",
 		slog.String("trip_id", trip.ID.Hex()),
 		slog.String("consignment_id", consignmentID.Hex()),
+		slog.String("batch_code", batchCode),
+		slog.Int("farmer_count", farmerCount),
 		slog.Float64("temp_c", temp),
 		slog.String("actor_party_id", actor.PartyID))
 	return trip, nil
@@ -781,11 +863,17 @@ func (s *service) logColdChain(ctx context.Context, actor auth.Actor, tripID pri
 	return trip, nil
 }
 
-// deliverTrip hands the whole load to a BMC: every stop must be picked up,
-// the trip moves IN_PROGRESS→DELIVERED and its consignments PICKED_UP→DELIVERED.
+// deliverTrip hands the whole load to a receiving facility — a BMC (chilling
+// branch) OR a PROCESSING_PLANT (direct-to-plant branch, F5): every stop must
+// be picked up, the trip moves IN_PROGRESS→DELIVERED and its consignments
+// PICKED_UP→DELIVERED. facility_id is canonical; bmc_id stays as an alias.
 func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID primitive.ObjectID, req deliverRequest) (*domain.RouteTrip, error) {
-	if req.BMCID.IsZero() {
-		return nil, httpx.BadRequest("MISSING_BMC_ID", "bmc_id is required")
+	facilityID := req.FacilityID
+	if facilityID.IsZero() {
+		facilityID = req.BMCID
+	}
+	if facilityID.IsZero() {
+		return nil, httpx.BadRequest("MISSING_BMC_ID", "facility_id (or its alias bmc_id) is required — the receiving facility")
 	}
 	actorID, err := s.actorID(actor)
 	if err != nil {
@@ -801,23 +889,24 @@ func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID prim
 			slog.String("actor_party_id", actor.PartyID))
 		return nil, aerr
 	}
-	bmc, err := s.orgs.Get(ctx, req.BMCID)
+	facility, err := s.orgs.Get(ctx, facilityID)
 	if err != nil {
 		return nil, err
 	}
-	if bmc.Type != domain.OrgTypeBMC {
-		return nil, httpx.BadRequest("NOT_A_BMC", "org unit "+req.BMCID.Hex()+" is not a BMC")
+	if facility.Type != domain.OrgTypeBMC && facility.Type != domain.OrgTypeProcessingPlant {
+		return nil, httpx.BadRequest("NOT_A_FACILITY",
+			"org unit "+facilityID.Hex()+" is a "+facility.Type+" — the receiving facility must be a BMC or a PROCESSING_PLANT")
 	}
-	// Scope guard: the destination BMC must be within the actor's org scope so
-	// a trip cannot be delivered into an unrelated union's chilling centre.
-	if err := s.orgs.RequireInScope(ctx, actor, req.BMCID); err != nil {
-		s.log.WarnContext(ctx, "trip delivery rejected: BMC out of scope",
-			slog.String("bmc_id", req.BMCID.Hex()), slog.String("actor_party_id", actor.PartyID))
+	// Scope guard: the destination facility must be within the actor's org scope
+	// so a trip cannot be delivered into an unrelated union's facility.
+	if err := s.orgs.RequireInScope(ctx, actor, facilityID); err != nil {
+		s.log.WarnContext(ctx, "trip delivery rejected: facility out of scope",
+			slog.String("facility_id", facilityID.Hex()), slog.String("actor_party_id", actor.PartyID))
 		return nil, err
 	}
 
 	now := time.Now().UTC()
-	matched, err := s.repo.markTripDelivered(ctx, trip.ID, req.BMCID, now)
+	matched, err := s.repo.markTripDelivered(ctx, trip.ID, facilityID, facility.Type, now)
 	if err != nil {
 		return nil, s.internal(ctx, "deliver trip: mark delivered", err)
 	}
@@ -835,7 +924,7 @@ func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID prim
 			EntityType: domain.EntityConsignment, EntityID: stop.ConsignmentID.Hex(), Relation: "delivered",
 		})
 	}
-	if err := s.repo.markConsignmentsDelivered(ctx, consignmentIDs); err != nil {
+	if err := s.repo.markConsignmentsDelivered(ctx, consignmentIDs, now); err != nil {
 		return nil, s.internal(ctx, "deliver trip: mark consignments delivered", err)
 	}
 
@@ -846,7 +935,11 @@ func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID prim
 		Refs:       refs,
 		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
 		OrgUnitID:  trip.UnionID.Hex(),
-		Payload:    map[string]any{"bmc_id": req.BMCID.Hex()},
+		Payload: map[string]any{
+			"bmc_id":        facilityID.Hex(), // legacy key kept for existing consumers
+			"facility_id":   facilityID.Hex(),
+			"facility_type": facility.Type,
+		},
 	})
 	if err != nil {
 		return nil, s.internal(ctx, "deliver trip: append provenance", err)
@@ -856,15 +949,211 @@ func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID prim
 	}
 
 	trip.Status = domain.TripStatusDelivered
-	trip.DeliveredToBMCID = &req.BMCID
+	trip.DeliveredToBMCID = &facilityID
+	trip.DeliveredToFacilityID = &facilityID
+	trip.DeliveredFacilityType = facility.Type
 	trip.DeliveredAt = &now
 	trip.ProvenanceSeq = event.Seq
 	s.log.InfoContext(ctx, "trip delivered",
 		slog.String("trip_id", trip.ID.Hex()),
-		slog.String("bmc_id", req.BMCID.Hex()),
+		slog.String("facility_id", facilityID.Hex()),
+		slog.String("facility_type", facility.Type),
 		slog.Int("consignment_count", len(consignmentIDs)),
 		slog.String("actor_party_id", actor.PartyID))
 	return trip, nil
+}
+
+// ---------------------------------------------------------------------------
+// Plant intake (F6): the PLANT_OPERATOR approves/rejects each delivered
+// per-samiti batch, with photo evidence on approval.
+// ---------------------------------------------------------------------------
+
+// plantAccept moves a DELIVERED consignment to ACCEPTED, stamping the intake
+// photo, notes, actor and receiving plant. The operator's plant must sit in
+// the same union subtree as the consignment's DCS.
+func (s *service) plantAccept(ctx context.Context, actor auth.Actor, id primitive.ObjectID, req plantAcceptRequest) (*domain.DCSConsignment, error) {
+	consignment, plantID, actorID, err := s.loadForPlantIntake(ctx, actor, id)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	set := bson.D{
+		{Key: "accepted_at", Value: now},
+		{Key: "accepted_by", Value: actorID},
+		{Key: "accepted_plant_id", Value: plantID},
+	}
+	if req.PhotoURI != "" {
+		set = append(set, bson.E{Key: "intake_photo_uri", Value: req.PhotoURI})
+	}
+	if req.Notes != "" {
+		set = append(set, bson.E{Key: "intake_notes", Value: req.Notes})
+	}
+	matched, err := s.repo.gateConsignmentIntake(ctx, id, domain.ConsignmentStatusAccepted, set)
+	if err != nil {
+		return nil, s.internal(ctx, "plant accept: gate intake", err)
+	}
+	if !matched {
+		return nil, httpx.Conflict("CONSIGNMENT_NOT_DELIVERED",
+			"consignment was gated concurrently; only DELIVERED batches can be accepted")
+	}
+	event, err := s.ledger.Append(ctx, provenance.AppendInput{
+		Type:       domain.EventConsignmentPlantAccepted,
+		EntityType: domain.EntityConsignment,
+		EntityID:   id.Hex(),
+		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
+		OrgUnitID:  plantID.Hex(),
+		Payload: map[string]any{
+			"batch_code":       consignment.BatchCode,
+			"intake_photo_uri": req.PhotoURI,
+		},
+	})
+	if err != nil {
+		return nil, s.internal(ctx, "plant accept: append provenance", err)
+	}
+	if err := s.repo.setConsignmentProvenanceSeq(ctx, id, event.Seq); err != nil {
+		return nil, s.internal(ctx, "plant accept: set provenance seq", err)
+	}
+	consignment.Status = domain.ConsignmentStatusAccepted
+	consignment.AcceptedAt = &now
+	consignment.AcceptedBy = &actorID
+	consignment.AcceptedPlantID = &plantID
+	consignment.IntakePhotoURI = req.PhotoURI
+	consignment.IntakeNotes = req.Notes
+	consignment.ProvenanceSeq = event.Seq
+	// Notify the samiti sachiv (consignment.plant_accepted) via platformops.
+	s.bus.Publish(eventbus.TopicConsignmentPlantAccepted, ConsignmentPlantDecidedEvent{
+		ConsignmentID: id.Hex(),
+		BatchCode:     consignment.BatchCode,
+		DCSID:         consignment.DCSID.Hex(),
+		PlantID:       plantID.Hex(),
+		Litres:        consignment.TotalQuantityLitres,
+	})
+	s.log.InfoContext(ctx, "consignment accepted at plant",
+		slog.String("consignment_id", id.Hex()),
+		slog.String("batch_code", consignment.BatchCode),
+		slog.String("plant_id", plantID.Hex()),
+		slog.String("actor_party_id", actor.PartyID))
+	return consignment, nil
+}
+
+// plantReject moves a DELIVERED consignment to REJECTED with a required reason.
+func (s *service) plantReject(ctx context.Context, actor auth.Actor, id primitive.ObjectID, req plantRejectRequest) (*domain.DCSConsignment, error) {
+	if strings.TrimSpace(req.Reason) == "" {
+		return nil, httpx.BadRequest("MISSING_REASON", "reason is required to reject a delivered batch")
+	}
+	consignment, plantID, actorID, err := s.loadForPlantIntake(ctx, actor, id)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	set := bson.D{
+		{Key: "rejected_at", Value: now},
+		{Key: "rejected_by", Value: actorID},
+		{Key: "reject_reason", Value: req.Reason},
+	}
+	matched, err := s.repo.gateConsignmentIntake(ctx, id, domain.ConsignmentStatusRejected, set)
+	if err != nil {
+		return nil, s.internal(ctx, "plant reject: gate intake", err)
+	}
+	if !matched {
+		return nil, httpx.Conflict("CONSIGNMENT_NOT_DELIVERED",
+			"consignment was gated concurrently; only DELIVERED batches can be rejected")
+	}
+	event, err := s.ledger.Append(ctx, provenance.AppendInput{
+		Type:       domain.EventConsignmentPlantRejected,
+		EntityType: domain.EntityConsignment,
+		EntityID:   id.Hex(),
+		Actor:      provenance.ActorRef{PartyID: actor.PartyID, RoleCode: actor.RoleCode},
+		OrgUnitID:  plantID.Hex(),
+		Payload: map[string]any{
+			"batch_code": consignment.BatchCode,
+			"reason":     req.Reason,
+		},
+	})
+	if err != nil {
+		return nil, s.internal(ctx, "plant reject: append provenance", err)
+	}
+	if err := s.repo.setConsignmentProvenanceSeq(ctx, id, event.Seq); err != nil {
+		return nil, s.internal(ctx, "plant reject: set provenance seq", err)
+	}
+	consignment.Status = domain.ConsignmentStatusRejected
+	consignment.RejectedAt = &now
+	consignment.RejectedBy = &actorID
+	consignment.RejectReason = req.Reason
+	consignment.ProvenanceSeq = event.Seq
+	// Notify the samiti sachiv (consignment.plant_rejected) via platformops.
+	s.bus.Publish(eventbus.TopicConsignmentPlantRejected, ConsignmentPlantDecidedEvent{
+		ConsignmentID: id.Hex(),
+		BatchCode:     consignment.BatchCode,
+		DCSID:         consignment.DCSID.Hex(),
+		PlantID:       plantID.Hex(),
+		Litres:        consignment.TotalQuantityLitres,
+		Reason:        req.Reason,
+	})
+	s.log.WarnContext(ctx, "consignment rejected at plant",
+		slog.String("consignment_id", id.Hex()),
+		slog.String("batch_code", consignment.BatchCode),
+		slog.String("reason", req.Reason),
+		slog.String("actor_party_id", actor.PartyID))
+	return consignment, nil
+}
+
+// loadForPlantIntake loads the consignment and enforces the F6 intake
+// preconditions: the actor's org is a PROCESSING_PLANT sitting in the same
+// union subtree as the consignment's DCS, and the consignment is DELIVERED.
+func (s *service) loadForPlantIntake(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*domain.DCSConsignment, primitive.ObjectID, primitive.ObjectID, error) {
+	actorID, err := s.actorID(actor)
+	if err != nil {
+		return nil, primitive.NilObjectID, primitive.NilObjectID, err
+	}
+	consignment, err := s.loadConsignment(ctx, id)
+	if err != nil {
+		return nil, primitive.NilObjectID, primitive.NilObjectID, err
+	}
+	plantID, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+	if err != nil {
+		return nil, primitive.NilObjectID, primitive.NilObjectID, err
+	}
+	plantOrg, err := s.orgs.Get(ctx, plantID)
+	if err != nil {
+		return nil, primitive.NilObjectID, primitive.NilObjectID, err
+	}
+	if plantOrg.Type != domain.OrgTypeProcessingPlant {
+		return nil, primitive.NilObjectID, primitive.NilObjectID,
+			httpx.Forbidden("plant intake requires a PROCESSING_PLANT role scope")
+	}
+	if err := s.requireSameUnion(ctx, plantID, consignment.DCSID); err != nil {
+		s.log.WarnContext(ctx, "plant intake denied: consignment outside plant union",
+			slog.String("consignment_id", id.Hex()),
+			slog.String("plant_id", plantID.Hex()),
+			slog.String("actor_party_id", actor.PartyID))
+		return nil, primitive.NilObjectID, primitive.NilObjectID, err
+	}
+	if consignment.Status != domain.ConsignmentStatusDelivered {
+		return nil, primitive.NilObjectID, primitive.NilObjectID,
+			httpx.Conflict("CONSIGNMENT_NOT_DELIVERED",
+				"consignment is "+consignment.Status+"; only DELIVERED batches can be gated at the plant")
+	}
+	return consignment, plantID, actorID, nil
+}
+
+// requireSameUnion enforces that two org units resolve to the SAME milk union
+// — the scope rule for plant-tier actors over DCS-owned resources (a plant is
+// a sibling of the BMC branch, so ancestor scope checks cannot apply).
+// Fails closed (403) when either side resolves to no union.
+func (s *service) requireSameUnion(ctx context.Context, orgA, orgB primitive.ObjectID) error {
+	ua, err := s.orgs.UnionAncestor(ctx, orgA)
+	if err != nil {
+		return err
+	}
+	ub, err := s.orgs.UnionAncestor(ctx, orgB)
+	if err != nil {
+		return err
+	}
+	if ua.IsZero() || ub.IsZero() || ua != ub {
+		return httpx.Forbidden("resource is outside your organisational scope")
+	}
+	return nil
 }
 
 // listTrips returns a scoped page of trips: riders are forced onto their own
@@ -1050,10 +1339,14 @@ func (s *service) authorizeTrack(ctx context.Context, actor auth.Actor, trip *do
 				}
 			}
 		}
-	case domain.RoleBMCOperator:
-		// The BMC either received this load or sits under the trip's union.
+	case domain.RoleBMCOperator, domain.RolePlantOperator:
+		// The facility (BMC or plant, F6a) either received this load or sits
+		// under the trip's union — a plant operator watches inbound vans live.
 		if orgID, err := primitive.ObjectIDFromHex(actor.OrgUnitID); err == nil {
 			if trip.DeliveredToBMCID != nil && *trip.DeliveredToBMCID == orgID {
+				return nil
+			}
+			if trip.DeliveredToFacilityID != nil && *trip.DeliveredToFacilityID == orgID {
 				return nil
 			}
 			if org, err := s.orgs.Get(ctx, orgID); err == nil {
@@ -1154,6 +1447,35 @@ func mintConsignmentCode(dcsCode, date, shift string) string {
 		shiftMark = "E"
 	}
 	return fmt.Sprintf("CON-%s-%s-%s", last4, yymmdd, shiftMark)
+}
+
+// mintBatchCode builds the per-samiti batch code minted at van pickup (F4):
+// "PARAG-" + DDMMYYYY (pickup date IST) + "-" + HHMM (pickup time IST) + "-" +
+// <distinct farmer count in the consignment pours> + "-" + <samiti ref>.
+// Unique per samiti per pickup: one consignment per DCS+date+shift and one
+// pickup per consignment, and the samiti ref disambiguates same-minute stops.
+func mintBatchCode(pickupAt time.Time, farmerCount int, samitiRef string) string {
+	ist := time.FixedZone("IST", 5*3600+1800)
+	t := pickupAt.In(ist)
+	return fmt.Sprintf("PARAG-%s-%s-%d-%s", t.Format("02012006"), t.Format("1504"), farmerCount, samitiRef)
+}
+
+// digitsOf extracts the digits of an org code — the <samiti ref> segment of
+// the batch code (e.g. "DCS-01842" → "01842"). Empty when the code has none.
+func digitsOf(code string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, code)
+}
+
+// samitiRefFallback is the batch-code samiti ref when the DCS code carries no
+// digits (or the org lookup fails): the last 5 hex chars of the DCS id.
+func samitiRefFallback(dcsID primitive.ObjectID) string {
+	hex := dcsID.Hex()
+	return hex[len(hex)-5:]
 }
 
 // mintSealCode builds the §6.4 / Appendix-A seal code SEAL-<consignment>-<checksum>,

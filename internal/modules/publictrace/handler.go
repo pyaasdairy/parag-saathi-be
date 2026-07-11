@@ -13,14 +13,16 @@ type Handler struct {
 	service *Service
 }
 
-// ScanQR handles GET /public/qr/{qr_code} — the consumer scan.
+// ScanQR handles GET /public/qr/{qr_code} — the consumer scan. The code is
+// dispatched on lookup order: a per-samiti batch QR (batch_code or token,
+// F8 quality report) first, else the existing product-lot resolution.
 func (h *Handler) ScanQR(w http.ResponseWriter, r *http.Request) {
 	qrCode := chi.URLParam(r, "qr_code")
 	if qrCode == "" {
 		httpx.Error(w, r, httpx.BadRequest("MISSING_QR_CODE", "qr_code path parameter is required"))
 		return
 	}
-	resp, err := h.service.ScanQR(r.Context(), qrCode)
+	resp, err := h.service.ResolvePublicQR(r.Context(), qrCode)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

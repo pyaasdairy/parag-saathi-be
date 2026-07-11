@@ -9,12 +9,13 @@ import (
 // BMC lot statuses. A lot cannot advance past QC_PENDING without a passing
 // QC result — the safety gate is enforced in software (blueprint §8.3).
 const (
-	BMCLotStatusOpen       = "OPEN"       // accepting deliveries
-	BMCLotStatusQCPending  = "QC_PENDING" // closed, awaiting rapid tests
-	BMCLotStatusPassed     = "PASSED"     // rapid tests within limits
-	BMCLotStatusBlocked    = "BLOCKED"    // failed — quarantined, cannot advance
-	BMCLotStatusDispatched = "DISPATCHED" // tankered to plant
-	BMCLotStatusPooled     = "POOLED"     // terminal: consumed by a processing batch
+	BMCLotStatusOpen        = "OPEN"        // accepting deliveries
+	BMCLotStatusQCPending   = "QC_PENDING"  // closed, awaiting rapid tests
+	BMCLotStatusPassed      = "PASSED"      // rapid tests within limits
+	BMCLotStatusBlocked     = "BLOCKED"     // failed — quarantined, cannot advance
+	BMCLotStatusQuarantined = "QUARANTINED" // QC HOLD — held pending analyst resolution (§13.5)
+	BMCLotStatusDispatched  = "DISPATCHED"  // tankered to plant
+	BMCLotStatusPooled      = "POOLED"      // terminal: consumed by a processing batch
 )
 
 // BMCLot pools consignments delivered to one bulk-milk-cooler for a date+shift.
@@ -49,11 +50,12 @@ type BMCLot struct {
 
 // Processing batch statuses — same gate discipline as BMC lots.
 const (
-	BatchStatusCreated   = "CREATED"
-	BatchStatusQCPending = "QC_PENDING"
-	BatchStatusPassed    = "PASSED"
-	BatchStatusBlocked   = "BLOCKED"
-	BatchStatusCompleted = "COMPLETED" // product lots issued
+	BatchStatusCreated     = "CREATED"
+	BatchStatusQCPending   = "QC_PENDING"
+	BatchStatusPassed      = "PASSED"
+	BatchStatusBlocked     = "BLOCKED"
+	BatchStatusQuarantined = "QUARANTINED" // QC HOLD — held pending analyst resolution (§13.5)
+	BatchStatusCompleted   = "COMPLETED"   // product lots issued
 )
 
 // ProcessingBatch pools BMC lots at a plant into one production run.

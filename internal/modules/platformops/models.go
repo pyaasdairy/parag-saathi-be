@@ -101,6 +101,23 @@ type StoredNotification struct {
 	Meta map[string]any `bson:"meta,omitempty" json:"meta,omitempty"`
 }
 
+// InboxNotification is one row of the party-scoped GET /notifications/me
+// inbox: the outbox document projected onto the in-app read surface, plus the
+// derived Read flag (read_at != nil). OTP params are redacted before this view
+// is built.
+type InboxNotification struct {
+	ID          string            `json:"id"`
+	TemplateKey string            `json:"template_key"`
+	Params      map[string]string `json:"params,omitempty"`
+	Channel     string            `json:"channel"`
+	Language    string            `json:"language"`
+	Status      string            `json:"status"`
+	QueuedAt    time.Time         `json:"queued_at"`
+	SentAt      *time.Time        `json:"sent_at,omitempty"`
+	ReadAt      *time.Time        `json:"read_at,omitempty"`
+	Read        bool              `json:"read"`
+}
+
 // WorkerRunResponse reports how many queued notifications the mock SMS
 // worker dispatched in this run.
 type WorkerRunResponse struct {
@@ -158,6 +175,49 @@ type gateBlockedEvent struct {
 	QCResultID     string   `json:"qc_result_id"`
 	Stage          string   `json:"stage"`
 	FailureReasons []string `json:"failure_reasons"`
+}
+
+// mvuClosedEvent mirrors the cattle module's payload on eventbus.TopicMVUClosed
+// (visit complete → notify the requesting farmer).
+type mvuClosedEvent struct {
+	CaseID        string `json:"case_id"`
+	FarmerPartyID string `json:"farmer_party_id"`
+	Phone         string `json:"phone"`
+	AnimalID      string `json:"animal_id"`
+	DCSID         string `json:"dcs_id"`
+}
+
+// consignmentPlantDecidedEvent mirrors the logistics module's payload on
+// eventbus.TopicConsignmentPlantAccepted / ...PlantRejected (F6 plant intake
+// decision → notify the samiti sachiv). IDs travel as hex strings.
+type consignmentPlantDecidedEvent struct {
+	ConsignmentID string  `json:"consignment_id"`
+	BatchCode     string  `json:"batch_code"`
+	DCSID         string  `json:"dcs_id"`
+	PlantID       string  `json:"plant_id"`
+	Litres        float64 `json:"litres"`
+	Reason        string  `json:"reason,omitempty"`
+}
+
+// batchQCRecordedEvent mirrors the quality module's payload on
+// eventbus.TopicBatchQCRecorded (per-samiti batch QC verdict → notify the
+// samiti sachiv + the receiving plant's operator).
+type batchQCRecordedEvent struct {
+	ConsignmentID    string   `json:"consignment_id"`
+	BatchCode        string   `json:"batch_code"`
+	DCSID            string   `json:"dcs_id"`
+	PlantID          string   `json:"plant_id"`
+	Verdict          string   `json:"verdict"`
+	FailedParameters []string `json:"failed_parameters"`
+}
+
+// batchQRMintedEvent mirrors the quality module's payload on
+// eventbus.TopicBatchQRMinted (public batch QR live → notify the sachiv).
+type batchQRMintedEvent struct {
+	ConsignmentID string `json:"consignment_id"`
+	BatchCode     string `json:"batch_code"`
+	DCSID         string `json:"dcs_id"`
+	Token         string `json:"token"`
 }
 
 // mvuDispatchedEvent mirrors the cattle module's payload on

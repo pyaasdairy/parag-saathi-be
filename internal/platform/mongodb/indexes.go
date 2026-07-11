@@ -46,6 +46,10 @@ const (
 	CollCMSContent       = "cms_content"
 	CollQCCertificates   = "qc_certificates"
 	CollSettings         = "app_settings"
+	// Per-samiti batch flow (F7/F8): the batch QC results and the auto-minted
+	// public batch QRs (distinct from product-lot batch_qrs).
+	CollConsignmentQC       = "consignment_qc"
+	CollConsignmentBatchQRs = "consignment_batch_qrs"
 )
 
 // EnsureIndexes creates every index the query paths rely on. Idempotent —
@@ -138,6 +142,12 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			idx(bson.D{{Key: "status", Value: asc}, {Key: "created_at", Value: desc}}, nil),
 			idx(bson.D{{Key: "created_at", Value: desc}}, nil),
 			idx(bson.D{{Key: "dcs_id", Value: asc}, {Key: "created_at", Value: desc}}, nil),
+			// The per-samiti batch code minted at pickup — unique where present
+			// (partial: pre-pickup consignments carry no batch_code).
+			idx(bson.D{{Key: "batch_code", Value: asc}},
+				options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{
+					{Key: "batch_code", Value: bson.D{{Key: "$exists", Value: true}}},
+				})),
 		},
 		CollRouteTrips: {
 			idx(bson.D{{Key: "van_rider_party_id", Value: asc}, {Key: "date", Value: desc}}, nil),
@@ -186,6 +196,8 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		CollNotifications: {
 			idx(bson.D{{Key: "status", Value: asc}, {Key: "queued_at", Value: asc}}, nil),
 			idx(bson.D{{Key: "phone", Value: asc}, {Key: "queued_at", Value: desc}}, nil),
+			// The party-scoped inbox read (GET /notifications/me), newest first.
+			idx(bson.D{{Key: "party_id", Value: asc}, {Key: "queued_at", Value: desc}}, nil),
 		},
 		CollProvenance: {
 			// The hash chain: strictly monotonic sequence.
@@ -232,6 +244,17 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			// `_id` is the setting key (e.g. "sachiv_cap") — a small keyed store
 			// for governance knobs that are neither boolean flags nor counters.
 			idx(bson.D{{Key: "key", Value: asc}}, options.Index().SetUnique(true)),
+		},
+		CollConsignmentQC: {
+			// One QC record per per-samiti batch (consignment).
+			idx(bson.D{{Key: "consignment_id", Value: asc}}, options.Index().SetUnique(true)),
+			idx(bson.D{{Key: "batch_code", Value: asc}}, nil),
+		},
+		CollConsignmentBatchQRs: {
+			// The public scan resolves by batch_code OR token.
+			idx(bson.D{{Key: "batch_code", Value: asc}}, options.Index().SetUnique(true)),
+			idx(bson.D{{Key: "consignment_id", Value: asc}}, options.Index().SetUnique(true)),
+			idx(bson.D{{Key: "token", Value: asc}}, nil),
 		},
 	}
 

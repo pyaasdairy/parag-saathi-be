@@ -10,6 +10,20 @@ type FarmerSummary struct {
 	PendingInvoices int          `json:"pending_invoices"` // count of unpaid invoices
 	AnimalCount     int          `json:"animal_count"`     // registered animals owned by this farmer
 	Trend           []DayTotals  `json:"trend"`            // most-recent days first
+	// Sachiv is the farmer's assigned society secretary (F2): the newest ACTIVE
+	// SAMITI_SACHEEV at the farmer's own DCS. Omitted when none resolves —
+	// never fabricated.
+	Sachiv *SachivInfo `json:"sachiv,omitempty"`
+}
+
+// SachivInfo names the farmer's assigned Sachiv with contact + society info.
+type SachivInfo struct {
+	PartyID string `json:"party_id"`
+	Name    string `json:"name"`
+	NameHi  string `json:"name_hi,omitempty"`
+	Phone   string `json:"phone"`
+	Village string `json:"village,omitempty"`
+	DCSName string `json:"dcs_name,omitempty"`
 }
 
 // SocietyStats is the DCS console aggregate for the sachiv/adhyaksh.

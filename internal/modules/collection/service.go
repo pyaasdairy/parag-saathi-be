@@ -393,6 +393,9 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 	if req.QuantityLitres <= 0 {
 		return nil, false, httpx.BadRequest("VALIDATION", "quantity_litres must be positive")
 	}
+	// Canonicalise loose spellings ("analyzer"/"ocr"/"manual") before the
+	// closed-vocabulary check so device clients cannot fail on a case alias.
+	req.Source = domain.NormalizeReadingMode(req.Source)
 	switch req.Source {
 	case domain.ReadingModeDirect, domain.ReadingModePhotoOCR, domain.ReadingModeManual:
 	default:
@@ -495,13 +498,17 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 		RateChartID:       chart.ID,
 		RateChartVersion:  chart.Version, // §6.3 pin the pricing version on the pour
 		AnalyzerReadingID: req.AnalyzerReadingID,
-		Source:            req.Source,
-		Assurance:         domain.AssuranceForSource(req.Source), // §6.2 capture assurance
-		Status:            domain.PourStatusRecorded,
-		PouredAt:          pouredAt,
-		RecordedBy:        recordedBy,
-		DeviceID:          req.DeviceID,
-		CreatedAt:         now,
+		Source: req.Source,
+		// §6.2 capture assurance, derived from EVIDENCE: analyzer+device_id → A,
+		// photo evidence retained → B, everything else (incl. OCR with no photo)
+		// → C. A claim is never stronger than what backs it.
+		Assurance:      domain.AssuranceForCapture(req.Source, req.DeviceID, req.PhotoObjectKey),
+		PhotoObjectKey: req.PhotoObjectKey,
+		Status:         domain.PourStatusRecorded,
+		PouredAt:       pouredAt,
+		RecordedBy:     recordedBy,
+		DeviceID:       req.DeviceID,
+		CreatedAt:      now,
 	}
 	if req.GeoLat != nil && req.GeoLng != nil {
 		p.GeoLat, p.GeoLng = *req.GeoLat, *req.GeoLng
@@ -808,7 +815,8 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID pr
 		RateChartVersion:  chart.Version,
 		AnalyzerReadingID: old.AnalyzerReadingID,
 		Source:            old.Source,
-		Assurance:         old.Assurance, // a correction keeps the original capture assurance
+		Assurance:         old.Assurance,      // a correction keeps the original capture assurance
+		PhotoObjectKey:    old.PhotoObjectKey, // and its original photo evidence
 		Status:            domain.PourStatusRecorded,
 		SupersedesPourID:  &old.ID,
 		PouredAt:          old.PouredAt,

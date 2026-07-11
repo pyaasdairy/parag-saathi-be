@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/mongodb"
@@ -21,6 +22,7 @@ type repo struct {
 	assignments  *mongo.Collection
 	animals      *mongo.Collection
 	consignments *mongo.Collection
+	parties      *mongo.Collection // read-only: the F2 assigned-Sachiv display block
 }
 
 func newRepo(db *mongo.Database) *repo {
@@ -30,6 +32,7 @@ func newRepo(db *mongo.Database) *repo {
 		assignments:  db.Collection(mongodb.CollRoleAssignments),
 		animals:      db.Collection(mongodb.CollAnimals),
 		consignments: db.Collection(mongodb.CollConsignments),
+		parties:      db.Collection(mongodb.CollParties),
 	}
 }
 
@@ -210,6 +213,54 @@ func (r *repo) dcsHasOpenConsignment(ctx context.Context, dcsID primitive.Object
 		return false, fmt.Errorf("dcs open consignment: %w", err)
 	}
 	return n > 0, nil
+}
+
+// newestActiveAssignment returns the party of the newest ACTIVE roleCode
+// assignment matching the filter fields, or mongo.ErrNoDocuments.
+func (r *repo) newestActiveAssignment(ctx context.Context, filter bson.D) (*domain.RoleAssignment, error) {
+	filter = append(filter, bson.E{Key: "status", Value: domain.RoleAssignmentActive})
+	var ra domain.RoleAssignment
+	err := r.assignments.FindOne(ctx, filter,
+		options.FindOne().SetSort(bson.D{{Key: "valid_from", Value: -1}, {Key: "created_at", Value: -1}}),
+	).Decode(&ra)
+	if err != nil {
+		return nil, err
+	}
+	return &ra, nil
+}
+
+// farmerDCS resolves the farmer's own society: the org of their newest ACTIVE
+// FARMER assignment.
+func (r *repo) farmerDCS(ctx context.Context, farmerID primitive.ObjectID) (primitive.ObjectID, error) {
+	ra, err := r.newestActiveAssignment(ctx, bson.D{
+		{Key: "party_id", Value: farmerID},
+		{Key: "role_code", Value: domain.RoleFarmer},
+	})
+	if err != nil {
+		return primitive.NilObjectID, err
+	}
+	return ra.OrgUnitID, nil
+}
+
+// sachivPartyAtDCS resolves the newest ACTIVE SAMITI_SACHEEV at a DCS.
+func (r *repo) sachivPartyAtDCS(ctx context.Context, dcsID primitive.ObjectID) (primitive.ObjectID, error) {
+	ra, err := r.newestActiveAssignment(ctx, bson.D{
+		{Key: "org_unit_id", Value: dcsID},
+		{Key: "role_code", Value: domain.RoleSamitiSacheev},
+	})
+	if err != nil {
+		return primitive.NilObjectID, err
+	}
+	return ra.PartyID, nil
+}
+
+// partyByID loads one party's display fields.
+func (r *repo) partyByID(ctx context.Context, id primitive.ObjectID) (*domain.Party, error) {
+	var p domain.Party
+	if err := r.parties.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&p); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // monthStartIST returns the YYYY-MM-01 key for the IST month containing now.

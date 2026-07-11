@@ -72,6 +72,32 @@ func validateRecordRequest(req RecordQCResultRequest) error {
 	return nil
 }
 
+// resolveQCResult handles POST /quality/qc-results/{id}/resolve — the
+// HOLD→PASS/REJECT resolution on a quarantined subject (§13.5).
+func (h *handler) resolveQCResult(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req ResolveQCResultRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	result, err := h.svc.resolveQCResult(r.Context(), actor, id, req)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, result)
+}
+
 // listQCResults handles GET /quality/qc-results?subject_type=&subject_id=.
 func (h *handler) listQCResults(w http.ResponseWriter, r *http.Request) {
 	actor, ok := auth.ActorFrom(r.Context())

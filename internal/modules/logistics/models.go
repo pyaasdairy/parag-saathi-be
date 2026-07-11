@@ -40,7 +40,11 @@ type pickupRequest struct {
 	Lat      *float64 `json:"lat,omitempty"`
 	Lng      *float64 `json:"lng,omitempty"`
 	PhotoURI string   `json:"photo_uri,omitempty"`
-	Notes    string   `json:"notes,omitempty"`
+	// Per-samiti pickup evidence (F4): the analyser display photo and the
+	// rider-measured volume; both persisted on the stop AND the consignment.
+	AnalyzerPhotoURI     string   `json:"analyzer_photo_uri,omitempty"`
+	MeasuredVolumeLitres *float64 `json:"measured_volume_litres,omitempty"`
+	Notes                string   `json:"notes,omitempty"`
 }
 
 // coldChainRequest logs an in-transit temperature (and optional location)
@@ -51,9 +55,39 @@ type coldChainRequest struct {
 	GeoLng float64  `json:"geo_lng,omitempty"`
 }
 
-// deliverRequest hands the whole trip's load to a BMC.
+// deliverRequest hands the whole trip's load to a receiving facility — a BMC
+// (chilling branch) OR a PROCESSING_PLANT (direct-to-plant branch, F5).
+// facility_id is the canonical field; bmc_id is kept as an accepted alias so
+// existing callers keep working.
 type deliverRequest struct {
-	BMCID primitive.ObjectID `json:"bmc_id"`
+	BMCID      primitive.ObjectID `json:"bmc_id"`
+	FacilityID primitive.ObjectID `json:"facility_id"`
+}
+
+// plantAcceptRequest is the PLANT_OPERATOR's intake approval of one delivered
+// per-samiti batch (F6): an intake photo plus optional notes.
+type plantAcceptRequest struct {
+	PhotoURI string `json:"photo_uri,omitempty"`
+	Notes    string `json:"notes,omitempty"`
+}
+
+// plantRejectRequest is the PLANT_OPERATOR's intake rejection of one delivered
+// per-samiti batch (F6). Reason is required.
+type plantRejectRequest struct {
+	Reason string `json:"reason"`
+}
+
+// ConsignmentPlantDecidedEvent is published on
+// eventbus.TopicConsignmentPlantAccepted / ...PlantRejected after the F6 plant
+// intake decision — platformops notifies the samiti sachiv. IDs travel as hex
+// strings so subscribers decode structurally.
+type ConsignmentPlantDecidedEvent struct {
+	ConsignmentID string  `json:"consignment_id"`
+	BatchCode     string  `json:"batch_code"`
+	DCSID         string  `json:"dcs_id"`
+	PlantID       string  `json:"plant_id"`
+	Litres        float64 `json:"litres"`
+	Reason        string  `json:"reason,omitempty"`
 }
 
 // locationRequest is one live GPS ping from the van while en route (§7.1). The

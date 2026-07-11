@@ -127,6 +127,49 @@ func (h *handler) getConsignmentInvoice(w http.ResponseWriter, r *http.Request) 
 	httpx.JSON(w, http.StatusOK, invoice)
 }
 
+// plantAccept handles POST /logistics/consignments/{consignmentID}/plant-accept —
+// the PLANT_OPERATOR's intake approval of one delivered per-samiti batch (F6).
+func (h *handler) plantAccept(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "consignmentID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req plantAcceptRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	consignment, err := h.svc.plantAccept(r.Context(), actor, id, req)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, consignment)
+}
+
+// plantReject handles POST /logistics/consignments/{consignmentID}/plant-reject.
+func (h *handler) plantReject(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.ActorFrom(r.Context())
+	id, err := httpx.PathID(r, "consignmentID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req plantRejectRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	consignment, err := h.svc.plantReject(r.Context(), actor, id, req)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, consignment)
+}
+
 // createTrip handles POST /logistics/trips.
 func (h *handler) createTrip(w http.ResponseWriter, r *http.Request) {
 	actor, _ := auth.ActorFrom(r.Context())

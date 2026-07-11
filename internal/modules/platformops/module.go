@@ -79,6 +79,12 @@ func Register(r chi.Router, d *deps.Deps) {
 	r.Route("/notifications", func(r chi.Router) {
 		r.Use(middleware.Authenticate(d.JWT))
 
+		// Any authenticated party reads its OWN inbox and marks its own rows
+		// read — the repository filters by the token's party id, so no role
+		// gate is needed (and none would fit: every role has an inbox).
+		r.Get("/me", h.listMyNotifications)
+		r.Post("/{id}/read", h.markNotificationRead)
+
 		// SUPER_ADMIN only: a help-desk role has no need to read outbox
 		// message bodies, and the outbox carries credential-adjacent traffic
 		// (OTP notifications — additionally redacted in the service).
@@ -102,6 +108,11 @@ func Register(r chi.Router, d *deps.Deps) {
 	d.Bus.Subscribe(eventbus.TopicPayoutCredited, safeHandler(log, svc.onPayoutCredited))
 	d.Bus.Subscribe(eventbus.TopicGateBlocked, safeHandler(log, svc.onGateBlocked))
 	d.Bus.Subscribe(eventbus.TopicMVUDispatched, safeHandler(log, svc.onMVUDispatched))
+	d.Bus.Subscribe(eventbus.TopicMVUClosed, safeHandler(log, svc.onMVUClosed))
+	d.Bus.Subscribe(eventbus.TopicConsignmentPlantAccepted, safeHandler(log, svc.onConsignmentPlantDecided(true)))
+	d.Bus.Subscribe(eventbus.TopicConsignmentPlantRejected, safeHandler(log, svc.onConsignmentPlantDecided(false)))
+	d.Bus.Subscribe(eventbus.TopicBatchQCRecorded, safeHandler(log, svc.onBatchQCRecorded))
+	d.Bus.Subscribe(eventbus.TopicBatchQRMinted, safeHandler(log, svc.onBatchQRMinted))
 }
 
 // safeHandler wraps a bus reaction so a programming error in notification

@@ -25,6 +25,17 @@ const (
 	TopicSettlementChanged  = "settlement.changed" // any settlement state change (initiate/approve/execute)
 	TopicPayoutCredited     = "payout.credited"
 	TopicMVUDispatched      = "mvu.dispatched"
+	// TopicMVUClosed fires when an MVU case is closed after the visit —
+	// platformops notifies the requesting farmer. Payload keys: case_id,
+	// farmer_party_id (hex), visit_notes.
+	TopicMVUClosed = "mvu.closed"
+	// Per-samiti batch lifecycle (F6/F7) — platformops turns these into
+	// notifications to the samiti sachiv (and plant operator for QC results).
+	// Payload keys documented on the publishing module's payload structs.
+	TopicConsignmentPlantAccepted = "consignment.plant_accepted"
+	TopicConsignmentPlantRejected = "consignment.plant_rejected"
+	TopicBatchQCRecorded          = "qc.batch_recorded"
+	TopicBatchQRMinted            = "batch.qr_minted"
 	// KYC review queue changed — a record entered PENDING (submitted) or left
 	// it (approved/rejected). Drives the live "pending KYC" dashboard badge via
 	// the SSE hub. Payload: KYCQueueEvent.

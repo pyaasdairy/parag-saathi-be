@@ -39,6 +39,12 @@ func Register(r chi.Router, d *deps.Deps) {
 		r.With(middleware.RequireRoles(domain.RoleBMCOperator, domain.RolePlantLabAnalyst)).
 			Post("/qc-results", h.recordQCResult)
 
+		// HOLD resolution (§13.5): PLANT_LAB holds resolve by PLANT_LAB_ANALYST,
+		// BMC_RAPID holds by BMC_OPERATOR — the exact stage×role pairing is
+		// enforced in the service (same discipline as recording).
+		r.With(middleware.RequireRoles(domain.RoleBMCOperator, domain.RolePlantLabAnalyst)).
+			Post("/qc-results/{id}/resolve", h.resolveQCResult)
+
 		// Reads for supply-chain staff and oversight roles.
 		readRoles := middleware.RequireRoles(
 			domain.RoleBMCOperator,
@@ -64,5 +70,30 @@ func Register(r chi.Router, d *deps.Deps) {
 		// Root-cause trace-back: contributing societies + QC results of a
 		// batch. Supervisor/mission/auditor reads (all in readRoles).
 		r.With(readRoles).Get("/batches/{id}/trace-back", h.traceBack)
+
+		// Per-samiti batch QC (F7): the PLANT_LAB_ANALYST works the queue of
+		// plant-ACCEPTED batches; PASS auto-mints the public batch QR, FAIL
+		// rejects the consignment. Reads include the samiti console roles so a
+		// rejection is visible where the milk came from.
+		r.With(middleware.RequireRoles(domain.RolePlantLabAnalyst)).
+			Post("/consignments/{consignmentID}/qc", h.recordBatchQC)
+		batchReadRoles := middleware.RequireRoles(
+			domain.RolePlantLabAnalyst,
+			domain.RolePlantOperator,
+			domain.RoleUnionFieldSupervisor,
+			domain.RoleMissionOfficial,
+			domain.RoleStateAuditor,
+		)
+		r.With(batchReadRoles).Get("/batch-queue", h.getBatchQueue)
+		qcResultReaders := middleware.RequireRoles(
+			domain.RolePlantLabAnalyst,
+			domain.RolePlantOperator,
+			domain.RoleUnionFieldSupervisor,
+			domain.RoleMissionOfficial,
+			domain.RoleStateAuditor,
+			domain.RoleSamitiSacheev,
+			domain.RoleSamitiAdhyaksh,
+		)
+		r.With(qcResultReaders).Get("/consignments/{consignmentID}/qc", h.getBatchQC)
 	})
 }

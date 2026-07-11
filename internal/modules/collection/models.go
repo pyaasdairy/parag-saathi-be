@@ -55,11 +55,14 @@ type CreatePourRequest struct {
 	TemperatureC      *float64            `json:"temperature_c,omitempty"` // cold-chain reading at pour time (°C)
 	AnimalID          *primitive.ObjectID `json:"animal_id,omitempty"`
 	AnalyzerReadingID *primitive.ObjectID `json:"analyzer_reading_id,omitempty"`
-	Source            string              `json:"source"` // reading mode that produced the values
+	Source            string              `json:"source"` // reading mode that produced the values (aliases analyzer|ocr|manual accepted)
 	PouredAt          *time.Time          `json:"poured_at,omitempty"`
 	DeviceID          string              `json:"device_id,omitempty"`
-	GeoLat            *float64            `json:"geo_lat,omitempty"`
-	GeoLng            *float64            `json:"geo_lng,omitempty"`
+	// PhotoObjectKey is the analyzer-display photo evidence (object store key)
+	// backing an assurance-B capture; without it OCR captures derive C (§6.2).
+	PhotoObjectKey string   `json:"photo_object_key,omitempty"`
+	GeoLat         *float64 `json:"geo_lat,omitempty"`
+	GeoLng         *float64 `json:"geo_lng,omitempty"`
 }
 
 // PourResponse wraps a pour together with the idempotent-replay marker so

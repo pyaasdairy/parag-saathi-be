@@ -286,6 +286,64 @@ func (s *service) listNotifications(ctx context.Context, phone, status string, p
 	return items, total, nil
 }
 
+// listMyNotifications returns the calling party's OWN notifications, newest
+// first — the in-app inbox behind GET /notifications/me. OTP params are
+// redacted even on the self view: the inbox must never become a place to
+// recover a login credential.
+func (s *service) listMyNotifications(ctx context.Context, actor auth.Actor, page httpx.Page) ([]InboxNotification, int64, error) {
+	partyID, err := httpx.ParseID(actor.PartyID, "actor party")
+	if err != nil {
+		return nil, 0, err
+	}
+	items, total, err := s.repo.listNotificationsForParty(ctx, partyID, page)
+	if err != nil {
+		return nil, 0, err
+	}
+	views := make([]InboxNotification, 0, len(items))
+	for i := range items {
+		redactNotificationSecrets(&items[i])
+		views = append(views, inboxView(&items[i]))
+	}
+	return views, total, nil
+}
+
+// markNotificationRead stamps read_at on one of the calling party's own
+// notifications (POST /notifications/{id}/read). Idempotent: re-reading keeps
+// the first read time; a foreign id is indistinguishable from an unknown one
+// (404) so the route leaks nothing about other parties' inboxes.
+func (s *service) markNotificationRead(ctx context.Context, actor auth.Actor, id primitive.ObjectID) (*InboxNotification, error) {
+	partyID, err := httpx.ParseID(actor.PartyID, "actor party")
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.repo.markNotificationRead(ctx, id, partyID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	redactNotificationSecrets(n)
+	view := inboxView(n)
+	s.log.InfoContext(ctx, "notification marked read",
+		slog.String("notification_id", id.Hex()),
+		slog.String("party_id", actor.PartyID))
+	return &view, nil
+}
+
+// inboxView projects a stored outbox document onto the party-facing inbox row.
+func inboxView(n *StoredNotification) InboxNotification {
+	return InboxNotification{
+		ID:          n.ID.Hex(),
+		TemplateKey: n.TemplateKey,
+		Params:      n.Params,
+		Channel:     n.Channel,
+		Language:    n.Language,
+		Status:      n.Status,
+		QueuedAt:    n.QueuedAt,
+		SentAt:      n.SentAt,
+		ReadAt:      n.ReadAt,
+		Read:        n.ReadAt != nil,
+	}
+}
+
 // redactedValue replaces credential material in read surfaces.
 const redactedValue = "[REDACTED]"
 
@@ -399,9 +457,42 @@ func renderSMS(templateKey string, params map[string]string) (english, hindi str
 	case domain.TemplateOTP:
 		return fmt.Sprintf("Your Saathi OTP is %s. Do not share it with anyone.", p("otp")),
 			fmt.Sprintf("आपका साथी OTP %s है। इसे किसी से साझा न करें।", p("otp"))
+	case domain.TemplateMVUClosed:
+		return fmt.Sprintf("MVU visit complete for your animal (case %s). - Saathi", p("case_id")),
+			fmt.Sprintf("आपके पशु के लिए एमवीयू विज़िट पूरी हुई (केस %s)। - साथी", p("case_id"))
+	case domain.TemplateRoleGranted:
+		return fmt.Sprintf("You have been granted the %s role at %s. - Saathi", p("role"), p("org_name")),
+			fmt.Sprintf("आपको %s पर %s की भूमिका दी गई है। - साथी", p("org_name"), p("role"))
+	case domain.TemplateOnboardingApproved:
+		return fmt.Sprintf("Your onboarding as %s at %s is approved. Welcome to Saathi.", p("role"), p("org_name")),
+			fmt.Sprintf("%s पर %s के रूप में आपका पंजीकरण स्वीकृत हुआ। साथी में आपका स्वागत है।", p("org_name"), p("role"))
+	case domain.TemplateOnboardingRejected:
+		return fmt.Sprintf("Your onboarding request as %s was rejected: %s. - Saathi", p("role"), p("reason")),
+			fmt.Sprintf("%s के रूप में आपका पंजीकरण अनुरोध अस्वीकृत हुआ: %s। - साथी", p("role"), p("reason"))
+	case domain.TemplateConsignmentAccepted:
+		return fmt.Sprintf("Batch %s from %s accepted at %s (%s L). - Saathi", p("batch_code"), p("samiti"), p("plant"), p("litres")),
+			fmt.Sprintf("%s का बैच %s %s पर स्वीकृत हुआ (%s ली.)। - साथी", p("samiti"), p("batch_code"), p("plant"), p("litres"))
+	case domain.TemplateConsignmentRejected:
+		return fmt.Sprintf("Batch %s from %s was REJECTED at %s: %s. - Saathi", p("batch_code"), p("samiti"), p("plant"), p("reason")),
+			fmt.Sprintf("%s का बैच %s %s पर अस्वीकृत हुआ: %s। - साथी", p("samiti"), p("batch_code"), p("plant"), p("reason"))
+	case domain.TemplateQCResult:
+		return fmt.Sprintf("QC %s for batch %s (%s). %s- Saathi", p("verdict"), p("batch_code"), p("samiti"), failedSuffix(p("failed"), "Failed: ")),
+			fmt.Sprintf("बैच %s (%s) की गुणवत्ता जांच: %s। %s- साथी", p("batch_code"), p("samiti"), p("verdict"), failedSuffix(p("failed"), "विफल: "))
+	case domain.TemplateBatchQRMinted:
+		return fmt.Sprintf("Public QR is live for batch %s (%s). Token %s. - Saathi", p("batch_code"), p("samiti"), p("token")),
+			fmt.Sprintf("बैच %s (%s) का सार्वजनिक QR जारी हुआ। टोकन %s। - साथी", p("batch_code"), p("samiti"), p("token"))
 	default:
 		return "Saathi update: " + templateKey, "साथी सूचना: " + templateKey
 	}
+}
+
+// failedSuffix renders the optional failed-parameters clause of the QC-result
+// message ("Failed: AFLATOXIN_M1. ") — empty input renders nothing.
+func failedSuffix(failed, label string) string {
+	if failed == "" {
+		return ""
+	}
+	return label + failed + ". "
 }
 
 // ---- Support: audited limited-PII lookup (§5.2 role 20) ----
@@ -580,6 +671,133 @@ func (s *service) onMVUDispatched(ctx context.Context, payload any) {
 	s.queueNotification(ctx, partyID, event.Phone, domain.TemplateMVUDispatched, params)
 }
 
+// onMVUClosed queues the "MVU visit complete" SMS to the requesting farmer.
+func (s *service) onMVUClosed(ctx context.Context, payload any) {
+	var event mvuClosedEvent
+	if err := decodeBusPayload(payload, &event); err != nil {
+		s.log.ErrorContext(ctx, "bad mvu.closed payload", slog.Any("err", err))
+		return
+	}
+	if event.FarmerPartyID == "" && event.Phone == "" {
+		s.log.WarnContext(ctx, "mvu.closed payload has no addressee")
+		return
+	}
+	partyID := s.parseAddresseeID(ctx, event.FarmerPartyID, "mvu.closed")
+	s.queueNotification(ctx, partyID, event.Phone, domain.TemplateMVUClosed,
+		map[string]string{"case_id": event.CaseID})
+}
+
+// onConsignmentPlantDecided notifies the samiti's sachiv(s) that their batch
+// was accepted or rejected at plant intake (F6). In-app (APP channel):
+// operational role-facing traffic, not farmer SMS.
+func (s *service) onConsignmentPlantDecided(accepted bool) func(ctx context.Context, payload any) {
+	return func(ctx context.Context, payload any) {
+		var event consignmentPlantDecidedEvent
+		if err := decodeBusPayload(payload, &event); err != nil {
+			s.log.ErrorContext(ctx, "bad consignment.plant_* payload", slog.Any("err", err))
+			return
+		}
+		params := map[string]string{
+			"batch_code": event.BatchCode,
+			"samiti":     s.orgDisplayName(ctx, event.DCSID),
+			"plant":      s.orgDisplayName(ctx, event.PlantID),
+		}
+		templateKey := domain.TemplateConsignmentAccepted
+		if accepted {
+			params["litres"] = strconv.FormatFloat(event.Litres, 'f', 1, 64)
+		} else {
+			templateKey = domain.TemplateConsignmentRejected
+			params["reason"] = event.Reason
+		}
+		s.notifyRoleHolders(ctx, event.DCSID, domain.RoleSamitiSacheev, domain.ChannelApp, templateKey, params)
+	}
+}
+
+// onBatchQCRecorded notifies the samiti sachiv and the receiving plant's
+// operator(s) of the per-samiti batch QC verdict (qc.result).
+func (s *service) onBatchQCRecorded(ctx context.Context, payload any) {
+	var event batchQCRecordedEvent
+	if err := decodeBusPayload(payload, &event); err != nil {
+		s.log.ErrorContext(ctx, "bad qc.batch_recorded payload", slog.Any("err", err))
+		return
+	}
+	params := map[string]string{
+		"batch_code": event.BatchCode,
+		"verdict":    event.Verdict,
+		"samiti":     s.orgDisplayName(ctx, event.DCSID),
+	}
+	if len(event.FailedParameters) > 0 {
+		params["failed"] = strings.Join(event.FailedParameters, ", ")
+	}
+	s.notifyRoleHolders(ctx, event.DCSID, domain.RoleSamitiSacheev, domain.ChannelApp, domain.TemplateQCResult, params)
+	s.notifyRoleHolders(ctx, event.PlantID, domain.RolePlantOperator, domain.ChannelApp, domain.TemplateQCResult, params)
+}
+
+// onBatchQRMinted notifies the samiti sachiv that the batch's public QR is
+// live (batch.qr_minted).
+func (s *service) onBatchQRMinted(ctx context.Context, payload any) {
+	var event batchQRMintedEvent
+	if err := decodeBusPayload(payload, &event); err != nil {
+		s.log.ErrorContext(ctx, "bad batch.qr_minted payload", slog.Any("err", err))
+		return
+	}
+	s.notifyRoleHolders(ctx, event.DCSID, domain.RoleSamitiSacheev, domain.ChannelApp,
+		domain.TemplateBatchQRMinted, map[string]string{
+			"batch_code": event.BatchCode,
+			"samiti":     s.orgDisplayName(ctx, event.DCSID),
+			"token":      event.Token,
+		})
+}
+
+// notifyRoleHolders queues one notification per usable ACTIVE holder of a role
+// at an org unit. A blank/malformed org id or an empty holder set logs and
+// drops — notification fan-out is always best-effort.
+func (s *service) notifyRoleHolders(ctx context.Context, orgUnitHex, roleCode, channel, templateKey string, params map[string]string) {
+	if orgUnitHex == "" {
+		return
+	}
+	orgUnitID, err := primitive.ObjectIDFromHex(orgUnitHex)
+	if err != nil {
+		s.log.WarnContext(ctx, "notify role holders: bad org unit id",
+			slog.String("org_unit_id", orgUnitHex), slog.String("template_key", templateKey))
+		return
+	}
+	holders, err := s.repo.listActiveRoleHolders(ctx, orgUnitID, roleCode)
+	if err != nil {
+		s.log.ErrorContext(ctx, "notify role holders: lookup failed",
+			slog.String("org_unit_id", orgUnitHex), slog.String("role_code", roleCode), slog.Any("err", err))
+		return
+	}
+	now := time.Now().UTC()
+	notified := map[primitive.ObjectID]bool{}
+	for _, assignment := range holders {
+		if !assignment.UsableAt(now) || notified[assignment.PartyID] {
+			continue
+		}
+		notified[assignment.PartyID] = true
+		partyID := assignment.PartyID
+		s.queueNotificationOn(ctx, channel, &partyID, "", templateKey, params)
+	}
+}
+
+// orgDisplayName resolves an org unit hex id to its human-readable name for
+// notification params (names, never bare ids). Best-effort: a failed lookup
+// returns the code-ish fallback of an empty string.
+func (s *service) orgDisplayName(ctx context.Context, orgUnitHex string) string {
+	if orgUnitHex == "" {
+		return ""
+	}
+	orgUnitID, err := primitive.ObjectIDFromHex(orgUnitHex)
+	if err != nil {
+		return ""
+	}
+	org, err := s.deps.Orgs.Get(ctx, orgUnitID)
+	if err != nil || org == nil {
+		return ""
+	}
+	return org.Name
+}
+
 // parseAddresseeID turns an optional addressee party ObjectID hex string
 // (carried as a hex string on bus payloads) into a *primitive.ObjectID.
 // An empty value is a legitimate phone-only addressing (returns nil); a
@@ -605,12 +823,20 @@ func hexOrEmpty(id *primitive.ObjectID) string {
 	return id.Hex()
 }
 
-// queueNotification inserts one QUEUED outbox document, resolving phone and
-// preferred language from the party record when available. The _id is
+// queueNotification inserts one QUEUED SMS outbox document, resolving phone
+// and preferred language from the party record when available. The _id is
 // pre-generated so the queued entry can be named in the structured log.
 // Failures are logged, never propagated — a lost SMS must not fail the
 // publishing flow.
 func (s *service) queueNotification(ctx context.Context, partyID *primitive.ObjectID, phone, templateKey string, params map[string]string) {
+	s.queueNotificationOn(ctx, domain.ChannelSMS, partyID, phone, templateKey, params)
+}
+
+// queueNotificationOn is queueNotification with an explicit channel. APP
+// (in-app inbox) documents are inserted directly as SENT — inbox delivery is
+// the insert itself; the mock SMS worker only drains QUEUED and so never
+// touches them.
+func (s *service) queueNotificationOn(ctx context.Context, channel string, partyID *primitive.ObjectID, phone, templateKey string, params map[string]string) {
 	language := "hi" // vernacular default (blueprint §13)
 	if partyID != nil {
 		if party, err := s.repo.findPartyByID(ctx, *partyID); err == nil {
@@ -622,24 +848,34 @@ func (s *service) queueNotification(ctx context.Context, partyID *primitive.Obje
 			}
 		}
 	}
-	if phone == "" {
-		s.log.WarnContext(ctx, "dropping notification with no phone",
+	if phone == "" && partyID == nil {
+		s.log.WarnContext(ctx, "dropping notification with no addressee",
+			slog.String("template_key", templateKey))
+		return
+	}
+	if phone == "" && channel == domain.ChannelSMS {
+		s.log.WarnContext(ctx, "dropping SMS notification with no phone",
 			slog.String("template_key", templateKey), slog.String("party_id", hexOrEmpty(partyID)))
 		return
 	}
 
+	now := time.Now().UTC()
 	id := primitive.NewObjectID()
 	notification := &StoredNotification{Notification: domain.Notification{
 		ID:          id,
 		PartyID:     partyID,
 		Phone:       phone,
-		Channel:     domain.ChannelSMS,
+		Channel:     channel,
 		TemplateKey: templateKey,
 		Language:    language,
 		Params:      params,
 		Status:      domain.NotificationQueued,
-		QueuedAt:    time.Now().UTC(),
+		QueuedAt:    now,
 	}}
+	if channel == domain.ChannelApp {
+		notification.Status = domain.NotificationSent
+		notification.SentAt = &now
+	}
 	if err := s.repo.insertNotification(ctx, notification); err != nil {
 		s.log.ErrorContext(ctx, "queue notification failed",
 			slog.String("template_key", templateKey), slog.Any("err", err))
@@ -648,8 +884,9 @@ func (s *service) queueNotification(ctx context.Context, partyID *primitive.Obje
 	s.log.InfoContext(ctx, "notification queued",
 		slog.String("notification_id", id.Hex()),
 		slog.String("template_key", templateKey),
+		slog.String("channel", channel),
 		slog.String("party_id", hexOrEmpty(partyID)),
-		slog.String("status", domain.NotificationQueued))
+		slog.String("status", notification.Status))
 }
 
 // unionAncestor returns the MILK_UNION org unit at or above orgUnitID, walking

@@ -110,14 +110,18 @@ func (r *repo) markConsignmentDispatched(ctx context.Context, id primitive.Objec
 }
 
 // markConsignmentPickedUp transitions DISPATCHED→PICKED_UP and pins the
-// carrying trip, guarded atomically by the status filter.
-func (r *repo) markConsignmentPickedUp(ctx context.Context, id, tripID primitive.ObjectID) (bool, error) {
+// carrying trip, guarded atomically by the status filter. extraSet carries the
+// pickup-time batch mint (batch_code, batch_minted_at) and the van-entered
+// evidence so the transition and the mint land in ONE atomic write.
+func (r *repo) markConsignmentPickedUp(ctx context.Context, id, tripID primitive.ObjectID, extraSet bson.D) (bool, error) {
+	set := bson.D{
+		{Key: "status", Value: domain.ConsignmentStatusPickedUp},
+		{Key: "route_trip_id", Value: tripID},
+	}
+	set = append(set, extraSet...)
 	res, err := r.consignments.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: domain.ConsignmentStatusDispatch}},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "status", Value: domain.ConsignmentStatusPickedUp},
-			{Key: "route_trip_id", Value: tripID},
-		}}})
+		bson.D{{Key: "$set", Value: set}})
 	if err != nil {
 		return false, fmt.Errorf("mark consignment picked up: %w", err)
 	}
@@ -125,18 +129,50 @@ func (r *repo) markConsignmentPickedUp(ctx context.Context, id, tripID primitive
 }
 
 // markConsignmentsDelivered transitions every listed PICKED_UP consignment
-// to DELIVERED (bulk companion of the trip delivery).
-func (r *repo) markConsignmentsDelivered(ctx context.Context, ids []primitive.ObjectID) error {
+// to DELIVERED (bulk companion of the trip delivery), stamping delivered_at.
+func (r *repo) markConsignmentsDelivered(ctx context.Context, ids []primitive.ObjectID, at time.Time) error {
 	_, err := r.consignments.UpdateMany(ctx,
 		bson.D{
 			{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}},
 			{Key: "status", Value: domain.ConsignmentStatusPickedUp},
 		},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: domain.ConsignmentStatusDelivered}}}})
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "status", Value: domain.ConsignmentStatusDelivered},
+			{Key: "delivered_at", Value: at},
+		}}})
 	if err != nil {
 		return fmt.Errorf("mark consignments delivered: %w", err)
 	}
 	return nil
+}
+
+// gateConsignmentIntake applies a plant intake verdict (F6) to a DELIVERED
+// consignment: DELIVERED→ACCEPTED (approve) or DELIVERED→REJECTED (reject).
+// The status filter makes the transition atomic; false = lost the state race.
+func (r *repo) gateConsignmentIntake(ctx context.Context, id primitive.ObjectID, newStatus string, set bson.D) (bool, error) {
+	fullSet := bson.D{{Key: "status", Value: newStatus}}
+	fullSet = append(fullSet, set...)
+	res, err := r.consignments.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: domain.ConsignmentStatusDelivered}},
+		bson.D{{Key: "$set", Value: fullSet}})
+	if err != nil {
+		return false, fmt.Errorf("gate consignment intake: %w", err)
+	}
+	return res.MatchedCount > 0, nil
+}
+
+// distinctFarmerCount counts the DISTINCT farmers behind a pour set — the
+// <farmer count> segment of the pickup-minted batch code (F4).
+func (r *repo) distinctFarmerCount(ctx context.Context, pourIDs []primitive.ObjectID) (int, error) {
+	if len(pourIDs) == 0 {
+		return 0, nil
+	}
+	vals, err := r.pours.Distinct(ctx, "farmer_party_id",
+		bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: pourIDs}}}})
+	if err != nil {
+		return 0, fmt.Errorf("distinct farmer count: %w", err)
+	}
+	return len(vals), nil
 }
 
 // setConsignmentProvenanceSeq pins the latest ledger sequence on the doc.
@@ -251,7 +287,7 @@ func (r *repo) findTripByID(ctx context.Context, id primitive.ObjectID) (*domain
 // optional geo/photo evidence) and moves the trip to IN_PROGRESS (idempotent
 // once it is already there). Nil lat/lng and an empty photoURI are "not
 // captured" and leave the stop untouched.
-func (r *repo) markStopPickedUp(ctx context.Context, tripID, consignmentID primitive.ObjectID, at time.Time, tempC float64, notes string, lat, lng *float64, photoURI string) error {
+func (r *repo) markStopPickedUp(ctx context.Context, tripID, consignmentID primitive.ObjectID, at time.Time, tempC float64, notes string, lat, lng *float64, photoURI, analyzerPhotoURI string, measuredVolumeLitres *float64, batchCode string) error {
 	set := bson.D{
 		{Key: "stops.$.picked_up_at", Value: at},
 		{Key: "stops.$.temp_c", Value: tempC},
@@ -265,6 +301,15 @@ func (r *repo) markStopPickedUp(ctx context.Context, tripID, consignmentID primi
 	}
 	if photoURI != "" {
 		set = append(set, bson.E{Key: "stops.$.photo_uri", Value: photoURI})
+	}
+	if analyzerPhotoURI != "" {
+		set = append(set, bson.E{Key: "stops.$.analyzer_photo_uri", Value: analyzerPhotoURI})
+	}
+	if measuredVolumeLitres != nil {
+		set = append(set, bson.E{Key: "stops.$.measured_volume_litres", Value: *measuredVolumeLitres})
+	}
+	if batchCode != "" {
+		set = append(set, bson.E{Key: "stops.$.batch_code", Value: batchCode})
 	}
 	_, err := r.trips.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: tripID}, {Key: "stops.consignment_id", Value: consignmentID}},
@@ -286,13 +331,17 @@ func (r *repo) pushColdChain(ctx context.Context, tripID primitive.ObjectID, ent
 }
 
 // markTripDelivered transitions IN_PROGRESS→DELIVERED optimistically and
-// records the receiving BMC.
-func (r *repo) markTripDelivered(ctx context.Context, tripID, bmcID primitive.ObjectID, at time.Time) (bool, error) {
+// records the receiving facility — a BMC or a PROCESSING_PLANT (F5).
+// delivered_to_bmc_id keeps carrying the facility id for compatibility;
+// delivered_to_facility_id/delivered_facility_type carry the new semantics.
+func (r *repo) markTripDelivered(ctx context.Context, tripID, facilityID primitive.ObjectID, facilityType string, at time.Time) (bool, error) {
 	res, err := r.trips.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: tripID}, {Key: "status", Value: domain.TripStatusInProgress}},
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "status", Value: domain.TripStatusDelivered},
-			{Key: "delivered_to_bmc_id", Value: bmcID},
+			{Key: "delivered_to_bmc_id", Value: facilityID},
+			{Key: "delivered_to_facility_id", Value: facilityID},
+			{Key: "delivered_facility_type", Value: facilityType},
 			{Key: "delivered_at", Value: at},
 		}}})
 	if err != nil {

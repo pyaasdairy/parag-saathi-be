@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -64,6 +65,48 @@ func AssuranceForSource(source string) string {
 		return AssuranceOCRPhoto
 	default:
 		return AssuranceManual
+	}
+}
+
+// AssuranceForCapture derives the pour's assurance from the capture EVIDENCE,
+// not just the claimed source (Developer Note §6.2/§12.3): A requires the
+// analyzer path WITH a device identity; B requires the retained analyzer-screen
+// photo — a stronger-than-manual claim backed by nothing downgrades to C.
+func AssuranceForCapture(source, deviceID, photoObjectKey string) string {
+	switch source {
+	case ReadingModeDirect:
+		if deviceID != "" {
+			return AssuranceInstrument
+		}
+		// Analyzer claimed but no device identity: photo evidence still earns B.
+		if photoObjectKey != "" {
+			return AssuranceOCRPhoto
+		}
+		return AssuranceManual
+	case ReadingModePhotoOCR:
+		if photoObjectKey != "" {
+			return AssuranceOCRPhoto
+		}
+		return AssuranceManual // never B without the photo evidence
+	default:
+		return AssuranceManual
+	}
+}
+
+// NormalizeReadingMode maps loose client spellings onto the canonical reading
+// modes ("analyzer" → ANALYZER_DIRECT, "ocr"/"photo" → PHOTO_OCR, "manual" →
+// MANUAL). Unknown values are returned upper-cased so validation still rejects
+// them explicitly.
+func NormalizeReadingMode(source string) string {
+	switch v := strings.ToUpper(strings.TrimSpace(source)); v {
+	case "ANALYZER", "ANALYSER", "ANALYZER_DIRECT", "ANALYSER_DIRECT", "DIRECT":
+		return ReadingModeDirect
+	case "OCR", "PHOTO", "PHOTO_OCR":
+		return ReadingModePhotoOCR
+	case "MANUAL", "HAND", "KEYED":
+		return ReadingModeManual
+	default:
+		return v
 	}
 }
 
@@ -181,6 +224,9 @@ type MilkPour struct {
 	AnalyzerReadingID *primitive.ObjectID `bson:"analyzer_reading_id,omitempty" json:"analyzer_reading_id,omitempty"`
 	Source            string              `bson:"source"        json:"source"`    // reading mode that produced the values
 	Assurance         string              `bson:"assurance"     json:"assurance"` // §6.2 capture assurance A|B|C
+	// PhotoObjectKey is the retained analyzer-display photo evidence (object
+	// store key) that backs an assurance-B capture (§6.2/§12.3).
+	PhotoObjectKey string `bson:"photo_object_key,omitempty" json:"photo_object_key,omitempty"`
 	Status            string              `bson:"status"        json:"status"`
 	SupersedesPourID  *primitive.ObjectID `bson:"supersedes_pour_id,omitempty" json:"supersedes_pour_id,omitempty"`
 	PouredAt          time.Time           `bson:"poured_at"     json:"poured_at"`

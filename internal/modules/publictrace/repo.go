@@ -30,6 +30,11 @@ type repo struct {
 	consignments *mongo.Collection
 	milkPours    *mongo.Collection
 	parties      *mongo.Collection
+	// Per-samiti batch flow (F8): the consignment batch QRs, their QC results
+	// and the carrying trips — all read-only here.
+	consignmentBatchQRs *mongo.Collection
+	consignmentQC       *mongo.Collection
+	routeTrips          *mongo.Collection
 }
 
 // newRepo binds the repo to the shared database. milk_pours and parties are
@@ -37,13 +42,16 @@ type repo struct {
 // per-society volume and the consent-gated farmer roster.
 func newRepo(db *mongo.Database) *repo {
 	return &repo{
-		batchQRs:     db.Collection(mongodb.CollBatchQRs),
-		productLots:  db.Collection(mongodb.CollProductLots),
-		batches:      db.Collection(mongodb.CollBatches),
-		qcResults:    db.Collection(mongodb.CollQCResults),
-		consignments: db.Collection(mongodb.CollConsignments),
-		milkPours:    db.Collection(mongodb.CollMilkPours),
-		parties:      db.Collection(mongodb.CollParties),
+		batchQRs:            db.Collection(mongodb.CollBatchQRs),
+		productLots:         db.Collection(mongodb.CollProductLots),
+		batches:             db.Collection(mongodb.CollBatches),
+		qcResults:           db.Collection(mongodb.CollQCResults),
+		consignments:        db.Collection(mongodb.CollConsignments),
+		milkPours:           db.Collection(mongodb.CollMilkPours),
+		parties:             db.Collection(mongodb.CollParties),
+		consignmentBatchQRs: db.Collection(mongodb.CollConsignmentBatchQRs),
+		consignmentQC:       db.Collection(mongodb.CollConsignmentQC),
+		routeTrips:          db.Collection(mongodb.CollRouteTrips),
 	}
 }
 

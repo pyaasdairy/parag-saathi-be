@@ -20,7 +20,7 @@ import (
 // the /api/v1 subtree) and wires handler → service → repo.
 func Register(r chi.Router, d *deps.Deps) {
 	log := d.Log.With(slog.String("module", "logistics"))
-	svc := newService(newRepo(d.DB), d.Orgs, d.Ledger, log)
+	svc := newService(newRepo(d.DB), d.Orgs, d.Ledger, d.Bus, log)
 	h := &handler{svc: svc}
 
 	r.Route("/logistics", func(r chi.Router) {
@@ -33,9 +33,16 @@ func Register(r chi.Router, d *deps.Deps) {
 			// DCS→Union B2B invoice leg: the Sacheev submits the sealed
 			// consignment to the parent Union (HSN 0401, GST-exempt).
 			r.With(sacheevOnly).Post("/{consignmentID}/approve-union", h.approveForUnion)
+			// Plant intake (F6): the PLANT_OPERATOR approves (with photo) or
+			// rejects each DELIVERED per-samiti batch. Scope (plant within the
+			// consignment's union subtree) is enforced in the service.
+			plantOnly := middleware.RequireRoles(domain.RolePlantOperator)
+			r.With(plantOnly).Post("/{consignmentID}/plant-accept", h.plantAccept)
+			r.With(plantOnly).Post("/{consignmentID}/plant-reject", h.plantReject)
 			consignmentReaders := middleware.RequireRoles(
 				domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh, domain.RoleVanRider,
 				domain.RoleUnionFieldSupervisor, domain.RoleBMCOperator, domain.RoleStateAuditor,
+				domain.RolePlantOperator, domain.RolePlantLabAnalyst,
 			)
 			r.With(consignmentReaders).Get("/", h.listConsignments)
 			r.With(consignmentReaders).Get("/{consignmentID}", h.getConsignment)
@@ -48,12 +55,13 @@ func Register(r chi.Router, d *deps.Deps) {
 				domain.RoleVanRider, domain.RoleUnionFieldSupervisor, domain.RoleUnionPresident,
 				domain.RoleStateAuditor, domain.RoleBMCOperator,
 			)
-			// Live tracking is visible to the source Sachiv/Adhyaksh and the
-			// destination BMC too — the service scopes each to trips they own.
+			// Live tracking is visible to the source Sachiv/Adhyaksh, the
+			// destination BMC and the receiving plant (F6a) — the service
+			// scopes each to trips they own.
 			trackReaders := middleware.RequireRoles(
 				domain.RoleVanRider, domain.RoleUnionFieldSupervisor, domain.RoleUnionPresident,
 				domain.RoleStateAuditor, domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh,
-				domain.RoleBMCOperator,
+				domain.RoleBMCOperator, domain.RolePlantOperator,
 			)
 			r.With(middleware.RequireRoles(domain.RoleUnionFieldSupervisor, domain.RoleVanRider)).
 				Post("/", h.createTrip)

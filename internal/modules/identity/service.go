@@ -1144,6 +1144,27 @@ func (s *service) verifyPartyKYC(ctx context.Context, actor auth.Actor, partyID 
 		party.KYCTier = newTier
 	}
 
+	// Notify the vouched party (kyc.approved): the admin direct-vouch is a KYC
+	// approval from the subject's perspective. Best-effort.
+	vouchLanguage := party.PreferredLanguage
+	if vouchLanguage == "" {
+		vouchLanguage = defaultLanguage
+	}
+	vouchedID := party.ID
+	if err := s.repo.insertNotification(ctx, domain.Notification{
+		PartyID:     &vouchedID,
+		Phone:       party.Phone,
+		Channel:     domain.ChannelSMS,
+		TemplateKey: domain.TemplateKYCApproved,
+		Language:    vouchLanguage,
+		Params:      map[string]string{"tier": newTier},
+		Status:      domain.NotificationQueued,
+		QueuedAt:    now,
+	}); err != nil {
+		s.log.ErrorContext(ctx, "kyc vouch notify failed",
+			slog.String("party_id", party.ID.Hex()), slog.Any("err", err))
+	}
+
 	s.deps.Audit.Record(ctx, audit.Entry{
 		Action:     "kyc.tier_vouched",
 		TargetType: "party",
@@ -1306,6 +1327,30 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 		slog.String("role_code", req.RoleCode),
 		slog.String("org_unit_id", req.OrgUnitID.Hex()),
 		slog.String("actor_party_id", actor.PartyID))
+
+	// Notify the grantee (role.granted): human-readable role + org name, never
+	// bare ids. Best-effort — a notify failure never voids the durable grant.
+	granteeLanguage := party.PreferredLanguage
+	if granteeLanguage == "" {
+		granteeLanguage = defaultLanguage
+	}
+	granteeID := party.ID
+	if err := s.repo.insertNotification(ctx, domain.Notification{
+		PartyID:     &granteeID,
+		Phone:       party.Phone,
+		Channel:     domain.ChannelSMS,
+		TemplateKey: domain.TemplateRoleGranted,
+		Language:    granteeLanguage,
+		Params: map[string]string{
+			"role":     req.RoleCode,
+			"org_name": targetOrg.Name,
+		},
+		Status:   domain.NotificationQueued,
+		QueuedAt: now,
+	}); err != nil {
+		s.log.ErrorContext(ctx, "role grant notify failed",
+			slog.String("assignment_id", assignment.ID.Hex()), slog.Any("err", err))
+	}
 
 	// Developer Note §2: "a person receives the modules their role grants." The
 	// authorised admin grant IS the cooperative's verification for this

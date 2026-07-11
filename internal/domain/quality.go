@@ -41,6 +41,27 @@ const (
 	QCSubjectProcessingBatch = "PROCESSING_BATCH"
 )
 
+// QC verdicts (Developer Note §6.5/§13.5): the Note's machine is
+// SAMPLED→HOLD→PASS/REJECT. HOLD quarantines the subject pending a re-test or
+// an analyst resolution — it is distinct from a terminal REJECT.
+const (
+	QCVerdictPass   = "PASS"
+	QCVerdictHold   = "HOLD"
+	QCVerdictReject = "REJECT"
+)
+
+// EffectiveQCVerdict returns the stored verdict, deriving PASS/REJECT from the
+// legacy two-state overall_pass for results recorded before HOLD existed.
+func EffectiveQCVerdict(stored string, overallPass bool) string {
+	if stored != "" {
+		return stored
+	}
+	if overallPass {
+		return QCVerdictPass
+	}
+	return QCVerdictReject
+}
+
 // QCTest is a single measurement inside a QC result.
 type QCTest struct {
 	Name  string  `bson:"name"  json:"name"`
@@ -63,6 +84,14 @@ type QCResult struct {
 	AnalystPartyID    primitive.ObjectID `bson:"analyst_party_id" json:"analyst_party_id"`
 	LabRef            string             `bson:"lab_ref,omitempty"            json:"lab_ref,omitempty"`
 	CertificateNumber string             `bson:"certificate_number,omitempty" json:"certificate_number,omitempty"`
+	// Verdict is PASS | HOLD | REJECT (§13.5). Empty on legacy documents —
+	// read paths derive it from OverallPass via EffectiveQCVerdict.
+	Verdict string `bson:"verdict,omitempty" json:"verdict,omitempty"`
+	// HOLD resolution (POST /quality/qc-results/{id}/resolve): who resolved the
+	// quarantine, when, and with what notes.
+	ResolvedBy      *primitive.ObjectID `bson:"resolved_by,omitempty"      json:"resolved_by,omitempty"`
+	ResolvedAt      *time.Time          `bson:"resolved_at,omitempty"      json:"resolved_at,omitempty"`
+	ResolutionNotes string              `bson:"resolution_notes,omitempty" json:"resolution_notes,omitempty"`
 	// Superseded marks a result voided after losing the gate race — the
 	// verdict on the subject came from a different, earlier result.
 	Superseded    bool      `bson:"superseded,omitempty" json:"superseded,omitempty"`

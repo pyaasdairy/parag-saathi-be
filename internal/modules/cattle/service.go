@@ -562,6 +562,19 @@ func (s *service) CloseMVUCase(ctx context.Context, actor auth.Actor, caseID pri
 		return nil, s.logFailure(ctx, "reload mvu case", err,
 			slog.String("case_id", mvuCase.ID.Hex()))
 	}
+	// Notify the requesting farmer that the visit is complete (mvu.closed →
+	// platformops). Same explicit key discipline as the dispatch event: the
+	// subscriber decodes structurally, so the case id travels under "case_id".
+	closedAnimalHex := ""
+	if closed.AnimalID != nil {
+		closedAnimalHex = closed.AnimalID.Hex()
+	}
+	s.d.Bus.Publish(eventbus.TopicMVUClosed, map[string]any{
+		"case_id":         closed.ID.Hex(),
+		"farmer_party_id": closed.FarmerPartyID.Hex(),
+		"animal_id":       closedAnimalHex,
+		"dcs_id":          closed.DCSID.Hex(),
+	})
 	s.log.InfoContext(ctx, "mvu case closed",
 		slog.String("case_id", closed.ID.Hex()),
 		slog.String("farmer_party_id", closed.FarmerPartyID.Hex()),
