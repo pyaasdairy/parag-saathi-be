@@ -215,6 +215,29 @@ func (r *repository) upsertPartyByPhone(ctx context.Context, phone, fullName str
 	return &p, nil
 }
 
+// enrichPartyProfile fills the field-captured profile (Hindi name, village,
+// profile photo URL) onto the party at approval time. Only non-empty capture
+// values are written — approval never blanks existing data.
+func (r *repository) enrichPartyProfile(ctx context.Context, id primitive.ObjectID, fullNameHi, village, profilePhotoURL string, now time.Time) error {
+	set := bson.D{{Key: "updated_at", Value: now}}
+	if fullNameHi != "" {
+		set = append(set, bson.E{Key: "full_name_hi", Value: fullNameHi})
+	}
+	if village != "" {
+		set = append(set, bson.E{Key: "village", Value: village})
+	}
+	if profilePhotoURL != "" {
+		set = append(set, bson.E{Key: "profile_photo_url", Value: profilePhotoURL})
+	}
+	if len(set) == 1 { // nothing captured — skip the write
+		return nil
+	}
+	if _, err := r.parties.UpdateByID(ctx, id, bson.D{{Key: "$set", Value: set}}); err != nil {
+		return httpx.Internal(fmt.Errorf("enrich party profile: %w", err))
+	}
+	return nil
+}
+
 // updatePartyKYCTier sets the party's KYC tier.
 func (r *repository) updatePartyKYCTier(ctx context.Context, id primitive.ObjectID, tier string, now time.Time) error {
 	_, err := r.parties.UpdateByID(ctx, id, bson.D{{Key: "$set", Value: bson.D{

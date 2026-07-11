@@ -276,6 +276,17 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 		return nil, err
 	}
 
+	// 1b. Stamp the field-captured profile (photo URL, village, Hindi name)
+	// onto the party — the profile must be visible in `parties` right after
+	// verification, not stranded on the request document. Best-effort: the
+	// request is already APPROVED (a hard failure here would strand it — the
+	// retry hits the not-PENDING 409), and the KYC/role writes below matter
+	// more than cosmetics, so log and continue.
+	if err := s.repo.enrichPartyProfile(ctx, party.ID, claimed.FullNameHi, claimed.Village, claimed.ProfilePhotoURL, now); err != nil {
+		s.log.ErrorContext(ctx, "onboarding approve: profile enrichment failed (continuing)",
+			slog.String("request_id", id.Hex()), slog.String("party_id", party.ID.Hex()), slog.Any("err", err))
+	}
+
 	// 2. Write a VERIFIED KYC record at the requested tier, reviewer-stamped.
 	kyc := domain.KYCRecord{
 		ID:             primitive.NewObjectID(),
