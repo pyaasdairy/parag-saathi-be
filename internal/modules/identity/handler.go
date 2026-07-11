@@ -445,6 +445,64 @@ func (h *handler) revokeAssignment(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, assignment)
 }
 
+// transferAssignment handles POST /roles/assignments/{id}/transfer — move an
+// ACTIVE assignment's role to another org unit (create new + revoke old).
+func (h *handler) transferAssignment(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	id, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req transferAssignmentRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if err := req.validate(); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	resp, err := h.svc.transferAssignment(r.Context(), actor, id, req.ToOrgUnitID)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
+// replaceHolder handles POST /orgs/{id}/replace-holder — swap THE holder of a
+// role at an org unit (grant to the new party, revoke every other holder).
+func (h *handler) replaceHolder(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorOr401(w, r)
+	if !ok {
+		return
+	}
+	orgUnitID, err := httpx.PathID(r, "id")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req replaceHolderRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if err := req.validate(); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	resp, err := h.svc.replaceHolder(r.Context(), actor, orgUnitID, req.RoleCode, req.NewPartyID)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
 // listAssignments handles GET /roles/assignments?org_unit_id=&role_code=.
 func (h *handler) listAssignments(w http.ResponseWriter, r *http.Request) {
 	actor, ok := actorOr401(w, r)

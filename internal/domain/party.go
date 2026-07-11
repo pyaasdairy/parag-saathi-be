@@ -22,6 +22,9 @@ type Party struct {
 	FullName          string             `bson:"full_name,omitempty"          json:"full_name,omitempty"`
 	FullNameHi        string             `bson:"full_name_hi,omitempty"       json:"full_name_hi,omitempty"` // vernacular display name
 	Village           string             `bson:"village,omitempty"            json:"village,omitempty"`       // home village (self-reported)
+	// ProfilePhotoURL is the hosted profile picture (S3/CDN object URL; the
+	// deploy-test seed stamps a fixture image via SEED_PROFILE_PHOTO_URL).
+	ProfilePhotoURL   string             `bson:"profile_photo_url,omitempty"  json:"profile_photo_url,omitempty"`
 	PreferredLanguage string             `bson:"preferred_language,omitempty" json:"preferred_language,omitempty"` // "hi", "en", ...
 	KYCTier           string             `bson:"kyc_tier"      json:"kyc_tier"`
 	Status            string             `bson:"status"        json:"status"`

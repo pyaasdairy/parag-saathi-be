@@ -126,19 +126,29 @@ type WorkerRunResponse struct {
 
 // PartyRoleView is one active role grant in the support lookup view.
 type PartyRoleView struct {
-	RoleCode  string `json:"role_code"`
-	OrgUnitID string `json:"org_unit_id"`
-	OrgName   string `json:"org_name,omitempty"`
+	RoleCode  string    `json:"role_code"`
+	OrgUnitID string    `json:"org_unit_id"`
+	OrgName   string    `json:"org_name,omitempty"`
+	Status    string    `json:"status"`
+	ValidFrom time.Time `json:"valid_from"`
 }
 
-// PartyLookupResponse is the limited-PII support view (§5.2 role 20):
-// identity basics and role grants only — never KYC document numbers.
+// PartyLookupResponse is the support/admin phone-search view: the ENTIRE
+// basic profile — identity basics, member-since, every active role with its
+// org name, plus MASKED KYC evidence only (aadhaar last-4, bank tail) — never
+// full document or account numbers (§5.2 role 20 / §18-A).
 type PartyLookupResponse struct {
-	PartyID  string          `json:"party_id"`
-	FullName string          `json:"full_name,omitempty"`
-	KYCTier  string          `json:"kyc_tier"`
-	Status   string          `json:"status"`
-	Roles    []PartyRoleView `json:"roles"`
+	PartyID       string          `json:"party_id"`
+	FullName      string          `json:"full_name,omitempty"`
+	FullNameHi    string          `json:"full_name_hi,omitempty"`
+	Phone         string          `json:"phone"`
+	Village       string          `json:"village,omitempty"`
+	KYCTier       string          `json:"kyc_tier"`
+	Status        string          `json:"status"`
+	AadhaarMasked string          `json:"aadhaar_masked,omitempty"`
+	BankMasked    string          `json:"bank_masked,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	Roles         []PartyRoleView `json:"roles"`
 }
 
 // listMeta is the pagination metadata attached to list responses.

@@ -463,6 +463,9 @@ func renderSMS(templateKey string, params map[string]string) (english, hindi str
 	case domain.TemplateRoleGranted:
 		return fmt.Sprintf("You have been granted the %s role at %s. - Saathi", p("role"), p("org_name")),
 			fmt.Sprintf("आपको %s पर %s की भूमिका दी गई है। - साथी", p("org_name"), p("role"))
+	case domain.TemplateRoleRevoked:
+		return fmt.Sprintf("Your %s role at %s has been revoked. Contact your union office for details. - Saathi", p("role"), p("org_name")),
+			fmt.Sprintf("आपकी %s पर %s की भूमिका समाप्त की गई है। जानकारी के लिए संघ कार्यालय से संपर्क करें। - साथी", p("org_name"), p("role"))
 	case domain.TemplateOnboardingApproved:
 		return fmt.Sprintf("Your onboarding as %s at %s is approved. Welcome to Saathi.", p("role"), p("org_name")),
 			fmt.Sprintf("%s पर %s के रूप में आपका पंजीकरण स्वीकृत हुआ। साथी में आपका स्वागत है।", p("org_name"), p("role"))
@@ -535,19 +538,37 @@ func (s *service) lookupParty(ctx context.Context, phone string) (*PartyLookupRe
 			RoleCode:  assignment.RoleCode,
 			OrgUnitID: assignment.OrgUnitID.Hex(),
 			OrgName:   orgName,
+			Status:    assignment.Status,
+			ValidFrom: assignment.ValidFrom,
 		})
+	}
+
+	// Masked KYC evidence only — the full Aadhaar / account numbers are never
+	// persisted anywhere, so the strongest thing this view CAN show is the tail.
+	aadhaarLast4, bankMasked, err := s.repo.latestKYCEvidence(ctx, party.ID)
+	if err != nil {
+		return nil, err
+	}
+	aadhaarMasked := ""
+	if aadhaarLast4 != "" {
+		aadhaarMasked = "XXXX-XXXX-" + aadhaarLast4
 	}
 
 	s.log.InfoContext(ctx, "support party lookup",
 		slog.String("party_id", party.ID.Hex()), slog.Int("roles", len(roles)))
 
-	// Limited PII by construction: no KYC document numbers, no bank details.
 	return &PartyLookupResponse{
-		PartyID:  party.ID.Hex(),
-		FullName: party.FullName,
-		KYCTier:  party.KYCTier,
-		Status:   party.Status,
-		Roles:    roles,
+		PartyID:       party.ID.Hex(),
+		FullName:      party.FullName,
+		FullNameHi:    party.FullNameHi,
+		Phone:         party.Phone,
+		Village:       party.Village,
+		KYCTier:       party.KYCTier,
+		Status:        party.Status,
+		AadhaarMasked: aadhaarMasked,
+		BankMasked:    bankMasked,
+		CreatedAt:     party.CreatedAt,
+		Roles:         roles,
 	}, nil
 }
 

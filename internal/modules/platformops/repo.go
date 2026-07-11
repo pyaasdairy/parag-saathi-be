@@ -308,6 +308,35 @@ func (r *repository) listActiveAssignmentsForParty(ctx context.Context, partyID 
 	return assignments, nil
 }
 
+// latestKYCEvidence scans the party's KYC records newest-first and returns the
+// most recent MASKED evidence of each kind: aadhaar last-4 and the masked bank
+// account tail. Only ever masked values — full numbers are never persisted.
+func (r *repository) latestKYCEvidence(ctx context.Context, partyID primitive.ObjectID) (aadhaarLast4, bankMasked string, err error) {
+	cur, err := r.kyc.Find(ctx,
+		bson.D{{Key: "party_id", Value: partyID}},
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(50),
+	)
+	if err != nil {
+		return "", "", httpx.Internal(fmt.Errorf("find kyc evidence: %w", err))
+	}
+	var records []domain.KYCRecord
+	if err := cur.All(ctx, &records); err != nil {
+		return "", "", httpx.Internal(fmt.Errorf("decode kyc evidence: %w", err))
+	}
+	for _, rec := range records {
+		if aadhaarLast4 == "" && rec.AadhaarLast4 != "" {
+			aadhaarLast4 = rec.AadhaarLast4
+		}
+		if bankMasked == "" && rec.BankAccountMasked != "" {
+			bankMasked = rec.BankAccountMasked
+		}
+		if aadhaarLast4 != "" && bankMasked != "" {
+			break
+		}
+	}
+	return aadhaarLast4, bankMasked, nil
+}
+
 // listActiveRoleHolders returns the ACTIVE assignments of one role inside one
 // org unit (bounded — used to address supervisor safety alerts).
 func (r *repository) listActiveRoleHolders(ctx context.Context, orgUnitID primitive.ObjectID, roleCode string) ([]domain.RoleAssignment, error) {

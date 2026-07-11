@@ -37,6 +37,7 @@ const (
 
 	// Role/onboarding lifecycle (params carry human-readable names, not ids).
 	TemplateRoleGranted         = "ROLE_GRANTED"         // to the grantee: role + org name
+	TemplateRoleRevoked         = "ROLE_REVOKED"         // to the former holder: role + org name
 	TemplateOnboardingApproved  = "ONBOARDING_APPROVED"  // to the onboarded party: role + org name
 	TemplateOnboardingRejected  = "ONBOARDING_REJECTED"  // to the applicant phone: role + reason
 

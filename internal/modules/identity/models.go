@@ -340,6 +340,50 @@ func (r createAssignmentRequest) validate() error {
 	return nil
 }
 
+// transferAssignmentRequest moves an ACTIVE assignment to another org unit
+// (POST /roles/assignments/{id}/transfer).
+type transferAssignmentRequest struct {
+	ToOrgUnitID primitive.ObjectID `json:"to_org_unit_id"`
+}
+
+func (r transferAssignmentRequest) validate() error {
+	if r.ToOrgUnitID.IsZero() {
+		return httpx.BadRequest("MISSING_ORG_UNIT", "to_org_unit_id is required")
+	}
+	return nil
+}
+
+// transferAssignmentResponse carries both halves of the completed move.
+type transferAssignmentResponse struct {
+	Created *domain.RoleAssignment `json:"created"`
+	Revoked *domain.RoleAssignment `json:"revoked"`
+}
+
+// replaceHolderRequest swaps THE holder of a role at an org unit
+// (POST /orgs/{id}/replace-holder).
+type replaceHolderRequest struct {
+	RoleCode   string             `json:"role_code"`
+	NewPartyID primitive.ObjectID `json:"new_party_id"`
+}
+
+func (r replaceHolderRequest) validate() error {
+	if !domain.IsValidRole(r.RoleCode) {
+		return httpx.BadRequest("INVALID_ROLE", "role_code is not in the role catalog")
+	}
+	if r.NewPartyID.IsZero() {
+		return httpx.BadRequest("MISSING_PARTY", "new_party_id is required")
+	}
+	return nil
+}
+
+// replaceHolderResponse reports the incoming holder's assignment (created, or
+// pre-existing when already_holder) and every displaced assignment revoked.
+type replaceHolderResponse struct {
+	Assignment    *domain.RoleAssignment  `json:"assignment"`
+	AlreadyHolder bool                    `json:"already_holder"`
+	Revoked       []domain.RoleAssignment `json:"revoked"`
+}
+
 // listMeta is the pagination meta block for list endpoints.
 type listMeta struct {
 	Limit  int64 `json:"limit"`

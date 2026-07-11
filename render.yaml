@@ -1,0 +1,44 @@
+# Render Blueprint — deploy the Saathi backend as a Docker web service.
+# Usage: push this repo to GitHub → Render Dashboard → New → Blueprint →
+# pick the repo. Render reads this file and provisions everything below.
+# (Or create a single "Web Service" manually with the same settings.)
+services:
+  - type: web
+    name: saathi-backend
+    runtime: docker
+    plan: free # upgrade to starter for always-on (free spins down when idle)
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: ENV
+        value: dev
+      - key: LOG_LEVEL
+        value: info
+      # Render injects PORT; the server reads it (config envInt("PORT", 8080)).
+      # MongoDB Atlas — set these in the Render dashboard (kept out of git):
+      - key: MONGO_URI
+        sync: false # paste: mongodb+srv://<user>:<password>@<cluster-host>
+      - key: MONGO_DB
+        value: saathi_dev
+      # Secrets — let Render generate strong values:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: QR_SIGNING_SECRET
+        generateValue: true
+      - key: OTP_HASH_SECRET
+        generateValue: true
+      # Testing conveniences (flip OFF for production):
+      - key: OTP_DEV_MODE
+        value: "true"
+      - key: SEED_ADMIN_PHONE
+        value: "9999999999"
+      - key: ACCESS_TOKEN_TTL_MINUTES
+        value: "15"
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: "30"
+      - key: OTP_TTL_MINUTES
+        value: "5"
+      - key: RATE_LIMIT_RPS
+        value: "200"
+      - key: RATE_LIMIT_BURST
+        value: "500"

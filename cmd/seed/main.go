@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -25,7 +26,14 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/mongodb"
 )
 
+// minimalMode seeds ONLY the org tree + the super admin + one onboarding
+// executive — the clean slate for a deploy-test database (e.g. Atlas):
+// everything else is created through the app itself.
+var minimalMode = flag.Bool("minimal", false,
+	"seed only org tree + super admin + one onboarding executive (deploy-test)")
+
 func main() {
+	flag.Parse()
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "seed failed:", err)
 		os.Exit(1)
@@ -140,6 +148,46 @@ func run() error {
 	}
 
 	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2, dcs3}
+
+	// ── Deploy-test minimal mode: org tree + admin + one onboarding exec ────
+	if *minimalMode {
+		// Fixture profile photo (env-only by policy; empty → no photo).
+		profilePhoto := os.Getenv("SEED_PROFILE_PHOTO_URL")
+		type minParty struct {
+			phone, name, nameHi, tier, role string
+			org                             primitive.ObjectID
+		}
+		for _, sp := range []minParty{
+			{cfg.SeedAdminPhone, "Platform Admin", "", domain.KYCTierHighest, domain.RoleSuperAdmin, federation.ID},
+			{"9876500014", "Neha Tripathi", "नेहा त्रिपाठी", domain.KYCTierHigh, domain.RoleOnboardingExecutive, union.ID},
+		} {
+			party, err := upsertParty(ctx, db, domain.Party{
+				Phone: sp.phone, FullName: sp.name, FullNameHi: sp.nameHi,
+				PreferredLanguage: "hi", ProfilePhotoURL: profilePhoto,
+				KYCTier: sp.tier, Status: domain.PartyStatusActive, CreatedAt: now, UpdatedAt: now,
+			})
+			if err != nil {
+				return fmt.Errorf("minimal party %s: %w", sp.name, err)
+			}
+			if profilePhoto != "" {
+				if _, err := db.Collection(mongodb.CollParties).UpdateByID(ctx, party.ID,
+					bson.D{{Key: "$set", Value: bson.D{{Key: "profile_photo_url", Value: profilePhoto}, {Key: "updated_at", Value: now}}}}); err != nil {
+					return fmt.Errorf("minimal party photo %s: %w", sp.name, err)
+				}
+			}
+			if err := upsertRoleAssignment(ctx, db, domain.RoleAssignment{
+				PartyID: party.ID, RoleCode: sp.role, OrgUnitID: sp.org,
+				ValidFrom: now.Add(-24 * time.Hour), Status: domain.RoleAssignmentActive, CreatedAt: now,
+			}); err != nil {
+				return fmt.Errorf("minimal role %s: %w", sp.role, err)
+			}
+			fmt.Printf("  party %-16s %-22s %s\n", sp.phone, sp.role, party.ID.Hex())
+		}
+		fmt.Println("✔ minimal seed complete (org tree + SUPER_ADMIN " + cfg.SeedAdminPhone +
+			" + ONBOARDING_EXECUTIVE 9876500014) — onboard everything else through the app")
+		_ = orgs
+		return nil
+	}
 
 	// ── Parties (find-or-insert by unique `phone`) + role assignments ───────
 	type seedParty struct {

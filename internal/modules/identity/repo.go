@@ -479,6 +479,25 @@ func (r *repository) getIntSetting(ctx context.Context, key string, fallback int
 	return doc.IntValue, nil
 }
 
+// listActiveAssignmentsForRole returns every ACTIVE assignment of one role at
+// a single org unit — the holder set the replace-holder swap operates on.
+func (r *repository) listActiveAssignmentsForRole(ctx context.Context, roleCode string, orgUnitID primitive.ObjectID) ([]domain.RoleAssignment, error) {
+	filter := bson.D{
+		{Key: "role_code", Value: roleCode},
+		{Key: "org_unit_id", Value: orgUnitID},
+		{Key: "status", Value: domain.RoleAssignmentActive},
+	}
+	cur, err := r.assignments.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("list active %s at org: %w", roleCode, err))
+	}
+	out := make([]domain.RoleAssignment, 0)
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode active %s at org: %w", roleCode, err))
+	}
+	return out, nil
+}
+
 // insertAssignment stores a new role assignment.
 func (r *repository) insertAssignment(ctx context.Context, ra domain.RoleAssignment) error {
 	if _, err := r.assignments.InsertOne(ctx, ra); err != nil {

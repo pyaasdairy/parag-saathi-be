@@ -1188,6 +1188,60 @@ func (s *service) verifyPartyKYC(ctx context.Context, actor auth.Actor, partyID 
 
 // --- Role administration ---
 
+// notifyRoleChange queues the ROLE_GRANTED / ROLE_REVOKED SMS to a party with
+// human-readable role + org name params (never bare ids). Best-effort — a
+// notify failure never voids the durable role change.
+func (s *service) notifyRoleChange(ctx context.Context, party *domain.Party, templateKey, roleCode, orgName string, now time.Time) {
+	language := party.PreferredLanguage
+	if language == "" {
+		language = defaultLanguage
+	}
+	pid := party.ID
+	if err := s.repo.insertNotification(ctx, domain.Notification{
+		PartyID:     &pid,
+		Phone:       party.Phone,
+		Channel:     domain.ChannelSMS,
+		TemplateKey: templateKey,
+		Language:    language,
+		Params: map[string]string{
+			"role":     roleCode,
+			"org_name": orgName,
+		},
+		Status:   domain.NotificationQueued,
+		QueuedAt: now,
+	}); err != nil {
+		s.log.ErrorContext(ctx, "role change notify failed",
+			slog.String("party_id", party.ID.Hex()),
+			slog.String("template_key", templateKey), slog.Any("err", err))
+	}
+}
+
+// vouchTierForRole lifts the party's KYC tier up to the role's required tier
+// (Developer Note §2: the authorised grant IS the cooperative's verification
+// for the appointment). No-op when the tier is already sufficient; tier only
+// ever moves up, never down.
+func (s *service) vouchTierForRole(ctx context.Context, actor auth.Actor, party *domain.Party, roleCode string, now time.Time) error {
+	reqTier := domain.RequiredKYCTier[roleCode]
+	if reqTier == "" || domain.KYCTierSatisfies(party.KYCTier, reqTier) {
+		return nil
+	}
+	if err := s.repo.updatePartyKYCTier(ctx, party.ID, reqTier, now); err != nil {
+		return err
+	}
+	party.KYCTier = reqTier
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "kyc.tier_vouched",
+		TargetType: "party",
+		TargetID:   party.ID.Hex(),
+		Meta:       map[string]any{"tier": reqTier, "via_role": roleCode, "granted_by": actor.PartyID},
+	})
+	s.log.InfoContext(ctx, "party KYC tier vouched on role grant",
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("tier", reqTier),
+		slog.String("role_code", roleCode))
+	return nil
+}
+
 // requireGrantAuthority enforces the non-admin granter matrix (§5.2):
 // UNION_PRESIDENT manages village/logistics/union-tier roles anywhere in
 // scope; SAMITI_ADHYAKSH manages only FARMER/MILK_TESTER/LRP inside their
@@ -1330,47 +1384,15 @@ func (s *service) createAssignment(ctx context.Context, actor auth.Actor, req cr
 
 	// Notify the grantee (role.granted): human-readable role + org name, never
 	// bare ids. Best-effort — a notify failure never voids the durable grant.
-	granteeLanguage := party.PreferredLanguage
-	if granteeLanguage == "" {
-		granteeLanguage = defaultLanguage
-	}
-	granteeID := party.ID
-	if err := s.repo.insertNotification(ctx, domain.Notification{
-		PartyID:     &granteeID,
-		Phone:       party.Phone,
-		Channel:     domain.ChannelSMS,
-		TemplateKey: domain.TemplateRoleGranted,
-		Language:    granteeLanguage,
-		Params: map[string]string{
-			"role":     req.RoleCode,
-			"org_name": targetOrg.Name,
-		},
-		Status:   domain.NotificationQueued,
-		QueuedAt: now,
-	}); err != nil {
-		s.log.ErrorContext(ctx, "role grant notify failed",
-			slog.String("assignment_id", assignment.ID.Hex()), slog.Any("err", err))
-	}
+	s.notifyRoleChange(ctx, party, domain.TemplateRoleGranted, req.RoleCode, targetOrg.Name, now)
 
 	// Developer Note §2: "a person receives the modules their role grants." The
 	// authorised admin grant IS the cooperative's verification for this
 	// appointment, so it vouches the party up to the tier the role requires —
 	// otherwise a just-granted role would be un-activatable (role/select would
 	// 403 KYC_TIER_INSUFFICIENT). Tier only ever moves up, never down.
-	if reqTier := domain.RequiredKYCTier[req.RoleCode]; reqTier != "" && !domain.KYCTierSatisfies(party.KYCTier, reqTier) {
-		if err := s.repo.updatePartyKYCTier(ctx, party.ID, reqTier, now); err != nil {
-			return nil, err
-		}
-		s.deps.Audit.Record(ctx, audit.Entry{
-			Action:     "kyc.tier_vouched",
-			TargetType: "party",
-			TargetID:   party.ID.Hex(),
-			Meta:       map[string]any{"tier": reqTier, "via_role": req.RoleCode, "granted_by": actor.PartyID},
-		})
-		s.log.InfoContext(ctx, "party KYC tier vouched on role grant",
-			slog.String("party_id", party.ID.Hex()),
-			slog.String("tier", reqTier),
-			slog.String("role_code", req.RoleCode))
+	if err := s.vouchTierForRole(ctx, actor, party, req.RoleCode, now); err != nil {
+		return nil, err
 	}
 	return &assignment, nil
 }
@@ -1423,7 +1445,297 @@ func (s *service) revokeAssignment(ctx context.Context, actor auth.Actor, assign
 		slog.String("party_id", revoked.PartyID.Hex()),
 		slog.String("role_code", revoked.RoleCode),
 		slog.String("actor_party_id", actor.PartyID))
+
+	// Notify the former holder (role.revoked). Best-effort — a lookup or
+	// notify failure never voids the durable revocation.
+	if party, perr := s.repo.findPartyByID(ctx, revoked.PartyID); perr == nil {
+		orgName := ""
+		if org, oerr := s.deps.Orgs.Get(ctx, revoked.OrgUnitID); oerr == nil {
+			orgName = org.Name
+		}
+		s.notifyRoleChange(ctx, party, domain.TemplateRoleRevoked, revoked.RoleCode, orgName, time.Now().UTC())
+	} else {
+		s.log.ErrorContext(ctx, "role revoke notify skipped: party lookup failed",
+			slog.String("party_id", revoked.PartyID.Hex()), slog.Any("err", perr))
+	}
 	return revoked, nil
+}
+
+// transferAssignment moves an ACTIVE assignment's role to another org unit —
+// the "move this van rider to another union / this sachiv to another DCS"
+// admin action. Authority mirrors grant (requireGrantAuthority + org scope on
+// BOTH ends); the target must pass the same org-type and sachiv-cap gates as a
+// fresh grant. Executed as a best-effort saga: the NEW assignment is created
+// first, then the old one is revoked — on create failure nothing changes; on
+// revoke failure the just-created assignment is compensated away.
+func (s *service) transferAssignment(ctx context.Context, actor auth.Actor, assignmentID, toOrgUnitID primitive.ObjectID) (*transferAssignmentResponse, error) {
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	assignment, err := s.repo.findAssignmentByID(ctx, assignmentID)
+	if err != nil {
+		return nil, err
+	}
+	if assignment.Status != domain.RoleAssignmentActive {
+		s.log.WarnContext(ctx, "assignment transfer rejected: not active",
+			slog.String("assignment_id", assignmentID.Hex()), slog.String("status", assignment.Status))
+		return nil, httpx.Conflict("ASSIGNMENT_NOT_ACTIVE", "only an ACTIVE role assignment can be transferred")
+	}
+	if toOrgUnitID == assignment.OrgUnitID {
+		return nil, httpx.BadRequest("SAME_ORG_UNIT", "the assignment already belongs to this org unit")
+	}
+
+	// Scope + granter authority on BOTH the source (being revoked) and the
+	// target (being granted) org units — exactly the grant/revoke rules.
+	if err := s.deps.Orgs.RequireInScope(ctx, actor, assignment.OrgUnitID); err != nil {
+		s.log.WarnContext(ctx, "assignment transfer denied: source out of scope",
+			slog.String("actor_party_id", actor.PartyID), slog.String("assignment_id", assignmentID.Hex()))
+		return nil, err
+	}
+	if err := s.deps.Orgs.RequireInScope(ctx, actor, toOrgUnitID); err != nil {
+		s.log.WarnContext(ctx, "assignment transfer denied: target out of scope",
+			slog.String("actor_party_id", actor.PartyID), slog.String("to_org_unit_id", toOrgUnitID.Hex()))
+		return nil, err
+	}
+	if err := s.requireGrantAuthority(actor, assignment.RoleCode, toOrgUnitID); err != nil {
+		s.log.WarnContext(ctx, "assignment transfer denied: granter not authorised",
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("granter_role", actor.RoleCode),
+			slog.String("role_code", assignment.RoleCode))
+		return nil, err
+	}
+
+	party, err := s.repo.findPartyByID(ctx, assignment.PartyID)
+	if err != nil {
+		return nil, err
+	}
+	sourceOrgName := ""
+	if sourceOrg, oerr := s.deps.Orgs.Get(ctx, assignment.OrgUnitID); oerr == nil {
+		sourceOrgName = sourceOrg.Name
+	}
+
+	// Org-type validation (§5.1): same central gate as a fresh grant.
+	targetOrg, err := s.deps.Orgs.Get(ctx, toOrgUnitID)
+	if err != nil {
+		return nil, err
+	}
+	if !domain.RoleAllowedAtOrgType(assignment.RoleCode, targetOrg.Type) {
+		allowed := strings.Join(domain.RoleAllowedOrgTypes[assignment.RoleCode], ", ")
+		return nil, httpx.BadRequest("INVALID_ORG_TYPE",
+			assignment.RoleCode+" may only be assigned at org type "+allowed+", not "+targetOrg.Type)
+	}
+	exists, err := s.repo.activeAssignmentExists(ctx, party.ID, assignment.RoleCode, toOrgUnitID)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, httpx.Conflict("ASSIGNMENT_EXISTS", "party already holds an active "+assignment.RoleCode+" assignment in the target org unit")
+	}
+	// Sachiv governance cap (§5.2) applies at the TARGET DCS.
+	if assignment.RoleCode == domain.RoleSamitiSacheev {
+		capValue, err := s.repo.getIntSetting(ctx, sachivCapSettingKey, defaultSachivCap)
+		if err != nil {
+			return nil, err
+		}
+		appointed, err := s.repo.countActiveRoleHoldersInOrg(ctx, domain.RoleSamitiSacheev, toOrgUnitID)
+		if err != nil {
+			return nil, err
+		}
+		if appointed >= capValue {
+			return nil, httpx.Conflict("SACHIV_CAP_REACHED",
+				fmt.Sprintf("the target DCS already has %d of %d permitted Sachivs", appointed, capValue))
+		}
+	}
+
+	now := time.Now().UTC()
+	created := domain.RoleAssignment{
+		ID:        primitive.NewObjectID(),
+		PartyID:   party.ID,
+		RoleCode:  assignment.RoleCode,
+		OrgUnitID: toOrgUnitID,
+		GrantedBy: &aid,
+		ValidFrom: now,
+		ValidTo:   assignment.ValidTo, // the transfer keeps the original validity ceiling
+		Status:    domain.RoleAssignmentActive,
+		CreatedAt: now,
+	}
+	// Saga step 1: create the NEW assignment first — on failure nothing changed.
+	if err := s.repo.insertAssignment(ctx, created); err != nil {
+		return nil, err
+	}
+	// Saga step 2: revoke the OLD assignment; on failure compensate by
+	// revoking the just-created one so the transfer is all-or-nothing.
+	revoked, err := s.repo.revokeAssignment(ctx, assignmentID, aid, now)
+	if err != nil {
+		if _, cerr := s.repo.revokeAssignment(ctx, created.ID, aid, now); cerr != nil {
+			s.log.ErrorContext(ctx, "assignment transfer compensation failed — new assignment left active",
+				slog.String("created_assignment_id", created.ID.Hex()), slog.Any("err", cerr))
+		}
+		return nil, err
+	}
+
+	// The grant vouches the tier (no-op when already sufficient — the party
+	// held this very role, so this only matters after a manual downgrade).
+	if err := s.vouchTierForRole(ctx, actor, party, assignment.RoleCode, now); err != nil {
+		return nil, err
+	}
+
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "role.transfer",
+		TargetType: "role_assignment",
+		TargetID:   assignmentID.Hex(),
+		Meta: map[string]any{
+			"party_id":          party.ID.Hex(),
+			"role_code":         assignment.RoleCode,
+			"from_org_unit_id":  assignment.OrgUnitID.Hex(),
+			"to_org_unit_id":    toOrgUnitID.Hex(),
+			"new_assignment_id": created.ID.Hex(),
+		},
+	})
+	s.log.InfoContext(ctx, "role assignment transferred",
+		slog.String("assignment_id", assignmentID.Hex()),
+		slog.String("new_assignment_id", created.ID.Hex()),
+		slog.String("party_id", party.ID.Hex()),
+		slog.String("role_code", assignment.RoleCode),
+		slog.String("from_org_unit_id", assignment.OrgUnitID.Hex()),
+		slog.String("to_org_unit_id", toOrgUnitID.Hex()),
+		slog.String("actor_party_id", actor.PartyID))
+
+	// Notify the party about both halves of the move. Best-effort.
+	s.notifyRoleChange(ctx, party, domain.TemplateRoleGranted, created.RoleCode, targetOrg.Name, now)
+	s.notifyRoleChange(ctx, party, domain.TemplateRoleRevoked, revoked.RoleCode, sourceOrgName, now)
+
+	return &transferAssignmentResponse{Created: &created, Revoked: revoked}, nil
+}
+
+// replaceHolder swaps THE holder of a role at an org unit — "change the
+// sachiv of this DCS": grants roleCode at orgUnitID to newPartyID and revokes
+// every OTHER active holder of that role there. The sachiv cap is deliberately
+// NOT checked (the swap is net-zero on headcount); org-type validation, org
+// scope, granter authority and tier vouching all match a fresh grant.
+func (s *service) replaceHolder(ctx context.Context, actor auth.Actor, orgUnitID primitive.ObjectID, roleCode string, newPartyID primitive.ObjectID) (*replaceHolderResponse, error) {
+	aid, err := actorID(actor)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.deps.Orgs.RequireInScope(ctx, actor, orgUnitID); err != nil {
+		s.log.WarnContext(ctx, "replace holder denied: out of scope",
+			slog.String("actor_party_id", actor.PartyID), slog.String("org_unit_id", orgUnitID.Hex()))
+		return nil, err
+	}
+	if err := s.requireGrantAuthority(actor, roleCode, orgUnitID); err != nil {
+		s.log.WarnContext(ctx, "replace holder denied: granter not authorised",
+			slog.String("actor_party_id", actor.PartyID),
+			slog.String("granter_role", actor.RoleCode),
+			slog.String("role_code", roleCode))
+		return nil, err
+	}
+	org, err := s.deps.Orgs.Get(ctx, orgUnitID)
+	if err != nil {
+		return nil, err
+	}
+	if !domain.RoleAllowedAtOrgType(roleCode, org.Type) {
+		allowed := strings.Join(domain.RoleAllowedOrgTypes[roleCode], ", ")
+		return nil, httpx.BadRequest("INVALID_ORG_TYPE",
+			roleCode+" may only be assigned at org type "+allowed+", not "+org.Type)
+	}
+	newHolder, err := s.repo.findPartyByID(ctx, newPartyID)
+	if err != nil {
+		return nil, err
+	}
+
+	current, err := s.repo.listActiveAssignmentsForRole(ctx, roleCode, orgUnitID)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	resp := &replaceHolderResponse{Revoked: []domain.RoleAssignment{}}
+
+	// Grant to the incoming holder first (create-then-revoke saga, same as
+	// transfer) unless they already hold the role here (idempotent replay).
+	for _, ra := range current {
+		if ra.PartyID == newPartyID {
+			existing := ra
+			resp.Assignment = &existing
+			resp.AlreadyHolder = true
+			break
+		}
+	}
+	if resp.Assignment == nil {
+		created := domain.RoleAssignment{
+			ID:        primitive.NewObjectID(),
+			PartyID:   newHolder.ID,
+			RoleCode:  roleCode,
+			OrgUnitID: orgUnitID,
+			GrantedBy: &aid,
+			ValidFrom: now,
+			Status:    domain.RoleAssignmentActive,
+			CreatedAt: now,
+		}
+		if err := s.repo.insertAssignment(ctx, created); err != nil {
+			return nil, err
+		}
+		resp.Assignment = &created
+	}
+
+	// Revoke every OTHER active holder of this role at this org. Each
+	// revocation notifies its former holder.
+	for _, ra := range current {
+		if ra.PartyID == newPartyID {
+			continue
+		}
+		revoked, rerr := s.repo.revokeAssignment(ctx, ra.ID, aid, now)
+		if rerr != nil {
+			if isNotFound(rerr) {
+				continue // a concurrent revoke won — already inactive
+			}
+			return nil, rerr
+		}
+		resp.Revoked = append(resp.Revoked, *revoked)
+		if oldParty, perr := s.repo.findPartyByID(ctx, revoked.PartyID); perr == nil {
+			s.notifyRoleChange(ctx, oldParty, domain.TemplateRoleRevoked, roleCode, org.Name, now)
+		} else {
+			s.log.ErrorContext(ctx, "replace holder revoke notify skipped: party lookup failed",
+				slog.String("party_id", revoked.PartyID.Hex()), slog.Any("err", perr))
+		}
+	}
+
+	// Vouch the incoming holder's tier so the new role is activatable.
+	if err := s.vouchTierForRole(ctx, actor, newHolder, roleCode, now); err != nil {
+		return nil, err
+	}
+
+	revokedIDs := make([]string, 0, len(resp.Revoked))
+	for _, ra := range resp.Revoked {
+		revokedIDs = append(revokedIDs, ra.ID.Hex())
+	}
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "role.replace_holder",
+		TargetType: "org_unit",
+		TargetID:   orgUnitID.Hex(),
+		Meta: map[string]any{
+			"role_code":              roleCode,
+			"new_party_id":           newHolder.ID.Hex(),
+			"new_assignment_id":      resp.Assignment.ID.Hex(),
+			"already_holder":         resp.AlreadyHolder,
+			"revoked_assignment_ids": revokedIDs,
+		},
+	})
+	s.log.InfoContext(ctx, "role holder replaced",
+		slog.String("org_unit_id", orgUnitID.Hex()),
+		slog.String("role_code", roleCode),
+		slog.String("new_party_id", newHolder.ID.Hex()),
+		slog.Int("revoked", len(resp.Revoked)),
+		slog.String("actor_party_id", actor.PartyID))
+
+	// Notify the incoming holder (skip on an idempotent replay — they were
+	// already told when first granted).
+	if !resp.AlreadyHolder {
+		s.notifyRoleChange(ctx, newHolder, domain.TemplateRoleGranted, roleCode, org.Name, now)
+	}
+	return resp, nil
 }
 
 // listAssignments pages assignments inside one org unit the actor can see.

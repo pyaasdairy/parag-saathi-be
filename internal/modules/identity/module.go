@@ -99,5 +99,22 @@ func Register(r chi.Router, d *deps.Deps) {
 		r.Post("/assignments", h.createAssignment)
 		r.Delete("/assignments/{id}", h.revokeAssignment)
 		r.Get("/assignments", h.listAssignments)
+		r.Post("/assignments/{id}/transfer", h.transferAssignment)
+	})
+
+	// Holder replacement is addressed at the org unit ("change the sachiv of
+	// THIS DCS") but is role administration, so it lives here with the same
+	// granter middleware. The orgs module mounts the rest of /orgs — chi
+	// routes this explicit param path before that subtree's catch-all.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Authenticate(d.JWT))
+		r.Use(middleware.RequireRoles(
+			domain.RolePCDFAdmin,
+			domain.RoleUnionPresident,
+			domain.RoleSamitiAdhyaksh,
+			domain.RoleOrganisingManager,
+			domain.RoleOnboardingExecutive,
+		))
+		r.Post("/orgs/{id}/replace-holder", h.replaceHolder)
 	})
 }
