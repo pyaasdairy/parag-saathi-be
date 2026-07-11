@@ -203,7 +203,9 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 	if err != nil {
 		if isNotFound(err) {
 			s.log.WarnContext(ctx, "otp verify rejected: no active challenge", slog.String("phone", phone))
-			return nil, httpx.Unauthorized("no active OTP for this phone — request a new code")
+			appErr := httpx.Unauthorized("no active OTP for this phone — request a new code")
+			appErr.Code = "OTP_NOT_FOUND" // distinct code so the app can localise
+			return nil, appErr
 		}
 		return nil, err
 	}
@@ -217,7 +219,9 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 			return nil, err
 		}
 		s.log.WarnContext(ctx, "otp verify rejected: incorrect code", slog.String("phone", phone))
-		return nil, httpx.Unauthorized("incorrect OTP")
+		appErr := httpx.Unauthorized("incorrect OTP")
+		appErr.Code = "OTP_MISMATCH" // distinct code so the app can localise
+		return nil, appErr
 	}
 
 	// Burn every outstanding challenge for this phone.
