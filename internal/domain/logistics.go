@@ -24,6 +24,11 @@ type DCSConsignment struct {
 	// ConsignmentCode is the human-readable unique business key minted at
 	// creation: CON-<last4 of DCS code>-<YYMMDD>-<M|E>, e.g. CON-1842-260710-M.
 	ConsignmentCode     string               `bson:"consignment_code" json:"consignment_code"`
+	// ContainerCode is the SHORT samiti mark for the physical cans — minted at
+	// creation so the sachiv can sharpie it on containers BEFORE the van
+	// arrives (e.g. "842M"). The long seal/batch codes stay authoritative in
+	// the background; this only disambiguates cans across samitis on a route.
+	ContainerCode string `bson:"container_code,omitempty" json:"container_code,omitempty"`
 	DCSID               primitive.ObjectID   `bson:"dcs_id"    json:"dcs_id"`
 	Date                string               `bson:"date"      json:"date"` // YYYY-MM-DD
 	Shift               string               `bson:"shift"     json:"shift"`
@@ -144,6 +149,12 @@ type RouteTrip struct {
 	DeliveredToFacilityID *primitive.ObjectID `bson:"delivered_to_facility_id,omitempty" json:"delivered_to_facility_id,omitempty"`
 	DeliveredFacilityType string              `bson:"delivered_facility_type,omitempty"  json:"delivered_facility_type,omitempty"`
 	DeliveredAt           *time.Time          `bson:"delivered_at,omitempty"        json:"delivered_at,omitempty"`
+	// Handover evidence captured by the rider at delivery: who physically
+	// received the load, a free-text remark, and a photo (F6b). The plant
+	// operator reads these before/at intake approval.
+	DeliveredReceivedBy string `bson:"delivered_received_by,omitempty" json:"delivered_received_by,omitempty"`
+	DeliveredNotes      string `bson:"delivered_notes,omitempty"       json:"delivered_notes,omitempty"`
+	DeliveredPhotoURI   string `bson:"delivered_photo_uri,omitempty"   json:"delivered_photo_uri,omitempty"`
 	ProvenanceSeq         int64               `bson:"provenance_seq,omitempty"      json:"provenance_seq,omitempty"`
 	CreatedAt             time.Time           `bson:"created_at"    json:"created_at"`
 }

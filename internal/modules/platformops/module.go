@@ -99,6 +99,7 @@ func Register(r chi.Router, d *deps.Deps) {
 		r.Use(middleware.RequireRoles(domain.RoleSupportAgent, domain.RoleSuperAdmin))
 
 		r.Get("/parties/lookup", h.lookupParty)
+		r.Get("/parties", h.searchParties) // paged directory: ?q= name or phone
 	})
 
 	// Cross-module reactions arrive over the bus (modules never import each

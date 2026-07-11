@@ -530,14 +530,22 @@ func (s *service) lookupParty(ctx context.Context, phone string) (*PartyLookupRe
 		if !assignment.UsableAt(now) {
 			continue
 		}
-		orgName := ""
+		orgName, unionName := "", ""
 		if org, orgErr := s.deps.Orgs.Get(ctx, assignment.OrgUnitID); orgErr == nil {
 			orgName = org.Name
+			// Resolve the MILK_UNION this role sits under (consistent across
+			// tiers: a DCS/BMC/plant anchor still names its union).
+			if unionID, uerr := s.deps.Orgs.UnionAncestor(ctx, assignment.OrgUnitID); uerr == nil && !unionID.IsZero() {
+				if union, gerr := s.deps.Orgs.Get(ctx, unionID); gerr == nil {
+					unionName = union.Name
+				}
+			}
 		}
 		roles = append(roles, PartyRoleView{
 			RoleCode:  assignment.RoleCode,
 			OrgUnitID: assignment.OrgUnitID.Hex(),
 			OrgName:   orgName,
+			UnionName: unionName,
 			Status:    assignment.Status,
 			ValidFrom: assignment.ValidFrom,
 		})
@@ -565,11 +573,51 @@ func (s *service) lookupParty(ctx context.Context, phone string) (*PartyLookupRe
 		Village:       party.Village,
 		KYCTier:       party.KYCTier,
 		Status:        party.Status,
-		AadhaarMasked: aadhaarMasked,
-		BankMasked:    bankMasked,
-		CreatedAt:     party.CreatedAt,
-		Roles:         roles,
+		AadhaarMasked:   aadhaarMasked,
+		BankMasked:      bankMasked,
+		ProfilePhotoURL: party.ProfilePhotoURL,
+		CreatedAt:       party.CreatedAt,
+		Roles:           roles,
 	}, nil
+}
+
+// searchParties pages the people directory for the admin People tab: blank q
+// lists everyone (newest first); otherwise phone-prefix OR name substring.
+// PII listing is audited like the single lookup.
+func (s *service) searchParties(ctx context.Context, q string, page httpx.Page) ([]PartySearchRow, int64, error) {
+	rows, total, err := s.repo.searchParties(ctx, q, page.Limit, page.Offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	s.deps.Audit.Record(ctx, audit.Entry{
+		Action:     "support.pii_search",
+		TargetType: "PARTY",
+		Meta:       map[string]any{"q": q, "returned": len(rows), "total": total},
+	})
+	ids := make([]primitive.ObjectID, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	counts, err := s.repo.activeRoleCounts(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]PartySearchRow, 0, len(rows))
+	for i := range rows {
+		p := &rows[i]
+		out = append(out, PartySearchRow{
+			PartyID:         p.ID.Hex(),
+			FullName:        p.FullName,
+			FullNameHi:      p.FullNameHi,
+			Phone:           p.Phone,
+			Village:         p.Village,
+			KYCTier:         p.KYCTier,
+			Status:          p.Status,
+			ProfilePhotoURL: p.ProfilePhotoURL,
+			ActiveRoles:     counts[p.ID],
+		})
+	}
+	return out, total, nil
 }
 
 // ---- Event-bus reactions: cross-module SMS queuing ----

@@ -224,6 +224,9 @@ type MilkPour struct {
 	AnalyzerReadingID *primitive.ObjectID `bson:"analyzer_reading_id,omitempty" json:"analyzer_reading_id,omitempty"`
 	Source            string              `bson:"source"        json:"source"`    // reading mode that produced the values
 	Assurance         string              `bson:"assurance"     json:"assurance"` // §6.2 capture assurance A|B|C
+	// ParchiPhotoURI is the photo of the paper slip (parchi) handed to the
+	// farmer at pour time — receipt-side evidence alongside the analyzer photo.
+	ParchiPhotoURI string `bson:"parchi_photo_uri,omitempty" json:"parchi_photo_uri,omitempty"`
 	// PhotoObjectKey is the retained analyzer-display photo evidence (object
 	// store key) that backs an assurance-B capture (§6.2/§12.3).
 	PhotoObjectKey string `bson:"photo_object_key,omitempty" json:"photo_object_key,omitempty"`

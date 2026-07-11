@@ -266,6 +266,19 @@ func (h *handler) runWorker(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, result)
 }
 
+// searchParties handles GET /support/parties?q=&limit=&offset= — the paged
+// people directory (name OR phone search; blank q lists everyone).
+func (h *handler) searchParties(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	page := httpx.ParsePage(r)
+	rows, total, err := h.svc.searchParties(r.Context(), q, page)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSONMeta(w, http.StatusOK, rows, listMeta{Limit: page.Limit, Offset: page.Offset, Total: total})
+}
+
 // lookupParty handles GET /support/parties/lookup?phone=.
 func (h *handler) lookupParty(w http.ResponseWriter, r *http.Request) {
 	phone := strings.TrimSpace(r.URL.Query().Get("phone"))

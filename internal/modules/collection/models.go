@@ -60,7 +60,9 @@ type CreatePourRequest struct {
 	DeviceID          string              `json:"device_id,omitempty"`
 	// PhotoObjectKey is the analyzer-display photo evidence (object store key)
 	// backing an assurance-B capture; without it OCR captures derive C (§6.2).
-	PhotoObjectKey string   `json:"photo_object_key,omitempty"`
+	PhotoObjectKey string `json:"photo_object_key,omitempty"`
+	// ParchiPhotoURI is the paper-slip (parchi) photo taken at pour time.
+	ParchiPhotoURI string   `json:"parchi_photo_uri,omitempty"`
 	GeoLat         *float64 `json:"geo_lat,omitempty"`
 	GeoLng         *float64 `json:"geo_lng,omitempty"`
 }

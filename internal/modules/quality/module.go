@@ -85,6 +85,9 @@ func Register(r chi.Router, d *deps.Deps) {
 			domain.RoleStateAuditor,
 		)
 		r.With(batchReadRoles).Get("/batch-queue", h.getBatchQueue)
+		// Durable records of TESTED batches (PASS/HOLD/REJECT + QR facts) —
+		// the history surface after a verdict leaves the work queue.
+		r.With(batchReadRoles).Get("/batch-records", h.getBatchRecords)
 		qcResultReaders := middleware.RequireRoles(
 			domain.RolePlantLabAnalyst,
 			domain.RolePlantOperator,

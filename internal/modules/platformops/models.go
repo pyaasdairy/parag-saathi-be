@@ -129,6 +129,10 @@ type PartyRoleView struct {
 	RoleCode  string    `json:"role_code"`
 	OrgUnitID string    `json:"org_unit_id"`
 	OrgName   string    `json:"org_name,omitempty"`
+	// UnionName is the MILK_UNION this role ultimately belongs to (resolved up
+	// the org tree) — shown consistently on every profile regardless of the
+	// tier the role is anchored at (DCS / BMC / plant / union).
+	UnionName string    `json:"union_name,omitempty"`
 	Status    string    `json:"status"`
 	ValidFrom time.Time `json:"valid_from"`
 }
@@ -145,10 +149,25 @@ type PartyLookupResponse struct {
 	Village       string          `json:"village,omitempty"`
 	KYCTier       string          `json:"kyc_tier"`
 	Status        string          `json:"status"`
-	AadhaarMasked string          `json:"aadhaar_masked,omitempty"`
-	BankMasked    string          `json:"bank_masked,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
-	Roles         []PartyRoleView `json:"roles"`
+	AadhaarMasked   string          `json:"aadhaar_masked,omitempty"`
+	BankMasked      string          `json:"bank_masked,omitempty"`
+	ProfilePhotoURL string          `json:"profile_photo_url,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	Roles           []PartyRoleView `json:"roles"`
+}
+
+// PartySearchRow is one row of the paginated people directory
+// (GET /support/parties?q=): enough to render a list + open the full lookup.
+type PartySearchRow struct {
+	PartyID         string `json:"party_id"`
+	FullName        string `json:"full_name,omitempty"`
+	FullNameHi      string `json:"full_name_hi,omitempty"`
+	Phone           string `json:"phone"`
+	Village         string `json:"village,omitempty"`
+	KYCTier         string `json:"kyc_tier"`
+	Status          string `json:"status"`
+	ProfilePhotoURL string `json:"profile_photo_url,omitempty"`
+	ActiveRoles     int    `json:"active_roles"`
 }
 
 // listMeta is the pagination metadata attached to list responses.

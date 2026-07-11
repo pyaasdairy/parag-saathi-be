@@ -2,6 +2,7 @@ package platformops
 
 import (
 	"context"
+	"regexp"
 	"errors"
 	"fmt"
 	"time"
@@ -260,6 +261,68 @@ func (r *repository) setNotificationMeta(ctx context.Context, notificationID pri
 		return httpx.Internal(fmt.Errorf("set notification meta: %w", err))
 	}
 	return nil
+}
+
+// searchParties pages the people directory. q matches the phone by PREFIX or
+// either name (case-insensitive substring); blank q lists everyone, newest
+// first — the admin People tab's default list.
+func (r *repository) searchParties(ctx context.Context, q string, limit, offset int64) ([]domain.Party, int64, error) {
+	filter := bson.D{}
+	if q != "" {
+		quoted := regexp.QuoteMeta(q)
+		filter = bson.D{{Key: "$or", Value: bson.A{
+			bson.D{{Key: "phone", Value: bson.D{{Key: "$regex", Value: "^" + quoted}}}},
+			bson.D{{Key: "full_name", Value: bson.D{{Key: "$regex", Value: quoted}, {Key: "$options", Value: "i"}}}},
+			bson.D{{Key: "full_name_hi", Value: bson.D{{Key: "$regex", Value: quoted}}}},
+		}}}
+	}
+	total, err := r.parties.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("count parties: %w", err))
+	}
+	cur, err := r.parties.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "created_at", Value: -1}}).
+		SetSkip(offset).SetLimit(limit))
+	if err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("search parties: %w", err))
+	}
+	rows := []domain.Party{}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, 0, httpx.Internal(fmt.Errorf("decode parties: %w", err))
+	}
+	return rows, total, nil
+}
+
+// activeRoleCounts bulk-counts ACTIVE assignments per party for a page.
+func (r *repository) activeRoleCounts(ctx context.Context, partyIDs []primitive.ObjectID) (map[primitive.ObjectID]int, error) {
+	out := map[primitive.ObjectID]int{}
+	if len(partyIDs) == 0 {
+		return out, nil
+	}
+	cur, err := r.assignments.Aggregate(ctx, mongo.Pipeline{
+		bson.D{{Key: "$match", Value: bson.D{
+			{Key: "party_id", Value: bson.D{{Key: "$in", Value: partyIDs}}},
+			{Key: "status", Value: domain.RoleAssignmentActive},
+		}}},
+		bson.D{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$party_id"},
+			{Key: "n", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	})
+	if err != nil {
+		return nil, httpx.Internal(fmt.Errorf("count roles: %w", err))
+	}
+	var rows []struct {
+		ID primitive.ObjectID `bson:"_id"`
+		N  int                `bson:"n"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, httpx.Internal(fmt.Errorf("decode role counts: %w", err))
+	}
+	for _, row := range rows {
+		out[row.ID] = row.N
+	}
+	return out, nil
 }
 
 // findPartyByPhone returns the party owning a phone number, or NotFound.

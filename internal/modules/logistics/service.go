@@ -124,6 +124,7 @@ func (s *service) createConsignment(ctx context.Context, actor auth.Actor, req c
 	consignment := &domain.DCSConsignment{
 		ID:                  primitive.NewObjectID(), // pre-generated: insert + ledger refs stay consistent
 		ConsignmentCode:     mintConsignmentCode(org.Code, date, req.Shift),
+		ContainerCode:       mintContainerCode(org.Code, req.Shift, req.DCSID),
 		DCSID:               req.DCSID,
 		Date:                date,
 		Shift:               req.Shift,
@@ -460,6 +461,9 @@ func (s *service) buildConsignmentInvoice(ctx context.Context, c *domain.DCSCons
 		InvoiceNo:       c.UnionInvoiceNo,
 		ConsignmentID:   c.ID,
 		ConsignmentCode: consignmentCode("", c.Date, c.Shift, c.ID),
+		BatchCode:       c.BatchCode,
+		SealCode:        c.SealCode,
+		ContainerCode:   c.ContainerCode,
 		FromDCSID:       c.DCSID,
 		Date:            c.Date,
 		Shift:           c.Shift,
@@ -906,7 +910,8 @@ func (s *service) deliverTrip(ctx context.Context, actor auth.Actor, tripID prim
 	}
 
 	now := time.Now().UTC()
-	matched, err := s.repo.markTripDelivered(ctx, trip.ID, facilityID, facility.Type, now)
+	matched, err := s.repo.markTripDelivered(ctx, trip.ID, facilityID, facility.Type, now,
+		strings.TrimSpace(req.ReceivedBy), strings.TrimSpace(req.Notes), strings.TrimSpace(req.PhotoURI))
 	if err != nil {
 		return nil, s.internal(ctx, "deliver trip: mark delivered", err)
 	}
@@ -1299,7 +1304,21 @@ func (s *service) trackTrip(ctx context.Context, actor auth.Actor, tripID primit
 		return nil, err
 	}
 	tt := toTripTrack(trip)
+	s.enrichTrackRider(ctx, &tt, trip.VanRiderPartyID)
 	return &tt, nil
+}
+
+// enrichTrackRider fills the rider's name + phone onto a track view so the
+// watcher (Sachiv / BMC / plant) can identify and call the van. Best-effort:
+// a failed lookup leaves the id-only view rather than erroring the track.
+func (s *service) enrichTrackRider(ctx context.Context, tt *tripTrack, riderID primitive.ObjectID) {
+	rider, err := s.repo.partyByID(ctx, riderID)
+	if err != nil || rider == nil {
+		return
+	}
+	tt.VanRiderName = rider.FullName
+	tt.VanRiderNameHi = rider.FullNameHi
+	tt.VanRiderPhone = rider.Phone
 }
 
 // listActiveTracking returns the minimal live views of every IN_PROGRESS trip
@@ -1318,7 +1337,9 @@ func (s *service) listActiveTracking(ctx context.Context, actor auth.Actor) ([]t
 	out := make([]tripTrack, 0, len(trips))
 	for i := range trips {
 		if s.authorizeTrack(ctx, actor, &trips[i]) == nil {
-			out = append(out, toTripTrack(&trips[i]))
+			tt := toTripTrack(&trips[i])
+			s.enrichTrackRider(ctx, &tt, trips[i].VanRiderPartyID)
+			out = append(out, tt)
 		}
 	}
 	return out, nil
@@ -1447,6 +1468,26 @@ func mintConsignmentCode(dcsCode, date, shift string) string {
 		shiftMark = "E"
 	}
 	return fmt.Sprintf("CON-%s-%s-%s", last4, yymmdd, shiftMark)
+}
+
+// mintContainerCode builds the SHORT can mark the sachiv writes on containers
+// with a sharpie: <last 4 digits of the DCS code><M|E>, e.g. "1842M". Unique
+// per route pickup: one consignment per DCS+date+shift; four digits keep
+// neighbouring samitis distinct (two org codes sharing the last FOUR digits
+// in one union would already collide in the human directory).
+func mintContainerCode(dcsCode, shift string, dcsID primitive.ObjectID) string {
+	digits := digitsOf(dcsCode)
+	if digits == "" {
+		digits = samitiRefFallback(dcsID)
+	}
+	if len(digits) > 4 {
+		digits = digits[len(digits)-4:]
+	}
+	shiftMark := "M"
+	if shift == domain.ShiftEvening {
+		shiftMark = "E"
+	}
+	return digits + shiftMark
 }
 
 // mintBatchCode builds the per-samiti batch code minted at van pickup (F4):

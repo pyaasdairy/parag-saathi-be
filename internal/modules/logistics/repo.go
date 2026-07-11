@@ -2,6 +2,7 @@ package logistics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -23,6 +24,7 @@ type repo struct {
 	consignments *mongo.Collection
 	trips        *mongo.Collection
 	pours        *mongo.Collection // read-only view into the collection module's pours (sanctioned by spec)
+	parties      *mongo.Collection // read-only: rider identity on track views (name+phone)
 }
 
 // newRepo binds the repo to its collections via the shared name constants.
@@ -31,6 +33,7 @@ func newRepo(db *mongo.Database) *repo {
 		consignments: db.Collection(mongodb.CollConsignments),
 		trips:        db.Collection(mongodb.CollRouteTrips),
 		pours:        db.Collection(mongodb.CollMilkPours),
+		parties:      db.Collection(mongodb.CollParties),
 	}
 }
 
@@ -334,20 +337,45 @@ func (r *repo) pushColdChain(ctx context.Context, tripID primitive.ObjectID, ent
 // records the receiving facility — a BMC or a PROCESSING_PLANT (F5).
 // delivered_to_bmc_id keeps carrying the facility id for compatibility;
 // delivered_to_facility_id/delivered_facility_type carry the new semantics.
-func (r *repo) markTripDelivered(ctx context.Context, tripID, facilityID primitive.ObjectID, facilityType string, at time.Time) (bool, error) {
+func (r *repo) markTripDelivered(ctx context.Context, tripID, facilityID primitive.ObjectID, facilityType string, at time.Time, receivedBy, notes, photoURI string) (bool, error) {
+	set := bson.D{
+		{Key: "status", Value: domain.TripStatusDelivered},
+		{Key: "delivered_to_bmc_id", Value: facilityID},
+		{Key: "delivered_to_facility_id", Value: facilityID},
+		{Key: "delivered_facility_type", Value: facilityType},
+		{Key: "delivered_at", Value: at},
+	}
+	// Handover evidence (F6b) — only written when the rider captured it.
+	if receivedBy != "" {
+		set = append(set, bson.E{Key: "delivered_received_by", Value: receivedBy})
+	}
+	if notes != "" {
+		set = append(set, bson.E{Key: "delivered_notes", Value: notes})
+	}
+	if photoURI != "" {
+		set = append(set, bson.E{Key: "delivered_photo_uri", Value: photoURI})
+	}
 	res, err := r.trips.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: tripID}, {Key: "status", Value: domain.TripStatusInProgress}},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "status", Value: domain.TripStatusDelivered},
-			{Key: "delivered_to_bmc_id", Value: facilityID},
-			{Key: "delivered_to_facility_id", Value: facilityID},
-			{Key: "delivered_facility_type", Value: facilityType},
-			{Key: "delivered_at", Value: at},
-		}}})
+		bson.D{{Key: "$set", Value: set}})
 	if err != nil {
 		return false, fmt.Errorf("mark trip delivered: %w", err)
 	}
 	return res.MatchedCount > 0, nil
+}
+
+// partyByID loads one party (rider identity on track views). NotFound-safe:
+// returns nil, nil when absent.
+func (r *repo) partyByID(ctx context.Context, id primitive.ObjectID) (*domain.Party, error) {
+	var p domain.Party
+	err := r.parties.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&p)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("party by id: %w", err)
+	}
+	return &p, nil
 }
 
 // setTripProvenanceSeq pins the latest ledger sequence on the trip doc.

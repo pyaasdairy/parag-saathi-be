@@ -62,6 +62,8 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 	specs := map[string][]mongo.IndexModel{
 		CollParties: {
 			idx(bson.D{{Key: "phone", Value: asc}}, options.Index().SetUnique(true)),
+			// People directory: newest-first paging (GET /support/parties).
+			idx(bson.D{{Key: "created_at", Value: desc}}, nil),
 		},
 		CollOTPChallenges: {
 			idx(bson.D{{Key: "phone", Value: asc}}, nil),

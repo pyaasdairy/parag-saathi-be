@@ -104,6 +104,35 @@ type BatchQueueResponse struct {
 	Total int              `json:"total"`
 }
 
+// BatchRecordItem is one TESTED per-samiti batch — the durable records row
+// behind the lab's history and the plant's batch records ("where did my
+// passed batch go?"). Carries the full panel + the public QR facts.
+type BatchRecordItem struct {
+	ConsignmentID       string               `json:"consignment_id"`
+	BatchCode           string               `json:"batch_code"`
+	Samiti              BatchQueueSamiti     `json:"samiti"`
+	Date                string               `json:"date"`
+	Shift               string               `json:"shift"`
+	TotalQuantityLitres float64              `json:"total_quantity_litres"`
+	Status              string               `json:"status"` // ACCEPTED | REJECTED
+	Verdict             string               `json:"verdict"` // PASS | HOLD | REJECT
+	QCHold              bool                 `json:"qc_hold,omitempty"`
+	TestedAt            *time.Time           `json:"tested_at,omitempty"`
+	Tests               []domain.BatchQCTest `json:"tests,omitempty"`
+	Notes               string               `json:"notes,omitempty"`
+	// QR facts (present only when the verdict passed and the QR minted).
+	QRToken    string     `json:"qr_token,omitempty"`
+	QRIssuedAt *time.Time `json:"qr_issued_at,omitempty"`
+}
+
+// BatchRecordsResponse is the GET /quality/batch-records body.
+type BatchRecordsResponse struct {
+	Items  []BatchRecordItem `json:"items"`
+	Total  int64             `json:"total"`
+	Limit  int64             `json:"limit"`
+	Offset int64             `json:"offset"`
+}
+
 // ---------------------------------------------------------------------------
 // Repository
 // ---------------------------------------------------------------------------
@@ -270,6 +299,73 @@ func (r *repository) listAcceptedPendingQC(ctx context.Context, dcsIDs []primiti
 		return nil, httpx.Internal(err)
 	}
 	return items, nil
+}
+
+// listTestedConsignments pages the consignments that HAVE a QC verdict
+// (qc_tested_at set), newest verdict first — the records feed. nil dcsIDs
+// means no DCS fence.
+func (r *repository) listTestedConsignments(ctx context.Context, dcsIDs []primitive.ObjectID, limit, offset int64) ([]domain.DCSConsignment, int64, error) {
+	filter := bson.D{
+		{Key: "qc_tested_at", Value: bson.D{{Key: "$exists", Value: true}}},
+	}
+	if dcsIDs != nil {
+		filter = append(filter, bson.E{Key: "dcs_id", Value: bson.D{{Key: "$in", Value: dcsIDs}}})
+	}
+	total, err := r.consignments.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, httpx.Internal(err)
+	}
+	cur, err := r.consignments.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "qc_tested_at", Value: -1}}).
+		SetSkip(offset).SetLimit(limit))
+	if err != nil {
+		return nil, 0, httpx.Internal(err)
+	}
+	items := []domain.DCSConsignment{}
+	if err := cur.All(ctx, &items); err != nil {
+		return nil, 0, httpx.Internal(err)
+	}
+	return items, total, nil
+}
+
+// consignmentQCByIDs bulk-loads the QC panels for a page of consignments.
+func (r *repository) consignmentQCByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]domain.ConsignmentQC, error) {
+	out := map[primitive.ObjectID]domain.ConsignmentQC{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	cur, err := r.consignmentQC.Find(ctx, bson.D{{Key: "consignment_id", Value: bson.D{{Key: "$in", Value: ids}}}})
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
+	var rows []domain.ConsignmentQC
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, httpx.Internal(err)
+	}
+	for _, q := range rows {
+		out[q.ConsignmentID] = q
+	}
+	return out, nil
+}
+
+// batchQRsByConsignmentIDs bulk-loads minted batch QRs for a page.
+func (r *repository) batchQRsByConsignmentIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]domain.ConsignmentBatchQR, error) {
+	out := map[primitive.ObjectID]domain.ConsignmentBatchQR{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	cur, err := r.batchQRs.Find(ctx, bson.D{{Key: "consignment_id", Value: bson.D{{Key: "$in", Value: ids}}}})
+	if err != nil {
+		return nil, httpx.Internal(err)
+	}
+	var rows []domain.ConsignmentBatchQR
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, httpx.Internal(err)
+	}
+	for _, q := range rows {
+		out[q.ConsignmentID] = q
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -585,30 +681,12 @@ func (s *service) getBatchQC(ctx context.Context, actor auth.Actor, consignmentI
 // pickup evidence. Plant-tier and union-tier roles are fenced to their own
 // union's societies; federation oversight (mission/auditor) reads wide.
 func (s *service) batchQueue(ctx context.Context, actor auth.Actor) (*BatchQueueResponse, error) {
-	var dcsIDs []primitive.ObjectID // nil = no fence
-	switch actor.RoleCode {
-	case domain.RolePlantOperator, domain.RolePlantLabAnalyst, domain.RoleUnionFieldSupervisor:
-		orgID, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
-		if err != nil {
-			return nil, err
-		}
-		unionID, err := s.deps.Orgs.UnionAncestor(ctx, orgID)
-		if err != nil {
-			return nil, err
-		}
-		if unionID.IsZero() {
-			return nil, httpx.BadRequest("NO_UNION", "no union in the org hierarchy")
-		}
-		ids, err := s.deps.Orgs.DescendantIDs(ctx, unionID, domain.OrgTypeDCS)
-		if err != nil {
-			return nil, err
-		}
-		if len(ids) == 0 {
-			return &BatchQueueResponse{Items: []BatchQueueItem{}, Total: 0}, nil
-		}
-		dcsIDs = ids
-	default:
-		// MISSION_OFFICIAL / STATE_AUDITOR: federation-wide oversight view.
+	dcsIDs, empty, err := s.qcDCSFence(ctx, actor)
+	if err != nil {
+		return nil, err
+	}
+	if empty {
+		return &BatchQueueResponse{Items: []BatchQueueItem{}, Total: 0}, nil
 	}
 	rows, err := s.repo.listAcceptedPendingQC(ctx, dcsIDs)
 	if err != nil {
@@ -620,6 +698,38 @@ func (s *service) batchQueue(ctx context.Context, actor auth.Actor) (*BatchQueue
 		items = append(items, s.batchQueueItem(ctx, &rows[i]))
 	}
 	return &BatchQueueResponse{Items: items, Total: len(items)}, nil
+}
+
+// qcDCSFence resolves the DCS fence for batch QC reads: plant/union-tier
+// roles see only their own union's societies; federation oversight
+// (mission/auditor) reads wide (nil fence). empty=true means the caller's
+// union has no societies — return an empty page, not an error.
+func (s *service) qcDCSFence(ctx context.Context, actor auth.Actor) (dcsIDs []primitive.ObjectID, empty bool, err error) {
+	switch actor.RoleCode {
+	case domain.RolePlantOperator, domain.RolePlantLabAnalyst, domain.RoleUnionFieldSupervisor:
+		orgID, err := httpx.ParseID(actor.OrgUnitID, "actor org unit")
+		if err != nil {
+			return nil, false, err
+		}
+		unionID, err := s.deps.Orgs.UnionAncestor(ctx, orgID)
+		if err != nil {
+			return nil, false, err
+		}
+		if unionID.IsZero() {
+			return nil, false, httpx.BadRequest("NO_UNION", "no union in the org hierarchy")
+		}
+		ids, err := s.deps.Orgs.DescendantIDs(ctx, unionID, domain.OrgTypeDCS)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(ids) == 0 {
+			return nil, true, nil
+		}
+		return ids, false, nil
+	default:
+		// MISSION_OFFICIAL / STATE_AUDITOR: federation-wide oversight view.
+		return nil, false, nil
+	}
 }
 
 // batchQueueItem projects one consignment onto the queue row, enriching the
@@ -654,9 +764,88 @@ func (s *service) batchQueueItem(ctx context.Context, c *domain.DCSConsignment) 
 	return item
 }
 
+// batchRecords lists TESTED per-samiti batches (PASS / HOLD / REJECT), newest
+// first, paged — the durable history the lab and plant consoles read after a
+// verdict removes a batch from the work queue. Same union fence as the queue.
+func (s *service) batchRecords(ctx context.Context, actor auth.Actor, page httpx.Page) (*BatchRecordsResponse, error) {
+	dcsIDs, empty, err := s.qcDCSFence(ctx, actor)
+	if err != nil {
+		return nil, err
+	}
+	if empty {
+		return &BatchRecordsResponse{Items: []BatchRecordItem{}, Limit: page.Limit, Offset: page.Offset}, nil
+	}
+	rows, total, err := s.repo.listTestedConsignments(ctx, dcsIDs, page.Limit, page.Offset)
+	if err != nil {
+		s.log.ErrorContext(ctx, "batch records: list failed", slog.Any("err", err))
+		return nil, err
+	}
+	ids := make([]primitive.ObjectID, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	panels, err := s.repo.consignmentQCByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	qrs, err := s.repo.batchQRsByConsignmentIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]BatchRecordItem, 0, len(rows))
+	for i := range rows {
+		c := &rows[i]
+		item := BatchRecordItem{
+			ConsignmentID:       c.ID.Hex(),
+			BatchCode:           c.BatchCode,
+			Samiti:              BatchQueueSamiti{OrgUnitID: c.DCSID.Hex()},
+			Date:                c.Date,
+			Shift:               c.Shift,
+			TotalQuantityLitres: c.TotalQuantityLitres,
+			Status:              c.Status,
+			Verdict:             domain.EffectiveQCVerdict(c.QCVerdict, c.QCOverallPass != nil && *c.QCOverallPass),
+			QCHold:              c.QCHold,
+			TestedAt:            c.QCTestedAt,
+		}
+		if org, oerr := s.deps.Orgs.Get(ctx, c.DCSID); oerr == nil && org != nil {
+			item.Samiti.Name = org.Name
+			item.Samiti.NameHi = org.NameHi
+			item.Samiti.Code = org.Code
+			item.Samiti.Village = org.Village
+			item.Samiti.District = org.District
+		}
+		if panel, ok := panels[c.ID]; ok {
+			item.Tests = panel.Tests
+			item.Notes = panel.Notes
+		}
+		if qr, ok := qrs[c.ID]; ok {
+			item.QRToken = qr.Token
+			issued := qr.IssuedAt
+			item.QRIssuedAt = &issued
+		}
+		items = append(items, item)
+	}
+	return &BatchRecordsResponse{Items: items, Total: total, Limit: page.Limit, Offset: page.Offset}, nil
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+// getBatchRecords handles GET /quality/batch-records.
+func (h *handler) getBatchRecords(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("authentication required"))
+		return
+	}
+	records, err := h.svc.batchRecords(r.Context(), actor, httpx.ParsePage(r))
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, records)
+}
 
 // recordBatchQC handles POST /quality/consignments/{consignmentID}/qc.
 func (h *handler) recordBatchQC(w http.ResponseWriter, r *http.Request) {

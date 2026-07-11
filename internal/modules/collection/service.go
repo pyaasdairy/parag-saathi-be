@@ -2,6 +2,7 @@ package collection
 
 import (
 	"context"
+	"strings"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -390,6 +391,10 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 	if req.Shift != domain.ShiftMorning && req.Shift != domain.ShiftEvening {
 		return nil, false, httpx.BadRequest("VALIDATION", "shift must be MORNING or EVENING")
 	}
+	if req.ParchiPhotoURI != "" &&
+		(len(req.ParchiPhotoURI) > 512 || !strings.HasPrefix(req.ParchiPhotoURI, "http")) {
+		return nil, false, httpx.BadRequest("VALIDATION", "parchi_photo_uri must be an http(s) URL (max 512 chars)")
+	}
 	if req.QuantityLitres <= 0 {
 		return nil, false, httpx.BadRequest("VALIDATION", "quantity_litres must be positive")
 	}
@@ -504,6 +509,7 @@ func (s *service) CreatePour(ctx context.Context, actor auth.Actor, req CreatePo
 		// → C. A claim is never stronger than what backs it.
 		Assurance:      domain.AssuranceForCapture(req.Source, req.DeviceID, req.PhotoObjectKey),
 		PhotoObjectKey: req.PhotoObjectKey,
+		ParchiPhotoURI: req.ParchiPhotoURI,
 		Status:         domain.PourStatusRecorded,
 		PouredAt:       pouredAt,
 		RecordedBy:     recordedBy,
@@ -817,6 +823,7 @@ func (s *service) SupersedePour(ctx context.Context, actor auth.Actor, pourID pr
 		Source:            old.Source,
 		Assurance:         old.Assurance,      // a correction keeps the original capture assurance
 		PhotoObjectKey:    old.PhotoObjectKey, // and its original photo evidence
+		ParchiPhotoURI:    old.ParchiPhotoURI,
 		Status:            domain.PourStatusRecorded,
 		SupersedesPourID:  &old.ID,
 		PouredAt:          old.PouredAt,

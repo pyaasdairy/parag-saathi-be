@@ -62,6 +62,11 @@ type coldChainRequest struct {
 type deliverRequest struct {
 	BMCID      primitive.ObjectID `json:"bmc_id"`
 	FacilityID primitive.ObjectID `json:"facility_id"`
+	// Handover evidence (F6b): who received the load at the dock, a remark,
+	// and a photo — all optional, surfaced to the plant operator.
+	ReceivedBy string `json:"received_by,omitempty"`
+	Notes      string `json:"notes,omitempty"`
+	PhotoURI   string `json:"photo_uri,omitempty"`
 }
 
 // plantAcceptRequest is the PLANT_OPERATOR's intake approval of one delivered
@@ -107,11 +112,22 @@ type tripTrack struct {
 	Shift            string     `json:"shift"`
 	Date             string     `json:"date"`
 	VanRiderPartyID  string     `json:"van_rider_party_id"`
+	// Rider identity for the watcher (Sachiv/BMC/plant): once the pickup is
+	// underway the parties are in a live handoff — name + phone let the
+	// watcher call the van (enriched in the service, best-effort).
+	VanRiderName   string `json:"van_rider_name,omitempty"`
+	VanRiderNameHi string `json:"van_rider_name_hi,omitempty"`
+	VanRiderPhone  string `json:"van_rider_phone,omitempty"`
 	UnionID          string     `json:"union_id"`
 	LastGeoLat       float64    `json:"last_geo_lat,omitempty"`
 	LastGeoLng       float64    `json:"last_geo_lng,omitempty"`
 	LastLocationAt   *time.Time `json:"last_location_at,omitempty"`
 	DeliveredToBMCID string     `json:"delivered_to_bmc_id,omitempty"`
+	// Handover evidence recorded by the rider at delivery (F6b).
+	DeliveredAt         *time.Time `json:"delivered_at,omitempty"`
+	DeliveredReceivedBy string     `json:"delivered_received_by,omitempty"`
+	DeliveredNotes      string     `json:"delivered_notes,omitempty"`
+	DeliveredPhotoURI   string     `json:"delivered_photo_uri,omitempty"`
 	StopsTotal       int        `json:"stops_total"`
 	StopsCollected   int        `json:"stops_collected"`
 }
@@ -141,6 +157,10 @@ func toTripTrack(t *domain.RouteTrip) tripTrack {
 	if t.DeliveredToBMCID != nil {
 		tt.DeliveredToBMCID = t.DeliveredToBMCID.Hex()
 	}
+	tt.DeliveredAt = t.DeliveredAt
+	tt.DeliveredReceivedBy = t.DeliveredReceivedBy
+	tt.DeliveredNotes = t.DeliveredNotes
+	tt.DeliveredPhotoURI = t.DeliveredPhotoURI
 	return tt
 }
 
@@ -169,6 +189,11 @@ type consignmentInvoice struct {
 	InvoiceNo       string              `json:"invoice_no"`
 	ConsignmentID   primitive.ObjectID  `json:"consignment_id"`
 	ConsignmentCode string              `json:"consignment_code"`
+	// Traceability refs: the batch/seal/container identity of the load this
+	// invoice values — so the paper trail and the physical trail match up.
+	BatchCode     string `json:"batch_code,omitempty"`
+	SealCode      string `json:"seal_code,omitempty"`
+	ContainerCode string `json:"container_code,omitempty"`
 	FromDCSID       primitive.ObjectID  `json:"from_dcs_id"`
 	ToUnionID       *primitive.ObjectID `json:"to_union_id,omitempty"`
 	Date            string              `json:"date"`
