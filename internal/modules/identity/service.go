@@ -145,6 +145,23 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 // notification outbox (the platformops worker delivers it).
 func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResponse, error) {
 	now := time.Now().UTC()
+
+	// REGISTRATION GATE (SMS-cost optimisation): only registered parties —
+	// people an onboarding executive enrolled and an approver created — may
+	// be sent an OTP. An unknown number costs an indexed lookup, never an
+	// SMS. The response names the remedy so the caller isn't dead-ended.
+	// (Runs behind the rate limiter, which also blunts phone enumeration.)
+	registered, err := s.repo.findPartyByPhone(ctx, phone)
+	if err != nil && !isNotFound(err) {
+		return nil, err
+	}
+	if registered == nil || isNotFound(err) {
+		s.log.InfoContext(ctx, "otp refused: number not registered", slog.String("phone", phone))
+		appErr := httpx.Unprocessable("NOT_REGISTERED",
+			"this mobile number is not registered yet — contact your onboarding executive")
+		return nil, appErr
+	}
+
 	code, err := auth.GenerateNumericOTP(otpLength)
 	if err != nil {
 		s.log.ErrorContext(ctx, "otp generation failed", slog.Any("err", err))
@@ -174,12 +191,11 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 		Status:      domain.NotificationQueued,
 		QueuedAt:    now,
 	}
-	if party, err := s.repo.findPartyByPhone(ctx, phone); err == nil {
-		pid := party.ID
-		notification.PartyID = &pid
-		if party.PreferredLanguage != "" {
-			notification.Language = party.PreferredLanguage
-		}
+	// The registration gate above already loaded the party.
+	pid := registered.ID
+	notification.PartyID = &pid
+	if registered.PreferredLanguage != "" {
+		notification.Language = registered.PreferredLanguage
 	}
 	if err := s.repo.insertNotification(ctx, notification); err != nil {
 		s.log.ErrorContext(ctx, "otp notification queue failed", slog.String("phone", phone), slog.Any("err", err))
