@@ -130,20 +130,87 @@ func formatTestValue(v float64, unit string) string {
 }
 
 // traceByCode resolves a scanned code to the consumer provenance view, reusing
-// the operator's public QR resolver read-only.
+// the operator's public QR resolver read-only. It mirrors the operator's public
+// scan (ResolvePublicQR): resolves BOTH consignment batch QRs (the QC "send QR"
+// tokens, lowercase hex) AND product-lot pack QRs (PRG-...). Case-insensitive,
+// because the app uppercases scanned codes while consignment tokens are stored
+// lowercase.
 func (s *service) traceByCode(ctx context.Context, code string) (*milkBatchView, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
 		return nil, errBadRequest("a batch/QR code is required")
 	}
-	resp, err := s.trace.ScanQR(ctx, code)
-	if err != nil || resp == nil {
-		// Not resolvable (unknown QR, or not a pack QR) — 404 so the app falls
-		// back to its offline seed rather than showing another batch.
-		return nil, errNotFound("no traceability found for this code")
+	for _, c := range []string{code, strings.ToLower(code), strings.ToUpper(code)} {
+		res, err := s.trace.ResolvePublicQR(ctx, c)
+		if err != nil || res == nil {
+			continue // try the next case variant; unknown/integrity-failed → fall through
+		}
+		switch v := res.(type) {
+		case *publictrace.QRScanResponse:
+			mb := mapToMilkBatch(code, v)
+			return &mb, nil
+		case *publictrace.BatchQualityReport:
+			mb := mapReportToMilkBatch(code, v)
+			return &mb, nil
+		}
 	}
-	mb := mapToMilkBatch(code, resp)
-	return &mb, nil
+	// Not resolvable — 404 so the app falls back to its offline seed.
+	return nil, errNotFound("no traceability found for this code")
+}
+
+// mapReportToMilkBatch projects a consignment batch quality report (a per-samiti
+// pooled batch) onto the consumer MilkBatch — honest provenance: the contributing
+// society, the tests it passed, the plant.
+func mapReportToMilkBatch(code string, r *publictrace.BatchQualityReport) milkBatchView {
+	batchCode := r.BatchCode
+	if batchCode == "" {
+		batchCode = strings.ToUpper(strings.TrimSpace(code))
+	}
+	district := r.Samiti.District
+	union := "PARAG member dairy union"
+	if district != "" {
+		union = district + " District Cooperative Dairy Union"
+	}
+	plant := ""
+	if r.Plant != nil {
+		plant = r.Plant.Name
+	}
+	mb := milkBatchView{
+		BatchCode:      batchCode,
+		Product:        "Cooperative pooled milk batch",
+		UnionName:      union,
+		Plant:          plant,
+		District:       district,
+		State:          "Uttar Pradesh",
+		MemberVillages: 1, // a batch pools from one contributing society
+		PouringMembers: r.Farmers.Total,
+		Tests:          []qualityTestView{},
+		Verified:       r.Quality != nil && r.Quality.OverallPass,
+	}
+	if r.Collection.PickedUpAt != nil {
+		mb.BatchDate = r.Collection.PickedUpAt.Format("2006-01-02")
+		mb.PackedAt = r.Collection.PickedUpAt.Format("2006-01-02")
+	}
+	if r.Quality != nil {
+		for _, t := range r.Quality.Tests {
+			val := ""
+			if t.Value != nil {
+				val = fmt.Sprintf("%g%s", *t.Value, t.Unit)
+			}
+			mb.Tests = append(mb.Tests, qualityTestView{Name: t.Parameter, Value: val, Pass: t.Pass})
+			switch strings.ToUpper(t.Parameter) {
+			case "FAT":
+				if t.Value != nil {
+					mb.FatPct = *t.Value
+				}
+			case "SNF":
+				if t.Value != nil {
+					mb.SnfPct = *t.Value
+				}
+			}
+		}
+	}
+	return mb
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
