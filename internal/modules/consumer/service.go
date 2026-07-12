@@ -42,6 +42,10 @@ type service struct {
 	// trace is the operator's public QR resolver, reused READ-ONLY for the
 	// consumer traceability bridge (tracebridge.go). Never mutates operator state.
 	trace *publictrace.Service
+	// appKey gates the traceability bridge to the consumer app only: the app
+	// ships EXPO_PUBLIC_CONSUMER_APP_KEY and sends it as X-Parag-App-Key; the
+	// backend requires a match. Empty → gate disabled (local dev without a key).
+	appKey string
 }
 
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
@@ -53,6 +57,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		rzpKeyID:     os.Getenv("RAZORPAY_KEY_ID"),
 		rzpKeySecret: os.Getenv("RAZORPAY_KEY_SECRET"),
 		trace:        publictrace.NewService(d, log),
+		appKey:       os.Getenv("CONSUMER_APP_KEY"),
 	}
 }
 

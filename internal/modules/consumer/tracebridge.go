@@ -2,14 +2,33 @@ package consumer
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
+	"html"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/pyaas/saathi-backend/internal/modules/publictrace"
 )
+
+// consumerAppScheme is the deep-link a printed pack QR encodes, so ONLY the
+// consumer app (registered for parag://) can open it — a generic scanner can't.
+const consumerAppScheme = "parag://trace/"
+
+// appKeyOK enforces the consumer-app-only gate: when CONSUMER_APP_KEY is
+// configured the request must carry a matching X-Parag-App-Key (constant-time).
+// When unset (local dev) the gate is open so the harness/offline flow still works.
+func (s *service) appKeyOK(r *http.Request) bool {
+	if s.appKey == "" {
+		return true
+	}
+	got := r.Header.Get("X-Parag-App-Key")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.appKey)) == 1
+}
 
 // Traceability bridge — the ONE sanctioned Saathi↔consumer touchpoint. It lets
 // the consumer app resolve a scanned pack QR to its honest cooperative
@@ -127,13 +146,144 @@ func (s *service) traceByCode(ctx context.Context, code string) (*milkBatchView,
 	return &mb, nil
 }
 
-// ── Handler ─────────────────────────────────────────────────────────────────
+// ── Handlers ────────────────────────────────────────────────────────────────
 
 func (h *handler) traceByCode(w http.ResponseWriter, r *http.Request) {
+	if !h.svc.appKeyOK(r) {
+		writeErr(w, errForbidden("traceability is available from the PARAG app only"))
+		return
+	}
 	mb, err := h.svc.traceByCode(r.Context(), chi.URLParam(r, "code"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mb)
+}
+
+// traceLabel returns a self-contained HTML provenance label (all values + the
+// pack QR image) that the app turns into a downloadable PDF (expo-print). Same
+// consumer-app-only gate as the JSON resolve.
+func (h *handler) traceLabel(w http.ResponseWriter, r *http.Request) {
+	if !h.svc.appKeyOK(r) {
+		writeErr(w, errForbidden("traceability is available from the PARAG app only"))
+		return
+	}
+	code := chi.URLParam(r, "code")
+	mb, err := h.svc.traceByCode(r.Context(), code)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	htmlDoc, err := renderLabelHTML(code, mb)
+	if err != nil {
+		writeErr(w, errInternal("label render failed"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(htmlDoc))
+}
+
+// qrDataURI renders `content` as a QR PNG and returns a data: URI for inline
+// embedding in the label HTML (self-contained — no external image request).
+func qrDataURI(content string) (string, error) {
+	png, err := qrcode.Encode(content, qrcode.Medium, 320)
+	if err != nil {
+		return "", err
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
+}
+
+// renderLabelHTML builds the provenance label. The embedded QR encodes the
+// consumer-app deep link (parag://trace/<code>), so scanning the printed label
+// re-opens the passport in the PARAG app only.
+func renderLabelHTML(code string, mb *milkBatchView) (string, error) {
+	deepLink := consumerAppScheme + strings.ToUpper(strings.TrimSpace(code))
+	qr, err := qrDataURI(deepLink)
+	if err != nil {
+		return "", err
+	}
+	esc := html.EscapeString
+	var rows strings.Builder
+	row := func(k, v string) {
+		if v == "" {
+			return
+		}
+		rows.WriteString("<tr><td class=\"k\">" + esc(k) + "</td><td class=\"v\">" + esc(v) + "</td></tr>")
+	}
+	row("Batch code", mb.BatchCode)
+	row("Product", mb.Product)
+	row("Pack size", mb.PackSize)
+	row("Packed on", mb.PackedAt)
+	row("Best before", mb.BestBefore)
+	row("Member union", mb.UnionName)
+	row("Processing plant", mb.Plant)
+	row("District", mb.District)
+	row("State", mb.State)
+	if mb.FatPct > 0 {
+		row("Fat", fmt.Sprintf("%g%%", mb.FatPct))
+	}
+	if mb.SnfPct > 0 {
+		row("SNF", fmt.Sprintf("%g%%", mb.SnfPct))
+	}
+	row("Contributing societies", fmt.Sprintf("%d", mb.MemberVillages))
+	if mb.PouringMembers > 0 {
+		row("Pouring farmer-members", fmt.Sprintf("%d", mb.PouringMembers))
+	}
+
+	var tests strings.Builder
+	for _, t := range mb.Tests {
+		mark := "✓"
+		cls := "pass"
+		if !t.Pass {
+			mark, cls = "✗", "fail"
+		}
+		val := ""
+		if t.Value != "" {
+			val = " <span class=\"tv\">" + esc(t.Value) + "</span>"
+		}
+		tests.WriteString("<li class=\"" + cls + "\">" + mark + " " + esc(t.Name) + val + "</li>")
+	}
+
+	recall := ""
+	if mb.Recalled {
+		recall = "<div class=\"recall\">⚠ RECALL: " + esc(mb.RecallNotice) + "</div>"
+	}
+	verified := "Verified against the federation's QA records"
+	if !mb.Verified {
+		verified = "Provenance recorded"
+	}
+
+	doc := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PARAG Milk Passport — ` + esc(mb.BatchCode) + `</title>
+<style>
+:root{--flame:#E8491D;--ink:#1a1a1a;--muted:#666;}
+*{box-sizing:border-box}body{font-family:-apple-system,system-ui,Segoe UI,Roboto,sans-serif;color:var(--ink);margin:0;padding:24px;background:#FFF6EC}
+.card{max-width:520px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;border:1px solid #f0e2d0}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.brand{font-weight:800;font-size:20px;color:var(--flame);letter-spacing:.5px}
+.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.qr{width:132px;height:132px;border:1px solid #eee;border-radius:8px}
+h1{font-size:15px;margin:18px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:6px 0;border-bottom:1px solid #f4f4f4;vertical-align:top}
+.k{color:var(--muted);width:44%}.v{font-weight:600}
+ul{list-style:none;padding:0;margin:8px 0 0;font-size:13px}
+li{padding:4px 0}.pass{color:#177245}.fail{color:#b00020}.tv{color:var(--muted);font-weight:600}
+.foot{margin-top:16px;font-size:11px;color:var(--muted);text-align:center}
+.recall{background:#b00020;color:#fff;padding:8px 12px;border-radius:8px;font-weight:700;margin:12px 0}
+.badge{display:inline-block;margin-top:8px;font-size:11px;color:#177245}
+</style></head>
+<body><div class="card">
+<div class="head">
+  <div><div class="brand">PARAG</div><div class="sub">Milk Provenance Passport</div>
+  <div class="badge">✓ ` + esc(verified) + `</div></div>
+  <img class="qr" src="` + qr + `" alt="Scan with the PARAG app"/>
+</div>` + recall + `
+<h1>Pack</h1><table>` + rows.String() + `</table>
+<h1>Quality &amp; safety tests</h1><ul>` + tests.String() + `</ul>
+<div class="foot">Scan the QR with the PARAG app to verify this pack's cooperative provenance.<br/>Pooled milk traces to the set of contributing societies, never a single farmer.</div>
+</div></body></html>`
+	return doc, nil
 }

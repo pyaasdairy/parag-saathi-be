@@ -50,10 +50,13 @@ func Register(r chi.Router, d *deps.Deps) {
 			ar.Post("/logout", h.logout)
 		})
 
-		// Traceability bridge — PUBLIC (provenance is public; a shopper scans a
-		// pack QR with or without an account). Reuses the operator's public QR
+		// Traceability bridge — consumer-app-gated (X-Parag-App-Key when
+		// CONSUMER_APP_KEY is set). Resolves a scanned pack QR to provenance JSON,
+		// and renders a printable/downloadable HTML label (all values + QR) that the
+		// app turns into a PDF via expo-print. Reuses the operator's public QR
 		// resolver read-only.
 		cr.Get("/traceability/{code}", h.traceByCode)
+		cr.Get("/traceability/{code}/label", h.traceLabel)
 
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
