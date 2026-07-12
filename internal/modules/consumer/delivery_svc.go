@@ -109,7 +109,9 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 	return out, nil
 }
 
-// tierFor returns the smallest 15/30/60 km band a distance falls in (0 = farther).
+// tierFor returns the smallest 15/30/60 km band a distance falls in. 0 means
+// beyond 60 km → the "all riders assigned to the store" fallback (still eligible;
+// the store owns the delivery).
 func tierFor(distKm float64) float64 {
 	for _, t := range riderTiersKm {
 		if distKm <= t {
@@ -138,12 +140,12 @@ func (s *service) assignRider(ctx context.Context, actor auth.Actor, storeID, de
 	if err != nil {
 		return nil, err
 	}
+	// Any rider ASSIGNED TO THE STORE is eligible. The 15→30→60 km tiers only
+	// RANK/suggest the nearest riders; if the address is beyond 60 km of every
+	// rider, the fallback is the whole store roster (the store owns the delivery),
+	// so assignment is never blocked on distance.
 	if !contains(riders, riderPartyID) {
 		return nil, errBadRequest("rider is not assigned to this store")
-	}
-	storeGeo, _ := s.repo.storeGeo(ctx, storeID)
-	if tierFor(round2(haversineKm(storeGeo, d.Geo))) == 0 {
-		return nil, errUnprocessable("OUT_OF_RANGE", "no rider serves this address within 60 km")
 	}
 	now := time.Now().UTC()
 	return s.repo.updateDelivery(ctx, deliveryID,
