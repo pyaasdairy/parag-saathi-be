@@ -27,6 +27,17 @@ services:
         generateValue: true
       - key: OTP_HASH_SECRET
         generateValue: true
+      # ── Consumer app backend ──
+      # QR/traceability gate — set the SAME value in the consumer app's
+      # EXPO_PUBLIC_CONSUMER_APP_KEY so only the PARAG app can resolve pack QRs.
+      - key: CONSUMER_APP_KEY
+        sync: false
+      # Razorpay wallet top-ups — OPTIONAL. While OTP_DEV_MODE=true the offline
+      # dev seam handles top-ups for testing; set these for real payments later.
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
       # Testing conveniences (flip OFF for production):
       - key: OTP_DEV_MODE
         value: "true"
