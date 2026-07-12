@@ -31,8 +31,13 @@ type OnboardingRequest struct {
 	RequestedRole string             `bson:"requested_role" json:"requested_role"`
 	OrgUnitID     primitive.ObjectID `bson:"org_unit_id"   json:"org_unit_id"`
 	RequestedTier string             `bson:"requested_tier" json:"requested_tier"`
-	Note          string             `bson:"note,omitempty" json:"note,omitempty"`
-	DocumentRefs  []string           `bson:"document_refs,omitempty" json:"document_refs,omitempty"`
+	// AlsoAssignSachiv (Adhyaksh onboarding only): the executive marked this
+	// Adhyaksh as ALSO the samiti's Sachiv. Highlighted to the reviewer; on
+	// approval the saga grants SAMITI_SACHEEV too — through the SAME cap and
+	// org-type gates as any Sachiv appointment, never around them.
+	AlsoAssignSachiv bool     `bson:"also_assign_sachiv,omitempty" json:"also_assign_sachiv,omitempty"`
+	Note             string   `bson:"note,omitempty" json:"note,omitempty"`
+	DocumentRefs     []string `bson:"document_refs,omitempty" json:"document_refs,omitempty"`
 	// Rich field-capture carried from the doorstep enrolment form (blueprint §4).
 	// These are stored verbatim for the reviewer console; the approval saga still
 	// only needs phone/full_name/requested_role/org_unit_id/requested_tier.

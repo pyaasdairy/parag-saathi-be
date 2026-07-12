@@ -48,8 +48,10 @@ type submitRequest struct {
 	RequestedRole string             `json:"requested_role"`
 	OrgUnitID     primitive.ObjectID `json:"org_unit_id"`
 	RequestedTier string             `json:"requested_tier"`
-	Note          string             `json:"note,omitempty"`
-	DocumentRefs  []string           `json:"document_refs,omitempty"`
+	// Adhyaksh-only: also appoint this person as the samiti's Sachiv on approval.
+	AlsoAssignSachiv bool     `json:"also_assign_sachiv,omitempty"`
+	Note             string   `json:"note,omitempty"`
+	DocumentRefs     []string `json:"document_refs,omitempty"`
 	// Rich field capture (optional).
 	Village         string `json:"village,omitempty"`
 	DocumentType    string `json:"document_type,omitempty"`
@@ -75,6 +77,9 @@ func (r submitRequest) validate() error {
 	}
 	if r.OrgUnitID.IsZero() {
 		return httpx.BadRequest("MISSING_ORG_UNIT", "org_unit_id is required")
+	}
+	if r.AlsoAssignSachiv && r.RequestedRole != domain.RoleSamitiAdhyaksh {
+		return httpx.BadRequest("VALIDATION", "also_assign_sachiv applies only to SAMITI_ADHYAKSH requests")
 	}
 	if !requestableTiers[r.RequestedTier] {
 		return httpx.BadRequest("INVALID_TIER", "requested_tier must be one of MINIMAL, FARMER, STANDARD, RIDER, HIGH")

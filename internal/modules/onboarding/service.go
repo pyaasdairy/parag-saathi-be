@@ -101,28 +101,29 @@ func (s *service) submit(ctx context.Context, actor auth.Actor, req submitReques
 
 	now := time.Now().UTC()
 	request := domain.OnboardingRequest{
-		ID:              primitive.NewObjectID(),
-		Phone:           req.Phone,
-		FullName:        req.FullName,
-		FullNameHi:      req.FullNameHi,
-		RequestedRole:   req.RequestedRole,
-		OrgUnitID:       req.OrgUnitID,
-		RequestedTier:   req.RequestedTier,
-		Note:            req.Note,
-		DocumentRefs:    req.DocumentRefs,
-		Village:         req.Village,
-		DocumentType:    req.DocumentType,
-		DocumentNumber:  req.DocumentNumber,
-		KYCPhotoURL:     req.KYCPhotoURL,
-		ProfilePhotoURL: req.ProfilePhotoURL,
-		CattleCount:     req.CattleCount,
-		CattleBreed:     req.CattleBreed,
-		VehicleNumber:   req.VehicleNumber,
-		EmployeeID:      req.EmployeeID,
-		Status:          domain.OnboardingStatusPending,
-		SubmittedBy:     aid,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:               primitive.NewObjectID(),
+		Phone:            req.Phone,
+		FullName:         req.FullName,
+		FullNameHi:       req.FullNameHi,
+		RequestedRole:    req.RequestedRole,
+		OrgUnitID:        req.OrgUnitID,
+		RequestedTier:    req.RequestedTier,
+		AlsoAssignSachiv: req.AlsoAssignSachiv,
+		Note:             req.Note,
+		DocumentRefs:     req.DocumentRefs,
+		Village:          req.Village,
+		DocumentType:     req.DocumentType,
+		DocumentNumber:   req.DocumentNumber,
+		KYCPhotoURL:      req.KYCPhotoURL,
+		ProfilePhotoURL:  req.ProfilePhotoURL,
+		CattleCount:      req.CattleCount,
+		CattleBreed:      req.CattleBreed,
+		VehicleNumber:    req.VehicleNumber,
+		EmployeeID:       req.EmployeeID,
+		Status:           domain.OnboardingStatusPending,
+		SubmittedBy:      aid,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if err := s.repo.insertRequest(ctx, request); err != nil {
 		return nil, err
@@ -211,6 +212,12 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 	if reqTier := domain.RequiredKYCTier[request.RequestedRole]; reqTier != "" && !domain.KYCTierSatisfies(effectiveTier, reqTier) {
 		effectiveTier = reqTier
 	}
+	// The bundled Sachiv appointment (also_assign_sachiv) demands ITS tier too.
+	if request.AlsoAssignSachiv {
+		if reqTier := domain.RequiredKYCTier[domain.RoleSamitiSacheev]; reqTier != "" && !domain.KYCTierSatisfies(effectiveTier, reqTier) {
+			effectiveTier = reqTier
+		}
+	}
 	// Tier authority mirrors the KYC review console (§5.2): the reviewer's role
 	// must be permitted to clear the tier this approval will vouch.
 	if !domain.CanApproveKYCTier(actor.RoleCode, effectiveTier) {
@@ -239,7 +246,13 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 		return nil, httpx.BadRequest("INVALID_ORG_TYPE",
 			request.RequestedRole+" may only be assigned at org type "+allowed+", not "+targetOrg.Type)
 	}
-	if request.RequestedRole == domain.RoleSamitiSacheev {
+	if request.AlsoAssignSachiv && !domain.RoleAllowedAtOrgType(domain.RoleSamitiSacheev, targetOrg.Type) {
+		return nil, httpx.BadRequest("INVALID_ORG_TYPE",
+			"SAMITI_SACHEEV may only be assigned at org type "+strings.Join(domain.RoleAllowedOrgTypes[domain.RoleSamitiSacheev], ", ")+", not "+targetOrg.Type)
+	}
+	// The Sachiv governance cap guards BOTH paths to the role: a direct Sachiv
+	// request and an Adhyaksh request bundling the appointment.
+	if request.RequestedRole == domain.RoleSamitiSacheev || request.AlsoAssignSachiv {
 		capValue, err := s.repo.getIntSetting(ctx, sachivCapSettingKey, defaultSachivCap)
 		if err != nil {
 			return nil, err
@@ -334,6 +347,52 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 		}
 	}
 
+	// 4b. Bundled Sachiv appointment (also_assign_sachiv): grant SAMITI_SACHEEV
+	// at the same samiti — cap + org-type were verified above, BEFORE the
+	// atomic claim, so this can only fail on infrastructure errors. Idempotent
+	// like the primary grant.
+	if claimed.AlsoAssignSachiv {
+		sachivExists, err := s.repo.activeAssignmentExists(ctx, party.ID, domain.RoleSamitiSacheev, claimed.OrgUnitID)
+		if err != nil {
+			return nil, err
+		}
+		if !sachivExists {
+			sachivAssignment := domain.RoleAssignment{
+				ID:        primitive.NewObjectID(),
+				PartyID:   party.ID,
+				RoleCode:  domain.RoleSamitiSacheev,
+				OrgUnitID: claimed.OrgUnitID,
+				GrantedBy: &rid,
+				ValidFrom: now,
+				Status:    domain.RoleAssignmentActive,
+				CreatedAt: now,
+			}
+			if err := s.repo.insertAssignment(ctx, sachivAssignment); err != nil {
+				// The primary Adhyaksh grant already committed (this saga is not
+				// transactional — same as the single-role path). Make the partial
+				// state LOUD, not silent: an explicit error log + an audit entry
+				// so ops can complete the bundled appointment via People → grant.
+				s.log.ErrorContext(ctx, "onboarding approve: bundled Sachiv grant failed after Adhyaksh grant — grant Sachiv manually",
+					slog.String("request_id", id.Hex()), slog.String("party_id", party.ID.Hex()),
+					slog.String("org_unit_id", claimed.OrgUnitID.Hex()), slog.Any("err", err))
+				s.deps.Audit.Record(ctx, audit.Entry{
+					Action: "onboarding.bundled_sachiv_failed", TargetType: "party", TargetID: party.ID.Hex(),
+					Meta: map[string]any{"request_id": id.Hex(), "org_unit_id": claimed.OrgUnitID.Hex(),
+						"note": "Adhyaksh granted; bundled Sachiv grant failed — appoint Sachiv manually"},
+				})
+				return nil, err
+			}
+			// Dedicated grant audit so the capped Sachiv appointment is
+			// reconstructable from the log (who, when, which approval) —
+			// mirroring the identity grant path's per-role audit.
+			s.deps.Audit.Record(ctx, audit.Entry{
+				Action: "role.grant", TargetType: "party", TargetID: party.ID.Hex(),
+				Meta: map[string]any{"role_code": domain.RoleSamitiSacheev, "org_unit_id": claimed.OrgUnitID.Hex(),
+					"assignment_id": sachivAssignment.ID.Hex(), "via": "onboarding.approve", "request_id": id.Hex()},
+			})
+		}
+	}
+
 	// 5. Stamp the created party onto the request.
 	updated, err := s.repo.setRequestCreatedParty(ctx, id, party.ID, now)
 	if err != nil {
@@ -358,11 +417,19 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 		Channel:     domain.ChannelSMS,
 		TemplateKey: domain.TemplateOnboardingApproved,
 		Language:    language,
-		Params: map[string]string{
-			"role":     claimed.RequestedRole,
-			"org_name": orgName,
-			"tier":     claimed.RequestedTier,
-		},
+		Params: func() map[string]string {
+			p := map[string]string{
+				"role":     claimed.RequestedRole,
+				"org_name": orgName,
+				"tier":     claimed.RequestedTier,
+			}
+			// Tell the appointee they were ALSO made Sachiv (best-effort param;
+			// templates that don't reference also_role simply ignore it).
+			if claimed.AlsoAssignSachiv {
+				p["also_role"] = domain.RoleSamitiSacheev
+			}
+			return p
+		}(),
 		Status:   domain.NotificationQueued,
 		QueuedAt: now,
 	}); err != nil {
@@ -375,11 +442,12 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 		TargetType: "onboarding_request",
 		TargetID:   id.Hex(),
 		Meta: map[string]any{
-			"party_id":       party.ID.Hex(),
-			"requested_role": claimed.RequestedRole,
-			"requested_tier": claimed.RequestedTier,
-			"new_tier":       newTier,
-			"org_unit_id":    claimed.OrgUnitID.Hex(),
+			"party_id":           party.ID.Hex(),
+			"requested_role":     claimed.RequestedRole,
+			"requested_tier":     claimed.RequestedTier,
+			"new_tier":           newTier,
+			"org_unit_id":        claimed.OrgUnitID.Hex(),
+			"also_assign_sachiv": claimed.AlsoAssignSachiv,
 		},
 	})
 	s.log.InfoContext(ctx, "onboarding request approved",
