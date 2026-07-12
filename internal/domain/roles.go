@@ -221,14 +221,18 @@ var RoleAllowedOrgTypes = map[string][]string{
 
 	// Union / field / logistics / health tier — rooted at the MILK_UNION.
 	RoleVanRider:             {OrgTypeMilkUnion},
-	RoleDeliveryRider:        {OrgTypeMilkUnion},
 	RoleUnionFieldSupervisor: {OrgTypeMilkUnion},
 	RoleUnionPresident:       {OrgTypeMilkUnion},
 	RoleOrganisingManager:    {OrgTypeMilkUnion},
 	RoleOnboardingExecutive:  {OrgTypeMilkUnion},
-	RoleStoreManager:         {OrgTypeMilkUnion},
 	RoleVeterinarian:         {OrgTypeMilkUnion},
 	RoleMVUDriver:            {OrgTypeMilkUnion},
+
+	// Consumer last-mile tier — a Parag STORE (retail/delivery hub). The store
+	// manager runs the hub; the delivery rider is assigned to it. (No existing
+	// assignments — safe to scope to STORE.)
+	RoleStoreManager:  {OrgTypeStore},
+	RoleDeliveryRider: {OrgTypeStore},
 
 	// State / federation apex tier.
 	RolePCDFAdmin:        {OrgTypeFederation},

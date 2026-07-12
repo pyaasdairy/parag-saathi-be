@@ -14,11 +14,12 @@ const (
 	OrgTypeProcessingPlant = "PROCESSING_PLANT" // PCDF plant
 	OrgTypeBMC             = "BMC"              // bulk milk cooler / chilling centre
 	OrgTypeDCS             = "DCS"              // village samiti
+	OrgTypeStore           = "STORE"            // Parag retail store / delivery hub (consumer last-mile)
 )
 
 // AllOrgTypes is the closed set of org-unit types.
 var AllOrgTypes = []string{
-	OrgTypeFederation, OrgTypeMilkUnion, OrgTypeProcessingPlant, OrgTypeBMC, OrgTypeDCS,
+	OrgTypeFederation, OrgTypeMilkUnion, OrgTypeProcessingPlant, OrgTypeBMC, OrgTypeDCS, OrgTypeStore,
 }
 
 // ValidOrgParent encodes the allowed hierarchy edges.
@@ -28,6 +29,8 @@ var ValidOrgParent = map[string][]string{
 	OrgTypeProcessingPlant: {OrgTypeMilkUnion, OrgTypeFederation},
 	OrgTypeBMC:             {OrgTypeMilkUnion},
 	OrgTypeDCS:             {OrgTypeMilkUnion, OrgTypeBMC},
+	// A Parag Store is a retail/delivery hub under a district union (or the apex).
+	OrgTypeStore: {OrgTypeMilkUnion, OrgTypeFederation},
 }
 
 // OrgUnit is a node in the cooperative hierarchy.
