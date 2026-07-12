@@ -50,6 +50,11 @@ func Register(r chi.Router, d *deps.Deps) {
 			ar.Post("/logout", h.logout)
 		})
 
+		// Traceability bridge — PUBLIC (provenance is public; a shopper scans a
+		// pack QR with or without an account). Reuses the operator's public QR
+		// resolver read-only.
+		cr.Get("/traceability/{code}", h.traceByCode)
+
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
 			pr.Use(svc.authenticate)
