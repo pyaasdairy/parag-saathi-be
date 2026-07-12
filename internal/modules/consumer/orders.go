@@ -255,6 +255,9 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	if err := s.repo.insertOrder(ctx, o); err != nil {
 		return nil, err
 	}
+	// Create the last-mile delivery task (routed to the nearest Parag Store,
+	// unassigned until a store manager assigns a rider). Best-effort.
+	s.createDeliveryForOrder(ctx, o)
 	return o, nil
 }
 

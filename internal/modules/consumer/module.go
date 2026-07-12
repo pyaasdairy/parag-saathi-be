@@ -8,7 +8,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
+	"github.com/pyaas/saathi-backend/internal/platform/middleware"
 )
 
 // Register mounts the consumer backend under /consumer (→ /api/v1/consumer).
@@ -100,6 +102,35 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/orders/{id}/cancel", h.cancelOrder)
 			pr.Post("/orders/{id}/review", h.reviewOrder)
 			pr.Post("/orders/{id}/advance", h.advanceOrder) // dev-only status transition
+		})
+
+		// ── Operator surfaces (SAATHI operator token + role) ──
+		// The store manager and delivery rider are Saathi operators; these routes
+		// reuse Saathi's auth + wire format ({data} envelope), consumed by the
+		// Saathi FE (store.ts / delivery.ts, service:'consumer').
+		cr.Group(func(op chi.Router) {
+			op.Use(middleware.Authenticate(d.JWT))
+
+			// Store manager (STORE_MANAGER): orders in the store's vicinity, its
+			// rider roster (with distance tiers), and rider assignment.
+			op.Group(func(sm chi.Router) {
+				sm.Use(middleware.RequireRoles(domain.RoleStoreManager))
+				sm.Get("/stores/{storeId}/orders", h.storeOrders)
+				sm.Get("/stores/{storeId}/riders", h.storeRiders)
+				sm.Post("/stores/{storeId}/orders/{deliveryId}/assign", h.assignRider)
+			})
+
+			// Delivery rider (DELIVERY_RIDER): the last-mile task lifecycle.
+			op.Group(func(dr chi.Router) {
+				dr.Use(middleware.RequireRoles(domain.RoleDeliveryRider))
+				dr.Get("/delivery/tasks", h.riderDeliveries)
+				dr.Get("/delivery/tasks/{deliveryId}", h.riderGetDelivery)
+				dr.Post("/delivery/tasks/{deliveryId}/accept", h.riderAccept)
+				dr.Post("/delivery/tasks/{deliveryId}/pickup", h.riderPickup)
+				dr.Post("/delivery/tasks/{deliveryId}/location", h.riderLocation)
+				dr.Post("/delivery/tasks/{deliveryId}/deliver", h.riderDeliver)
+				dr.Post("/delivery/tasks/{deliveryId}/fail", h.riderFail)
+			})
 		})
 	})
 

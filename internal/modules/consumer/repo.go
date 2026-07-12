@@ -22,19 +22,29 @@ type repository struct {
 	consents   *mongo.Collection
 	payOrders  *mongo.Collection
 	orders     *mongo.Collection
+	deliveries *mongo.Collection
+	// Operator collections — READ-mostly for the delivery flow (store/rider
+	// resolution). Deliveries are consumer_*; these are shared Saathi identity.
+	orgUnits        *mongo.Collection
+	parties         *mongo.Collection
+	roleAssignments *mongo.Collection
 }
 
 func newRepository(db *mongo.Database) *repository {
 	return &repository{
-		accounts:   db.Collection(collAccounts),
-		otp:        db.Collection(collOTP),
-		refresh:    db.Collection(collRefresh),
-		addresses:  db.Collection(collAddresses),
-		wallets:    db.Collection(collWallets),
-		walletTxns: db.Collection(collWalletTxns),
-		consents:   db.Collection(collConsents),
-		payOrders:  db.Collection(collPayOrders),
-		orders:     db.Collection(collOrders),
+		accounts:        db.Collection(collAccounts),
+		otp:             db.Collection(collOTP),
+		refresh:         db.Collection(collRefresh),
+		addresses:       db.Collection(collAddresses),
+		wallets:         db.Collection(collWallets),
+		walletTxns:      db.Collection(collWalletTxns),
+		consents:        db.Collection(collConsents),
+		payOrders:       db.Collection(collPayOrders),
+		orders:          db.Collection(collOrders),
+		deliveries:      db.Collection(collDeliveries),
+		orgUnits:        db.Collection("org_units"),
+		parties:         db.Collection("parties"),
+		roleAssignments: db.Collection("role_assignments"),
 	}
 }
 
@@ -71,6 +81,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	}
 	if err := r.ensureOrderIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer order indexes: %w", err)
+	}
+	if err := r.ensureDeliveryIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer delivery indexes: %w", err)
 	}
 	return nil
 }
