@@ -130,6 +130,56 @@ Shared with Saathi: `JWT_SECRET`, `OTP_HASH_SECRET`, `QR_SIGNING_SECRET`, `MONGO
 
 ---
 
+## 4a. Deployment & production configuration (STRICT)
+
+Nothing here is hardcoded — **every value below is read from the environment**
+and MUST be set at deploy time (never committed). The consumer module is in the
+same binary as Saathi, so one deploy of `feature/consumer-backend` serves both.
+
+### Backend env (Render dashboard — set, don't commit)
+
+| Var | Pilot / testing | **Production (STRICT)** |
+|---|---|---|
+| `ENV` | `dev` | **`prod`** (turns on prod hardening) |
+| `MONGO_URI` | Atlas URI | Atlas URI (required) |
+| `JWT_SECRET` | generated | strong secret (prod refuses a dev secret) |
+| `QR_SIGNING_SECRET` | generated | strong secret |
+| `OTP_HASH_SECRET` | generated | strong secret |
+| `OTP_DEV_MODE` | `true` (echoes test OTP) | **`false`** — prod REFUSES to boot with it on (OTPs would leak). Enables real SMS OTP; **disables** the dev wallet top-up / refund / order-advance and the Razorpay dev seam. |
+| `CONSUMER_APP_KEY` | optional (gate off if empty) | **required** — the value the consumer app sends as `X-Parag-App-Key`; without it the pack-QR bridge is open to any client. **Must equal** the app's `EXPO_PUBLIC_CONSUMER_APP_KEY`. |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | empty (test top-up covers it) | **required** — real wallet top-ups. With `OTP_DEV_MODE=false` the dev seam is gone, so `/wallet/order` returns "payments not configured" until these are set. |
+
+### Consumer app env
+
+| Var | Pilot | **Production** |
+|---|---|---|
+| `EXPO_PUBLIC_API_URL` | `https://<host>/api/v1/consumer` | same |
+| `EXPO_PUBLIC_CONSUMER_APP_KEY` | — (optional) | **must equal backend `CONSUMER_APP_KEY`** |
+| `EXPO_PUBLIC_RAZORPAY_KEY_ID` | — | real Razorpay **public** key |
+| `EXPO_PUBLIC_WALLET_TEST_TOPUP` | `true` (add money without a gateway) | **`false` / unset** — real Razorpay recharge only |
+
+### Saathi app env (store-manager + delivery-rider screens)
+
+| Var | Value |
+|---|---|
+| `EXPO_PUBLIC_CONSUMER_API_URL` | `https://<host>/api/v1/consumer` |
+
+### What flipping `ENV=prod` + `OTP_DEV_MODE=false` turns OFF
+
+- Test OTP echo (real SMS OTP required), and the app's test "add money".
+- Dev-only wallet endpoints: `/wallet/topup`, `/wallet/recharge`, `/wallet/refund`
+  → `403`. Money in only via signature-verified Razorpay (`/wallet/order` +
+  `/wallet/verify`); refunds become order-driven.
+- The dev-only `POST /orders/{id}/advance` transition and the Razorpay dev seam.
+
+### Data not auto-created (no hardcoding)
+The Parag `STORE` org and the store manager / delivery rider are **not** created
+by the backend. Create them the real way: a super admin makes the `STORE` org
+unit; the manager + rider are onboarded via **KYC** (Onboarding Exec → Super
+Admin approve), and the onboarding "assigned to" picker offers the Parag Store.
+
+---
+
 ## 5. Verification (dry-run harnesses)
 
 Driven through the **real** shipped consumer FE lib (+ real operator login) —
