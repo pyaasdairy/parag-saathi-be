@@ -1,0 +1,83 @@
+package consumer
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/pyaas/saathi-backend/internal/platform/deps"
+)
+
+// Register mounts the consumer backend under /consumer (→ /api/v1/consumer).
+// Everything here is ADD-ONLY and isolated from the operator side. The consumer
+// app points EXPO_PUBLIC_API_URL at .../api/v1/consumer so its bare paths
+// (/auth/..., /users/me, /wallet, /addresses) compose onto this subtree.
+func Register(r chi.Router, d *deps.Deps) {
+	log := d.Log.With(slog.String("module", "consumer"))
+	repo := newRepository(d.DB)
+	svc := newService(d, repo, log)
+	h := &handler{svc: svc}
+
+	// Own indexes at startup (never touches shared Saathi index setup). This is
+	// FATAL on failure: the unique (consumer, ref, type) index IS the wallet's
+	// exactly-once money gate — booting without it would let a duplicate webhook
+	// double-credit. Fail fast rather than serve money endpoints unguarded.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := repo.ensureIndexes(ctx); err != nil {
+		log.Error("consumer index setup failed — refusing to boot", slog.Any("err", err))
+		panic("consumer: index setup failed: " + err.Error())
+	}
+
+	r.Route("/consumer", func(cr chi.Router) {
+		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
+		// operator envelope, on unknown consumer routes.
+		cr.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, 404, &apiError{Code: "NOT_FOUND", Message: "not found"})
+		})
+		cr.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, 405, &apiError{Code: "METHOD_NOT_ALLOWED", Message: "method not allowed"})
+		})
+
+		// ── Public (no auth) ──
+		cr.Route("/auth", func(ar chi.Router) {
+			ar.Post("/otp/request", h.otpRequest)
+			ar.Post("/otp/verify", h.otpVerify)
+			ar.Post("/refresh", h.refresh)
+			ar.Post("/logout", h.logout)
+		})
+
+		// ── Authenticated (consumer JWT) ──
+		cr.Group(func(pr chi.Router) {
+			pr.Use(svc.authenticate)
+
+			// Profile — support the FE's /users/me and the note's /me alias.
+			for _, base := range []string{"/users/me", "/me"} {
+				pr.Get(base, h.me)
+				pr.Patch(base, h.patchMe)
+				pr.Put(base, h.patchMe)
+				pr.Delete(base, h.erase)
+			}
+			pr.Post("/me/erasure", h.erase)
+
+			// Wallet — canonical + FE-alias paths.
+			pr.Get("/wallet", h.getWallet)
+			pr.Get("/wallet/txns", h.walletTxns)
+			pr.Get("/wallet/transactions", h.walletTxns)
+			pr.Post("/wallet/topup", h.topup)
+			pr.Post("/wallet/recharge", h.topup)
+
+			// Addresses.
+			pr.Get("/addresses", h.listAddresses)
+			pr.Post("/addresses", h.createAddress)
+			pr.Patch("/addresses/{id}", h.patchAddress)
+			pr.Post("/addresses/{id}/default", h.defaultAddress)
+			pr.Delete("/addresses/{id}", h.deleteAddress)
+		})
+	})
+
+	log.Info("consumer backend mounted at /api/v1/consumer")
+}
