@@ -58,7 +58,26 @@ func (s *service) storeOrders(ctx context.Context, actor auth.Actor, storeID str
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
 	}
+	// Backfill any open order missing its delivery task (e.g. placed before a
+	// Parag Store existed, or if delivery creation failed) so no order is ever
+	// invisible to the store. Idempotent — one delivery per order.
+	s.backfillMissingDeliveries(ctx)
 	return s.repo.listDeliveriesByStore(ctx, storeID)
+}
+
+// backfillMissingDeliveries creates a delivery task for any still-open order that
+// doesn't have one yet, routed to its nearest Parag Store. Best-effort.
+func (s *service) backfillMissingDeliveries(ctx context.Context) {
+	orders, err := s.repo.recentFulfillableOrders(ctx)
+	if err != nil {
+		return
+	}
+	for i := range orders {
+		o := &orders[i]
+		if d, _ := s.repo.findDeliveryByOrder(ctx, o.OrderID); d == nil {
+			s.createDeliveryForOrder(ctx, o)
+		}
+	}
 }
 
 // storeRiders returns the store's riders with workload + distance to a specific

@@ -153,6 +153,22 @@ func (r *repository) findDeliveryByID(ctx context.Context, id string) (*delivery
 	return &d, nil
 }
 
+// recentFulfillableOrders returns still-open orders (for backfilling any that
+// are missing a delivery task — e.g. placed before a Parag Store existed).
+func (r *repository) recentFulfillableOrders(ctx context.Context) ([]order, error) {
+	cur, err := r.orders.Find(ctx,
+		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"placed", "confirmed", "preparing", "assigned"}}}}},
+		options.Find().SetSort(bson.D{{Key: "placed_at", Value: -1}}).SetLimit(300))
+	if err != nil {
+		return nil, errInternal("orders scan failed")
+	}
+	out := []order{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("orders decode failed")
+	}
+	return out, nil
+}
+
 func (r *repository) findDeliveryByOrder(ctx context.Context, orderID string) (*delivery, error) {
 	var d delivery
 	err := r.deliveries.FindOne(ctx, bson.D{{Key: "order_id", Value: orderID}}).Decode(&d)
