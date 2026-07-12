@@ -352,8 +352,13 @@ func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID
 
 // topup is the DEV direct-credit path (POST /wallet/topup). The FE's real
 // money-in path is createTopupOrder + verifyPayment (Razorpay); this stays for
-// offline/testing and requires an explicit ref.
+// offline/testing only. GATED to dev mode — in production it must be impossible
+// to mint wallet money without a signature-verified payment (the shipped app
+// never calls this in backend mode; recharge always goes through order+verify).
 func (s *service) topup(ctx context.Context, consumerID primitive.ObjectID, amount float64, method, ref string) (walletView, error) {
+	if !s.deps.Cfg.OTPDevMode {
+		return walletView{}, errForbidden("not available")
+	}
 	amount = round2(amount)
 	if amount <= 0 || amount > 100000 {
 		return walletView{}, errBadRequest("amount must be between 1 and 100000")
@@ -392,9 +397,15 @@ func (s *service) createTopupOrder(ctx context.Context, consumerID primitive.Obj
 
 // verifyPayment authoritatively verifies a completed Razorpay payment and
 // credits the wallet EXACTLY ONCE (POST /wallet/verify). Verification order:
-// signature (crypto) → order ownership → CREATED→PAID transition (the settle
-// gate) → ledger credit (the money gate). A replay after a successful credit is
-// idempotent; a bad signature never credits and never 500s.
+// signature (crypto) → order ownership → ledger credit (the money gate, keyed by
+// the order id) → mark the order PAID (pure bookkeeping).
+//
+// The CREDIT is the money gate and runs FIRST: creditTopup is idempotent by
+// (consumer, orderID, TOPUP), so a retry/replay credits exactly once and is
+// self-healing — a transient failure on a prior attempt is repaired by the next
+// retry (the credit had not committed, so it runs now). markPaymentOrderPaid is
+// downstream bookkeeping only, so a failure there can never suppress the credit.
+// A bad signature never credits and never 500s.
 func (s *service) verifyPayment(ctx context.Context, consumerID primitive.ObjectID, paymentID, orderID, signature string) (verifyView, error) {
 	if !s.verifyRzpSignature(orderID, paymentID, signature) {
 		return verifyView{Verified: false}, nil
@@ -405,26 +416,119 @@ func (s *service) verifyPayment(ctx context.Context, consumerID primitive.Object
 	}
 	amount := round2(float64(ord.AmountPaise) / 100)
 
-	// Settle gate: only the CREATED→PAID transition proceeds to credit. A replay
-	// finds it already PAID and returns the current balance (idempotent).
-	transitioned, err := s.repo.markPaymentOrderPaid(ctx, orderID, paymentID, time.Now().UTC())
-	if err != nil {
-		return verifyView{}, err
-	}
-	if !transitioned {
-		wl, _ := s.getOrCreateWallet(ctx, consumerID)
-		return verifyView{Verified: true, Balance: round2(wl.CashBalance)}, nil
-	}
-	// Ledger money gate keyed by the order id (belt-and-braces with the settle gate).
+	// Money gate FIRST — idempotent by the order id, so it credits exactly once
+	// across retries and heals a prior partial attempt.
 	wl, err := s.creditTopup(ctx, consumerID, amount, "razorpay", orderID)
 	if err != nil {
 		return verifyView{}, err
 	}
+	// Bookkeeping — record the order PAID (best-effort; never gates the credit).
+	_, _ = s.repo.markPaymentOrderPaid(ctx, orderID, paymentID, time.Now().UTC())
 	return verifyView{Verified: true, Balance: round2(wl.CashBalance)}, nil
 }
 
 func (s *service) walletTxns(ctx context.Context, consumerID primitive.ObjectID, limit int64) ([]walletTxn, error) {
 	return s.repo.listWalletTxns(ctx, consumerID, limit)
+}
+
+// debit spends `amount` from the wallet (promo-first) for a purchase/delivery.
+// EXACTLY-ONCE by ref: a DEBIT gate row is inserted first (unique consumer+ref+
+// type), so a retried settle sweep for the same order can never double-charge.
+// The balance move is a single atomic guarded update that fails closed on
+// insufficient funds. If the move does NOT happen (insufficient funds or a
+// transient error) the gate row is rolled back on a DETACHED context — a
+// cancelled request can't orphan it — so a later top-up + retry still charges.
+func (s *service) debit(ctx context.Context, consumerID primitive.ObjectID, amount float64, ref, remark string) (walletView, error) {
+	amount = round2(amount)
+	if amount <= 0 {
+		return walletView{}, errBadRequest("amount must be positive")
+	}
+	if ref == "" {
+		return walletView{}, errBadRequest("a debit reference (ref) is required")
+	}
+	now := time.Now().UTC()
+	// Pre-read the balances so the ledger row records the bucket the debit
+	// actually drew from (promo-first). Money correctness does NOT depend on this
+	// read — the atomic guarded update below is the authority; this only labels
+	// the ledger row for display.
+	pre, _ := s.getOrCreateWallet(ctx, consumerID)
+	bucket := "CASH"
+	if pre != nil && pre.RewardsBalance >= amount {
+		bucket = "REWARDS" // fully covered by promo
+	}
+	gate := walletTxn{
+		ID: primitive.NewObjectID(), ConsumerID: consumerID,
+		Type: "DEBIT", Bucket: bucket, Amount: amount, RefType: "order", RefID: ref, Status: "SUCCESS", Remark: remark, CreatedAt: now,
+	}
+	dup, err := s.repo.insertWalletTxnGate(ctx, gate)
+	if err != nil {
+		return walletView{}, err
+	}
+	if dup {
+		wl, e := s.getOrCreateWallet(ctx, consumerID)
+		if e != nil {
+			return walletView{}, e
+		}
+		return walletToView(wl), nil // already debited — idempotent
+	}
+	updated, ok, err := s.repo.debitWalletAtomic(ctx, consumerID, amount, 1)
+	if err != nil || !ok {
+		// No money moved — roll back the gate on a detached context so a
+		// cancelled/timed-out request context cannot orphan it (an orphan would
+		// permanently short-circuit a future retry as "already debited").
+		rbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		s.repo.deleteWalletTxn(rbCtx, gate.ID)
+		cancel()
+		if err != nil {
+			return walletView{}, err
+		}
+		return walletView{}, errUnprocessable("INSUFFICIENT_FUNDS", "wallet balance is too low for this order")
+	}
+	s.repo.updateWalletTxnBalances(ctx, gate.ID, updated.ID, updated.Seq, updated.CashBalance, updated.RewardsBalance)
+	return walletToView(updated), nil
+}
+
+// refund credits money back to Cash. EXACTLY-ONCE by ref (a retried refund
+// credits at most once). GATED to dev mode — a shopper-initiated arbitrary
+// refund would mint spendable Cash with no entitlement. In production, refunds
+// are server-authorised and bounded to a prior charge (driven from the order
+// cancellation/return flow, a later phase); the shipped app never calls this.
+func (s *service) refund(ctx context.Context, consumerID primitive.ObjectID, amount float64, ref, remark string) (walletView, error) {
+	if !s.deps.Cfg.OTPDevMode {
+		return walletView{}, errForbidden("not available")
+	}
+	amount = round2(amount)
+	if amount <= 0 || amount > 100000 {
+		return walletView{}, errBadRequest("amount must be between 1 and 100000")
+	}
+	if ref == "" {
+		return walletView{}, errBadRequest("a refund reference (ref) is required")
+	}
+	now := time.Now().UTC()
+	if remark == "" {
+		remark = "refund"
+	}
+	gate := walletTxn{
+		ID: primitive.NewObjectID(), ConsumerID: consumerID,
+		Type: "REFUND", Bucket: "CASH", Amount: amount, RefType: "refund", RefID: ref, Status: "SUCCESS", Remark: remark, CreatedAt: now,
+	}
+	dup, err := s.repo.insertWalletTxnGate(ctx, gate)
+	if err != nil {
+		return walletView{}, err
+	}
+	if dup {
+		wl, e := s.getOrCreateWallet(ctx, consumerID)
+		if e != nil {
+			return walletView{}, e
+		}
+		return walletToView(wl), nil
+	}
+	updated, err := s.repo.incWallet(ctx, consumerID, amount, 0, 0, 1)
+	if err != nil {
+		return walletView{}, err
+	}
+	s.repo.updateWalletTxnBalances(ctx, gate.ID, updated.ID, updated.Seq, updated.CashBalance, updated.RewardsBalance)
+	return walletToView(updated), nil
 }
 
 // ── Addresses ───────────────────────────────────────────────────────────────

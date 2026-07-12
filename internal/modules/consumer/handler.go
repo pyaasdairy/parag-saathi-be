@@ -234,6 +234,54 @@ func (h *handler) walletVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// walletDebit — POST /wallet/debit: spend from the wallet for an order/delivery.
+func (h *handler) walletDebit(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var body struct {
+		Amount float64 `json:"amount"`
+		Ref    string  `json:"ref"`
+		Remark string  `json:"remark"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := h.svc.debit(r.Context(), id, body.Amount, body.Ref, body.Remark)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// walletRefund — POST /wallet/refund: credit money back to the wallet (Cash).
+func (h *handler) walletRefund(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var body struct {
+		Amount float64 `json:"amount"`
+		Ref    string  `json:"ref"`
+		Remark string  `json:"remark"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := h.svc.refund(r.Context(), id, body.Amount, body.Ref, body.Remark)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
 func (h *handler) walletTxns(w http.ResponseWriter, r *http.Request) {
 	id, aerr := actorID(r)
 	if aerr != nil {

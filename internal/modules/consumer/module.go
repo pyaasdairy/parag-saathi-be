@@ -73,6 +73,9 @@ func Register(r chi.Router, d *deps.Deps) {
 			// signature server-side → credit exactly once.
 			pr.Post("/wallet/order", h.walletOrder)
 			pr.Post("/wallet/verify", h.walletVerify)
+			// Server-authoritative spend/refund (promo-first, idempotent by ref).
+			pr.Post("/wallet/debit", h.walletDebit)
+			pr.Post("/wallet/refund", h.walletRefund)
 
 			// Addresses.
 			pr.Get("/addresses", h.listAddresses)
@@ -80,6 +83,15 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Patch("/addresses/{id}", h.patchAddress)
 			pr.Post("/addresses/{id}/default", h.defaultAddress)
 			pr.Delete("/addresses/{id}", h.deleteAddress)
+
+			// Orders — the backend owns the order; money is debited on delivery
+			// via the server wallet. Scoped to the authenticated shopper.
+			pr.Get("/orders", h.listOrders)
+			pr.Post("/orders", h.createOrder)
+			pr.Get("/orders/{id}", h.getOrder)
+			pr.Post("/orders/{id}/cancel", h.cancelOrder)
+			pr.Post("/orders/{id}/review", h.reviewOrder)
+			pr.Post("/orders/{id}/advance", h.advanceOrder) // dev-only status transition
 		})
 	})
 

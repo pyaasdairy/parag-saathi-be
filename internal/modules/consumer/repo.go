@@ -21,6 +21,7 @@ type repository struct {
 	walletTxns *mongo.Collection
 	consents   *mongo.Collection
 	payOrders  *mongo.Collection
+	orders     *mongo.Collection
 }
 
 func newRepository(db *mongo.Database) *repository {
@@ -33,6 +34,7 @@ func newRepository(db *mongo.Database) *repository {
 		walletTxns: db.Collection(collWalletTxns),
 		consents:   db.Collection(collConsents),
 		payOrders:  db.Collection(collPayOrders),
+		orders:     db.Collection(collOrders),
 	}
 }
 
@@ -66,6 +68,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 		if _, err := s.c.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: s.keys, Options: s.opts}); err != nil {
 			return fmt.Errorf("consumer index (%v): %w", s.keys, err)
 		}
+	}
+	if err := r.ensureOrderIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer order indexes: %w", err)
 	}
 	return nil
 }
@@ -153,10 +158,15 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 	// production, be re-keyed to a pseudonymous id and retained (§21); for the
 	// pilot we remove the consumer-scoped rows.
 	filter := bson.D{{Key: "consumer_id", Value: id}}
-	for _, c := range []*mongo.Collection{r.addresses, r.wallets, r.walletTxns, r.consents, r.refresh} {
+	for _, c := range []*mongo.Collection{r.addresses, r.wallets, r.walletTxns, r.consents, r.refresh, r.payOrders} {
 		if _, err := c.DeleteMany(ctx, filter); err != nil {
 			return errInternal("erasure failed")
 		}
+	}
+	// Orders carry raw PII (name, phone, precise geo, address) and are keyed by
+	// user_id (the consumer hex), not consumer_id — erase them too.
+	if _, err := r.orders.DeleteMany(ctx, bson.D{{Key: "user_id", Value: id.Hex()}}); err != nil {
+		return errInternal("erasure failed")
 	}
 	// OTP challenges are keyed by phone, not consumer_id — clear by phone too so
 	// no auth material or phone-number PII survives the erasure.
@@ -365,6 +375,48 @@ func (r *repository) incWallet(ctx context.Context, consumerID primitive.ObjectI
 		return nil, errInternal("wallet update failed")
 	}
 	return &wl, nil
+}
+
+// debitWalletAtomic spends `amount` PROMO-FIRST (rewards preserved as spendable
+// but real cash conserved last) in a SINGLE atomic guarded pipeline update. The
+// $expr filter admits the update only when cash+rewards >= amount, so a
+// concurrent debit can never overdraw and the insufficient-funds check is
+// race-free. ok=false means insufficient funds (or no wallet) — nothing changed.
+func (r *repository) debitWalletAtomic(ctx context.Context, consumerID primitive.ObjectID, amount float64, seqDelta int64) (*wallet, bool, error) {
+	after := options.After
+	var wl wallet
+	err := r.wallets.FindOneAndUpdate(ctx,
+		bson.D{
+			{Key: "consumer_id", Value: consumerID},
+			{Key: "$expr", Value: bson.D{{Key: "$gte", Value: bson.A{
+				bson.D{{Key: "$add", Value: bson.A{"$cash_balance", "$rewards_balance"}}}, amount,
+			}}}},
+		},
+		mongo.Pipeline{
+			// __fp = amount taken from rewards (promo) first.
+			bson.D{{Key: "$set", Value: bson.D{{Key: "__fp", Value: bson.D{{Key: "$min", Value: bson.A{amount, "$rewards_balance"}}}}}}},
+			bson.D{{Key: "$set", Value: bson.D{
+				{Key: "rewards_balance", Value: bson.D{{Key: "$subtract", Value: bson.A{"$rewards_balance", "$__fp"}}}},
+				{Key: "cash_balance", Value: bson.D{{Key: "$subtract", Value: bson.A{"$cash_balance", bson.D{{Key: "$subtract", Value: bson.A{amount, "$__fp"}}}}}}},
+				{Key: "seq", Value: bson.D{{Key: "$add", Value: bson.A{"$seq", seqDelta}}}},
+			}}},
+			bson.D{{Key: "$unset", Value: "__fp"}},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(after),
+	).Decode(&wl)
+	if isNoDocs(err) {
+		return nil, false, nil // insufficient funds (or no wallet)
+	}
+	if err != nil {
+		return nil, false, errInternal("wallet debit failed")
+	}
+	return &wl, true, nil
+}
+
+// deleteWalletTxn removes a ledger row by id — used to roll back a debit gate
+// row when the guarded balance update finds insufficient funds.
+func (r *repository) deleteWalletTxn(ctx context.Context, id primitive.ObjectID) {
+	_, _ = r.walletTxns.DeleteOne(ctx, bson.D{{Key: "_id", Value: id}})
 }
 
 func (r *repository) listWalletTxns(ctx context.Context, consumerID primitive.ObjectID, limit int64) ([]walletTxn, error) {
