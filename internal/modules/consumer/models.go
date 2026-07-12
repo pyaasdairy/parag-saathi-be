@@ -15,6 +15,7 @@ const (
 	collWallets    = "consumer_wallets"
 	collWalletTxns = "consumer_wallet_txns"
 	collConsents   = "consumer_consents"
+	collPayOrders  = "consumer_payment_orders"
 )
 
 // ── Domain documents ────────────────────────────────────────────────────────
@@ -111,6 +112,21 @@ type walletTxn struct {
 	CreatedAt    time.Time          `bson:"created_at"        json:"created_at"`
 }
 
+// paymentOrder is a wallet top-up order whose amount is BOUND server-side at
+// creation, so a tampered client cannot pay ₹1 for a ₹500 top-up (§ razorpay.ts
+// security model). Verified before the wallet is credited.
+type paymentOrder struct {
+	ID          primitive.ObjectID `bson:"_id,omitempty"`
+	OrderID     string             `bson:"order_id"`    // Razorpay order id (or dev pseudo id) — unique
+	ConsumerID  primitive.ObjectID `bson:"consumer_id"` // owner
+	AmountPaise int64              `bson:"amount_paise"`
+	Receipt     string             `bson:"receipt,omitempty"`
+	Status      string             `bson:"status"` // CREATED | PAID
+	PaymentID   string             `bson:"payment_id,omitempty"`
+	CreatedAt   time.Time          `bson:"created_at"`
+	PaidAt      *time.Time         `bson:"paid_at,omitempty"`
+}
+
 // ── Wire response shapes the FE reads (raw, not enveloped) ──────────────────
 
 // tokenPair is what /auth/otp/verify and /auth/refresh return.
@@ -118,6 +134,19 @@ type tokenPair struct {
 	AccessToken  string   `json:"access_token"`
 	RefreshToken string   `json:"refresh_token"`
 	Profile      *account `json:"profile,omitempty"`
+}
+
+// topupOrderView is POST /wallet/order — the amount-bound order the FE hands to
+// Razorpay checkout.
+type topupOrderView struct {
+	OrderID string `json:"orderId"`
+	KeyID   string `json:"keyId"`
+}
+
+// verifyView is POST /wallet/verify — authoritative credit result.
+type verifyView struct {
+	Verified bool    `json:"verified"`
+	Balance  float64 `json:"balance,omitempty"`
 }
 
 // walletView is GET /wallet — dual bucket + derived available.

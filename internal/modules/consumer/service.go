@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -33,14 +34,20 @@ type service struct {
 	// operator tokens: an operator token fails signature validation on a
 	// consumer route and vice-versa, even though both live in one backend.
 	consumerKey []byte
+	// Razorpay top-up seam — key id is public, secret is server-only (env). See
+	// razorpay.go. Empty secret → offline dev seam (gated by OTP dev mode).
+	rzpKeyID     string
+	rzpKeySecret string
 }
 
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 	return &service{
-		deps:        d,
-		repo:        repo,
-		log:         log,
-		consumerKey: []byte(auth.HMACHash(d.Cfg.JWTSecret, "consumer-jwt-v1")),
+		deps:         d,
+		repo:         repo,
+		log:          log,
+		consumerKey:  []byte(auth.HMACHash(d.Cfg.JWTSecret, "consumer-jwt-v1")),
+		rzpKeyID:     os.Getenv("RAZORPAY_KEY_ID"),
+		rzpKeySecret: os.Getenv("RAZORPAY_KEY_SECRET"),
 	}
 }
 
@@ -275,14 +282,19 @@ func (s *service) wallet(ctx context.Context, consumerID primitive.ObjectID) (wa
 
 // bonusFor returns the promotional Rewards bonus for a Cash top-up (§17: bonus
 // lands in Rewards, never Cash). Simple tiered rule for the pilot.
+// bonusFor mirrors the FE's RECHARGE_TIERS (lib/pricing.ts) EXACTLY — the tier
+// the customer was shown at checkout must be the tier the wallet actually
+// credits. Picks the highest tier whose threshold the amount meets.
 func bonusFor(amount float64) float64 {
 	switch {
+	case amount >= 10000:
+		return 1000
 	case amount >= 1000:
 		return 250
 	case amount >= 500:
 		return 100
-	case amount >= 250:
-		return 25
+	case amount >= 200:
+		return 50
 	default:
 		return 0
 	}
@@ -292,42 +304,28 @@ func bonusFor(amount float64) float64 {
 // integer paise end-to-end).
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
-// topup credits Cash (real money via the aggregator) and a promotional Rewards
-// bonus. EXACTLY-ONCE by ref: a ledger row is inserted FIRST under a unique
-// (consumer, ref, type) index as the money gate — a duplicate/concurrent
-// same-ref call gets a dup-key and returns the current balance WITHOUT a second
-// $inc, so a retried/duplicated gateway webhook can never mint money. (Residual:
-// a crash after the gate insert but before the $inc under-credits — recoverable
-// by reconciliation against the gateway; it never OVER-credits.)
-func (s *service) topup(ctx context.Context, consumerID primitive.ObjectID, amount float64, method, ref string) (walletView, error) {
-	amount = round2(amount)
-	if amount <= 0 || amount > 100000 {
-		return walletView{}, errBadRequest("amount must be between 1 and 100000")
-	}
-	// A payment reference is REQUIRED — money never moves without an idempotency
-	// key (the gateway payment id, or the FE-minted receipt).
-	if ref == "" {
-		return walletView{}, errBadRequest("a payment reference (ref) is required")
-	}
+// creditTopup credits Cash (real money via the aggregator) plus the promotional
+// Rewards bonus. EXACTLY-ONCE by ref: the TOPUP ledger row is inserted FIRST
+// under a unique (consumer, ref, type) index as the money gate — a
+// duplicate/concurrent same-ref call gets a dup-key and returns the current
+// balance WITHOUT a second $inc, so a retried/duplicated gateway webhook can
+// never mint money. (Residual: a crash after the gate insert but before the
+// $inc under-credits — recoverable by reconciliation; it never OVER-credits.)
+// Shared by the dev /wallet/topup path and the real Razorpay /wallet/verify path.
+func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID, amount float64, method, ref string) (*wallet, error) {
 	now := time.Now().UTC()
 	bonus := round2(bonusFor(amount))
 
-	// Gate: the FIRST TOPUP row for this (consumer, ref) wins; all duplicates
-	// short-circuit here as already-credited.
 	cashRow := walletTxn{
 		ID: primitive.NewObjectID(), ConsumerID: consumerID,
 		Type: "TOPUP", Bucket: "CASH", Amount: amount, RefType: method, RefID: ref, Status: "SUCCESS", CreatedAt: now,
 	}
 	dup, err := s.repo.insertWalletTxnGate(ctx, cashRow)
 	if err != nil {
-		return walletView{}, err
+		return nil, err
 	}
 	if dup {
-		wl, e := s.getOrCreateWallet(ctx, consumerID)
-		if e != nil {
-			return walletView{}, e
-		}
-		return walletToView(wl), nil
+		return s.getOrCreateWallet(ctx, consumerID) // already credited
 	}
 
 	// We own this movement — apply it atomically ($inc of cash + bonus).
@@ -337,7 +335,7 @@ func (s *service) topup(ctx context.Context, consumerID primitive.ObjectID, amou
 	}
 	updated, err := s.repo.incWallet(ctx, consumerID, amount, bonus, 0, seqDelta)
 	if err != nil {
-		return walletView{}, err
+		return nil, err
 	}
 	// Backfill the running balances on the gate row now that we know them.
 	topupSeq := updated.Seq - (seqDelta - 1)
@@ -349,7 +347,80 @@ func (s *service) topup(ctx context.Context, consumerID primitive.ObjectID, amou
 			RefType: "promo", RefID: ref, Status: "SUCCESS", Remark: "recharge bonus", CreatedAt: now,
 		})
 	}
-	return walletToView(updated), nil
+	return updated, nil
+}
+
+// topup is the DEV direct-credit path (POST /wallet/topup). The FE's real
+// money-in path is createTopupOrder + verifyPayment (Razorpay); this stays for
+// offline/testing and requires an explicit ref.
+func (s *service) topup(ctx context.Context, consumerID primitive.ObjectID, amount float64, method, ref string) (walletView, error) {
+	amount = round2(amount)
+	if amount <= 0 || amount > 100000 {
+		return walletView{}, errBadRequest("amount must be between 1 and 100000")
+	}
+	// A payment reference is REQUIRED — money never moves without an idempotency key.
+	if ref == "" {
+		return walletView{}, errBadRequest("a payment reference (ref) is required")
+	}
+	wl, err := s.creditTopup(ctx, consumerID, amount, method, ref)
+	if err != nil {
+		return walletView{}, err
+	}
+	return walletToView(wl), nil
+}
+
+// createTopupOrder mints an amount-bound Razorpay order (POST /wallet/order).
+// The amount is persisted server-side so verifyPayment credits exactly what was
+// ordered — a tampered client cannot pay ₹1 for a ₹500 top-up.
+func (s *service) createTopupOrder(ctx context.Context, consumerID primitive.ObjectID, amountPaise int64) (topupOrderView, error) {
+	if amountPaise < 100 || amountPaise > 100000_00 {
+		return topupOrderView{}, errBadRequest("amount must be between ₹1 and ₹1,00,000")
+	}
+	receipt := "wtu_" + consumerID.Hex()
+	orderID, err := s.createRzpOrder(ctx, amountPaise, receipt)
+	if err != nil {
+		return topupOrderView{}, err
+	}
+	if err := s.repo.insertPaymentOrder(ctx, &paymentOrder{
+		ID: primitive.NewObjectID(), OrderID: orderID, ConsumerID: consumerID,
+		AmountPaise: amountPaise, Receipt: receipt, Status: "CREATED", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		return topupOrderView{}, err
+	}
+	return topupOrderView{OrderID: orderID, KeyID: s.rzpKeyID}, nil
+}
+
+// verifyPayment authoritatively verifies a completed Razorpay payment and
+// credits the wallet EXACTLY ONCE (POST /wallet/verify). Verification order:
+// signature (crypto) → order ownership → CREATED→PAID transition (the settle
+// gate) → ledger credit (the money gate). A replay after a successful credit is
+// idempotent; a bad signature never credits and never 500s.
+func (s *service) verifyPayment(ctx context.Context, consumerID primitive.ObjectID, paymentID, orderID, signature string) (verifyView, error) {
+	if !s.verifyRzpSignature(orderID, paymentID, signature) {
+		return verifyView{Verified: false}, nil
+	}
+	ord, err := s.repo.findPaymentOrder(ctx, orderID, consumerID)
+	if err != nil {
+		return verifyView{Verified: false}, nil // unknown/foreign order — not verifiable
+	}
+	amount := round2(float64(ord.AmountPaise) / 100)
+
+	// Settle gate: only the CREATED→PAID transition proceeds to credit. A replay
+	// finds it already PAID and returns the current balance (idempotent).
+	transitioned, err := s.repo.markPaymentOrderPaid(ctx, orderID, paymentID, time.Now().UTC())
+	if err != nil {
+		return verifyView{}, err
+	}
+	if !transitioned {
+		wl, _ := s.getOrCreateWallet(ctx, consumerID)
+		return verifyView{Verified: true, Balance: round2(wl.CashBalance)}, nil
+	}
+	// Ledger money gate keyed by the order id (belt-and-braces with the settle gate).
+	wl, err := s.creditTopup(ctx, consumerID, amount, "razorpay", orderID)
+	if err != nil {
+		return verifyView{}, err
+	}
+	return verifyView{Verified: true, Balance: round2(wl.CashBalance)}, nil
 }
 
 func (s *service) walletTxns(ctx context.Context, consumerID primitive.ObjectID, limit int64) ([]walletTxn, error) {

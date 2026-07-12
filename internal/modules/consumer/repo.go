@@ -20,6 +20,7 @@ type repository struct {
 	wallets    *mongo.Collection
 	walletTxns *mongo.Collection
 	consents   *mongo.Collection
+	payOrders  *mongo.Collection
 }
 
 func newRepository(db *mongo.Database) *repository {
@@ -31,6 +32,7 @@ func newRepository(db *mongo.Database) *repository {
 		wallets:    db.Collection(collWallets),
 		walletTxns: db.Collection(collWalletTxns),
 		consents:   db.Collection(collConsents),
+		payOrders:  db.Collection(collPayOrders),
 	}
 }
 
@@ -56,6 +58,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 		// Partial — only enforced for rows that actually carry a ref.
 		{r.walletTxns, bson.D{{Key: "consumer_id", Value: 1}, {Key: "ref_id", Value: 1}, {Key: "type", Value: 1}},
 			options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{{Key: "ref_id", Value: bson.D{{Key: "$gt", Value: ""}}}})},
+		// A payment order id is globally unique — the top-up idempotency anchor.
+		{r.payOrders, bson.D{{Key: "order_id", Value: 1}}, options.Index().SetUnique(true)},
+		{r.payOrders, bson.D{{Key: "consumer_id", Value: 1}}, nil},
 	}
 	for _, s := range specs {
 		if _, err := s.c.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: s.keys, Options: s.opts}); err != nil {
@@ -376,4 +381,44 @@ func (r *repository) listWalletTxns(ctx context.Context, consumerID primitive.Ob
 		return nil, errInternal("wallet txns decode failed")
 	}
 	return out, nil
+}
+
+// ── Payment orders (Razorpay top-up) ────────────────────────────────────────
+
+func (r *repository) insertPaymentOrder(ctx context.Context, o *paymentOrder) error {
+	if _, err := r.payOrders.InsertOne(ctx, o); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return errConflict("ORDER_EXISTS", "payment order already exists")
+		}
+		return errInternal("payment order create failed")
+	}
+	return nil
+}
+
+// findPaymentOrder loads an order by its Razorpay id, scoped to the consumer so
+// one shopper can never verify/settle another's order.
+func (r *repository) findPaymentOrder(ctx context.Context, orderID string, consumerID primitive.ObjectID) (*paymentOrder, error) {
+	var o paymentOrder
+	err := r.payOrders.FindOne(ctx, bson.D{{Key: "order_id", Value: orderID}, {Key: "consumer_id", Value: consumerID}}).Decode(&o)
+	if isNoDocs(err) {
+		return nil, errNotFound("payment order not found")
+	}
+	if err != nil {
+		return nil, errInternal("payment order lookup failed")
+	}
+	return &o, nil
+}
+
+// markPaymentOrderPaid flips CREATED→PAID exactly once and reports whether THIS
+// call was the transition (guards a double credit even without the ledger gate).
+func (r *repository) markPaymentOrderPaid(ctx context.Context, orderID, paymentID string, paidAt time.Time) (bool, error) {
+	res, err := r.payOrders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: orderID}, {Key: "status", Value: "CREATED"}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "status", Value: "PAID"}, {Key: "payment_id", Value: paymentID}, {Key: "paid_at", Value: paidAt},
+		}}})
+	if err != nil {
+		return false, errInternal("payment order update failed")
+	}
+	return res.ModifiedCount == 1, nil
 }

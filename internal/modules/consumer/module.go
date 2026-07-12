@@ -69,6 +69,10 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Get("/wallet/transactions", h.walletTxns)
 			pr.Post("/wallet/topup", h.topup)
 			pr.Post("/wallet/recharge", h.topup)
+			// Real money-in path (Razorpay): create amount-bound order → verify
+			// signature server-side → credit exactly once.
+			pr.Post("/wallet/order", h.walletOrder)
+			pr.Post("/wallet/verify", h.walletVerify)
 
 			// Addresses.
 			pr.Get("/addresses", h.listAddresses)
