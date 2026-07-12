@@ -33,9 +33,6 @@ func Register(r chi.Router, d *deps.Deps) {
 		log.Error("consumer index setup failed — refusing to boot", slog.Any("err", err))
 		panic("consumer: index setup failed: " + err.Error())
 	}
-	// Dev-only: make the last-mile flow immediately testable on a fresh deploy
-	// (ensures a Parag Store + store manager + delivery rider). No-op in prod.
-	svc.bootstrapDevDelivery(ctx)
 
 	r.Route("/consumer", func(cr chi.Router) {
 		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
