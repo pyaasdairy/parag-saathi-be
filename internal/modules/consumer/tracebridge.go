@@ -19,12 +19,17 @@ import (
 // consumer app (registered for parag://) can open it — a generic scanner can't.
 const consumerAppScheme = "parag://trace/"
 
-// appKeyOK enforces the consumer-app-only gate: when CONSUMER_APP_KEY is
-// configured the request must carry a matching X-Parag-App-Key (constant-time).
-// When unset (local dev) the gate is open so the harness/offline flow still works.
+// appKeyOK enforces the consumer-app-only gate: the request must carry an
+// X-Parag-App-Key matching CONSUMER_APP_KEY (constant-time). FAIL-CLOSED: an
+// unset server key denies everyone rather than opening the gate — traceability
+// and the PDF label are for the PARAG app only, and a missing env var on a
+// deployment must not silently make them public. Local dev sets
+// CONSUMER_APP_KEY in .env (see .env.example) to the same value the app ships
+// as EXPO_PUBLIC_CONSUMER_APP_KEY.
 func (s *service) appKeyOK(r *http.Request) bool {
 	if s.appKey == "" {
-		return true
+		s.log.Warn("consumer traceability denied: CONSUMER_APP_KEY is not configured on this deployment (fail-closed)")
+		return false
 	}
 	got := r.Header.Get("X-Parag-App-Key")
 	return subtle.ConstantTimeCompare([]byte(got), []byte(s.appKey)) == 1

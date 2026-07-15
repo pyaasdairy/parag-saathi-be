@@ -120,3 +120,39 @@ func TestSourcingMessage(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyBatchQRScan covers the presentation-scoped integrity gate for
+// consignment batch QRs: a full batch code must always serve (drift in the
+// stored token is an ops warning, never a rejection — the code is printed in
+// clear text and manual entry is a supported flow), while a short /t/ token
+// is a credential and must verify under THIS service's secret.
+func TestClassifyBatchQRScan(t *testing.T) {
+	const secret = "test-qr-signing-secret"
+	const batchCode = "PARAG-11072026-2000-3-01842"
+	goodToken := auth.HMACHash(secret, batchCode)[:8]
+	driftToken := auth.HMACHash("some-other-deployments-secret", batchCode)[:8]
+
+	tests := []struct {
+		name  string
+		code  string
+		token string
+		want  batchScanResult
+	}{
+		{"batch code + in-sync token", batchCode, goodToken, batchScanServe},
+		{"batch code, lowercase scan", "parag-11072026-2000-3-01842", goodToken, batchScanServe},
+		{"batch code + drifted token still serves", batchCode, driftToken, batchScanServeDrift},
+		{"batch code + empty token still serves", batchCode, "", batchScanServeDrift},
+		{"valid short token", goodToken, goodToken, batchScanServe},
+		{"drifted short token rejects", driftToken, driftToken, batchScanReject},
+		{"forged short token rejects", "deadbeef", "deadbeef", batchScanReject},
+		{"empty code rejects", "", "", batchScanReject},
+		{"oversized code rejects", auth.HMACHash(secret, batchCode) + "00", goodToken, batchScanReject},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyBatchQRScan(secret, tc.code, batchCode, tc.token); got != tc.want {
+				t.Fatalf("classifyBatchQRScan(%q, token=%q) = %d, want %d", tc.code, tc.token, got, tc.want)
+			}
+		})
+	}
+}

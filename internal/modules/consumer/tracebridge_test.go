@@ -1,6 +1,10 @@
 package consumer
 
 import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -57,5 +61,41 @@ func TestMapToMilkBatch(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
+	}
+}
+
+// TestAppKeyOKFailClosed pins the consumer-app-only gate: an unset server key
+// must deny EVERYONE (fail-closed) — a missing CONSUMER_APP_KEY on a
+// deployment must never silently make traceability public — and a configured
+// key must admit only an exactly-matching X-Parag-App-Key header.
+func TestAppKeyOKFailClosed(t *testing.T) {
+	mkReq := func(key string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/consumer/traceability/X", nil)
+		if key != "" {
+			r.Header.Set("X-Parag-App-Key", key)
+		}
+		return r
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	tests := []struct {
+		name      string
+		serverKey string
+		sentKey   string
+		want      bool
+	}{
+		{"unset server key denies bare request", "", "", false},
+		{"unset server key denies even a keyed request", "", "some-key", false},
+		{"configured key + match admits", "app-key-1", "app-key-1", true},
+		{"configured key + mismatch denies", "app-key-1", "wrong", false},
+		{"configured key + missing header denies", "app-key-1", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &service{appKey: tc.serverKey, log: log}
+			if got := s.appKeyOK(mkReq(tc.sentKey)); got != tc.want {
+				t.Fatalf("appKeyOK(server=%q, sent=%q) = %v, want %v", tc.serverKey, tc.sentKey, got, tc.want)
+			}
+		})
 	}
 }

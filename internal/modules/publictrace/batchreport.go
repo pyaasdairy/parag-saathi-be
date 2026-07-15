@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -221,6 +222,44 @@ func (s *Service) ResolvePublicQR(ctx context.Context, code string) (any, error)
 	return s.ScanQR(ctx, code)
 }
 
+// batchScanResult classifies one presented code against the stored batch QR.
+type batchScanResult int
+
+const (
+	batchScanServe      batchScanResult = iota // token verified — serve
+	batchScanServeDrift                        // batch-code scan, stored token drifted — serve + warn
+	batchScanReject                            // token-ref scan failed verification — 409
+)
+
+// classifyBatchQRScan applies the integrity gate, scoped to HOW the code was
+// presented:
+//
+//   - Full batch code: the code IS the public reference. It is printed in
+//     clear text beside the QR and manual entry is a supported app flow, so a
+//     scan by batch code is indistinguishable from typing the code — the
+//     stored HMAC token adds nothing and must never block it. Tokens are
+//     re-signed at every boot (consumer/qrresign.go), so a mismatch here means
+//     secret drift (e.g. two deployments with different QR_SIGNING_SECRETs
+//     sharing one database) — an ops signal, never a consumer-facing failure.
+//
+//   - Short token (/t/<ref> links): the token itself is the credential that
+//     keeps the reference unguessable, so it must verify against this
+//     service's secret; reject on mismatch.
+func classifyBatchQRScan(qrSecret, code, batchCode, storedToken string) batchScanResult {
+	expected := auth.HMACHash(qrSecret, batchCode)
+	if strings.EqualFold(code, batchCode) {
+		if storedToken == "" || len(storedToken) > len(expected) ||
+			!auth.ConstantTimeEqual(expected[:len(storedToken)], storedToken) {
+			return batchScanServeDrift
+		}
+		return batchScanServe
+	}
+	if code == "" || len(code) > len(expected) || !auth.ConstantTimeEqual(expected[:len(code)], code) {
+		return batchScanReject
+	}
+	return batchScanServe
+}
+
 // scanBatchQR resolves a code against the consignment batch QRs and builds
 // the F8 quality report. Returns NotFound when the code is not a batch QR.
 func (s *Service) scanBatchQR(ctx context.Context, code string) (*BatchQualityReport, error) {
@@ -233,10 +272,12 @@ func (s *Service) scanBatchQR(ctx context.Context, code string) (*BatchQualityRe
 		return nil, s.internalErr(ctx, "batch qr scan: load qr", err, slog.String("code", code))
 	}
 
-	// Integrity gate: the stored token must equal the HMAC of the batch code
-	// under the QR secret — a mismatch means the record was tampered/forged.
-	expected := auth.HMACHash(s.qrSecret, qr.BatchCode)[:len(qr.Token)]
-	if qr.Token == "" || !auth.ConstantTimeEqual(expected, qr.Token) {
+	// Integrity gate — scoped to HOW the code was presented (classifyBatchQRScan).
+	switch classifyBatchQRScan(s.qrSecret, code, qr.BatchCode, qr.Token) {
+	case batchScanServeDrift:
+		s.log.WarnContext(ctx, "batch QR token drift on a batch-code scan — serving by code; check QR_SIGNING_SECRET parity across deployments sharing this database",
+			slog.String("batch_code", qr.BatchCode), slog.String("qr_id", qr.ID.Hex()))
+	case batchScanReject:
 		s.log.WarnContext(ctx, "batch QR token integrity check failed — possible forgery",
 			slog.String("batch_code", qr.BatchCode), slog.String("qr_id", qr.ID.Hex()))
 		return nil, httpx.Conflict("QR_INTEGRITY_FAILED",
