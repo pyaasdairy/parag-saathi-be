@@ -34,6 +34,11 @@ func Register(r chi.Router, d *deps.Deps) {
 		panic("consumer: index setup failed: " + err.Error())
 	}
 
+	// Repair QR integrity tokens signed under an older QR_SIGNING_SECRET so
+	// already-printed QRs keep resolving after a secret rotation (qrresign.go).
+	// Best-effort: runs in the background, never blocks or fails boot.
+	go resignQRTokens(d, log)
+
 	r.Route("/consumer", func(cr chi.Router) {
 		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
 		// operator envelope, on unknown consumer routes.
