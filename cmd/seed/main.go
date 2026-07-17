@@ -205,6 +205,7 @@ func run() error {
 		{"9000000004", "Shyam Lal", "श्याम लाल", "Kasmandi Kalan", "hi", domain.KYCTierHigh, domain.RoleSamitiSacheev, dcs3.ID},
 		{"9000000013", "Dinesh Kumar", "दिनेश कुमार", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs3.ID},
 		{"9000000014", "Kamla Devi", "कमला देवी", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs3.ID},
+		{"9000000005", "Barabanki Dugdh Sangh", "बाराबंकी दुग्ध संघ", "", "hi", domain.KYCTierHigh, domain.RoleUnionPresident, union.ID},
 		{"9000000021", "Salim Khan", "सलीम खान", "Malihabad", "hi", domain.KYCTierRider, domain.RoleVanRider, union.ID},
 		{"9000000031", "Vikas Singh", "विकास सिंह", "Malihabad", "hi", domain.KYCTierStandard, domain.RoleBMCOperator, bmc.ID},
 		{"9000000041", "Rajeev Ranjan", "राजीव रंजन", "", "hi", domain.KYCTierHigh, domain.RolePlantOperator, plant.ID},
@@ -269,6 +270,7 @@ func run() error {
 			return fmt.Errorf("multi-role farmer grant to sacheev: %w", err)
 		}
 		fmt.Println("  multi-role: 9000000001 (Ramesh) is SAMITI_SACHEEV + FARMER @ DCS-01842 → login shows role picker")
+	fmt.Println("  settlement approver: 9000000005 (Union/Sangh) — Adhyaksh is retired from signing")
 	}
 
 	// Verified bank accounts for the producing farmers so settlement can
