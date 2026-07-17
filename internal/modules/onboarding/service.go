@@ -112,6 +112,8 @@ func (s *service) submit(ctx context.Context, actor auth.Actor, req submitReques
 		Note:             req.Note,
 		DocumentRefs:     req.DocumentRefs,
 		Village:          req.Village,
+		FatherHusbandName: req.FatherHusbandName,
+		MotherName:        req.MotherName,
 		AdminHierarchy:   req.AdminHierarchy,
 		DocumentType:     req.DocumentType,
 		DocumentNumber:   req.DocumentNumber,

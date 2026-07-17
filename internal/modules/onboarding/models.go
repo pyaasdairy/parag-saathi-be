@@ -54,6 +54,9 @@ type submitRequest struct {
 	DocumentRefs     []string `json:"document_refs,omitempty"`
 	// Rich field capture (optional).
 	Village         string                  `json:"village,omitempty"`
+	// Notice प्रारूप fields: पिता/पति का नाम (required for farmers at FE) + माता का नाम.
+	FatherHusbandName string                `json:"father_husband_name,omitempty"`
+	MotherName        string                `json:"mother_name,omitempty"`
 	AdminHierarchy  *domain.AdminHierarchy  `json:"admin_hierarchy,omitempty"`
 	DocumentType    string `json:"document_type,omitempty"`
 	DocumentNumber  string `json:"document_number,omitempty"`

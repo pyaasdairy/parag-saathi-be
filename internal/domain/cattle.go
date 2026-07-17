@@ -23,6 +23,7 @@ type Animal struct {
 	OwnerPartyID    primitive.ObjectID `bson:"owner_party_id" json:"owner_party_id"`
 	DCSID           primitive.ObjectID `bson:"dcs_id"         json:"dcs_id"`
 	Species         string             `bson:"species"        json:"species"` // COW, BUFFALO
+	Name            string             `bson:"name,omitempty" json:"name,omitempty"` // the farmer's name for the animal (notice प्रारूप)
 	Breed           string             `bson:"breed,omitempty"     json:"breed,omitempty"`
 	Sex             string             `bson:"sex,omitempty"       json:"sex,omitempty"`
 	BirthDate       *time.Time         `bson:"birth_date,omitempty" json:"birth_date,omitempty"`

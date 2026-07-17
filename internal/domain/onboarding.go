@@ -42,6 +42,9 @@ type OnboardingRequest struct {
 	// These are stored verbatim for the reviewer console; the approval saga still
 	// only needs phone/full_name/requested_role/org_unit_id/requested_tier.
 	Village         string              `bson:"village,omitempty"         json:"village,omitempty"`
+	// Notice प्रारूप: guardian names captured at the doorstep (father/husband, mother).
+	FatherHusbandName string            `bson:"father_husband_name,omitempty" json:"father_husband_name,omitempty"`
+	MotherName        string            `bson:"mother_name,omitempty"         json:"mother_name,omitempty"`
 	// AdminHierarchy is the geo-tapped, executive-confirmed administrative
 	// address chain for a farmer: village → gram panchayat → block → tehsil →
 	// janpad (district) → mandal → state. Stored verbatim (already confirmed

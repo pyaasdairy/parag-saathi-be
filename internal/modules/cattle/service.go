@@ -176,6 +176,7 @@ func (s *service) RegisterAnimal(ctx context.Context, actor auth.Actor, req Regi
 		OwnerPartyID:    owner,
 		DCSID:           req.DCSID,
 		Species:         req.Species,
+		Name:            strings.TrimSpace(req.Name),
 		Breed:           req.Breed,
 		Sex:             req.Sex,
 		LactationStatus: req.LactationStatus,

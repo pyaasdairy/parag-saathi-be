@@ -41,21 +41,25 @@ func Register(r chi.Router, d *deps.Deps) {
 	r.Route("/settlements", func(sr chi.Router) {
 		sr.Use(middleware.Authenticate(d.JWT))
 
-		// Initiate: the Sacheev runs the collection console (§8.1 step 1).
-		sr.With(middleware.RequireRoles(domain.RoleSamitiSacheev)).
-			Post("/", h.initiate)
-
-		// Approve / reject: the Union (Sangh) — the Adhyaksh role is RETIRED
-		// (political-name-neutral posture); dual control is additionally
-		// enforced on party identity inside the service (initiator ≠ approver).
-		sr.With(middleware.RequireRoles(domain.RoleUnionPresident)).
-			Post("/{id}/approve", h.approve)
-		sr.With(middleware.RequireRoles(domain.RoleUnionPresident)).
-			Post("/{id}/reject", h.reject)
-
-		// Execute: hand the approved batch to the (mock) licensed PA.
-		sr.With(middleware.RequireRoles(domain.RoleSamitiSacheev, domain.RoleUnionPresident)).
-			Post("/{id}/execute", h.execute)
+		// SETTLEMENT ACTIONS DISABLED (2026-07-17, store-submission posture):
+		// payments in the app are DISPLAY-ONLY — farmers/sachivs see earned
+		// amounts + history from pours/invoices; money moves outside the app.
+		// The full Mode-2 flow (Sacheev initiates → Union (Sangh) approves,
+		// dual control initiator ≠ approver → execute via licensed PA) is kept
+		// below, commented, for future integration — uncomment to revive.
+		//
+		// sr.With(middleware.RequireRoles(domain.RoleSamitiSacheev)).
+		// 	Post("/", h.initiate)
+		// sr.With(middleware.RequireRoles(domain.RoleUnionPresident)).
+		// 	Post("/{id}/approve", h.approve)
+		// sr.With(middleware.RequireRoles(domain.RoleUnionPresident)).
+		// 	Post("/{id}/reject", h.reject)
+		// sr.With(middleware.RequireRoles(domain.RoleSamitiSacheev, domain.RoleUnionPresident)).
+		// 	Post("/{id}/execute", h.execute)
+		_ = h.initiate // referenced to keep the disabled handlers compiling
+		_ = h.approve
+		_ = h.reject
+		_ = h.execute
 
 		sr.With(readRoles).Get("/", h.list)
 

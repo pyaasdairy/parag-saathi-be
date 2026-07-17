@@ -13,6 +13,7 @@ type RegisterAnimalRequest struct {
 	OwnerPartyID    *primitive.ObjectID `json:"owner_party_id"` // required for non-FARMER registrars; farmers always own their registration
 	DCSID           primitive.ObjectID  `json:"dcs_id"`
 	Species         string              `json:"species"` // COW, BUFFALO
+	Name            string              `json:"name,omitempty"`
 	Breed           string              `json:"breed"`
 	Sex             string              `json:"sex"`
 	LactationStatus string              `json:"lactation_status"` // DRY, LACTATING
