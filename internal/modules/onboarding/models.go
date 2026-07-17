@@ -53,7 +53,8 @@ type submitRequest struct {
 	Note             string   `json:"note,omitempty"`
 	DocumentRefs     []string `json:"document_refs,omitempty"`
 	// Rich field capture (optional).
-	Village         string `json:"village,omitempty"`
+	Village         string                  `json:"village,omitempty"`
+	AdminHierarchy  *domain.AdminHierarchy  `json:"admin_hierarchy,omitempty"`
 	DocumentType    string `json:"document_type,omitempty"`
 	DocumentNumber  string `json:"document_number,omitempty"`
 	KYCPhotoURL     string `json:"kyc_photo_url,omitempty"`

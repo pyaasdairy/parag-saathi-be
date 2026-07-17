@@ -42,6 +42,11 @@ type OnboardingRequest struct {
 	// These are stored verbatim for the reviewer console; the approval saga still
 	// only needs phone/full_name/requested_role/org_unit_id/requested_tier.
 	Village         string              `bson:"village,omitempty"         json:"village,omitempty"`
+	// AdminHierarchy is the geo-tapped, executive-confirmed administrative
+	// address chain for a farmer: village → gram panchayat → block → tehsil →
+	// janpad (district) → mandal → state. Stored verbatim (already confirmed
+	// on-device); optional end to end.
+	AdminHierarchy  *AdminHierarchy     `bson:"admin_hierarchy,omitempty" json:"admin_hierarchy,omitempty"`
 	DocumentType    string              `bson:"document_type,omitempty"   json:"document_type,omitempty"`
 	DocumentNumber  string              `bson:"document_number,omitempty" json:"document_number,omitempty"`
 	KYCPhotoURL     string              `bson:"kyc_photo_url,omitempty"     json:"kyc_photo_url,omitempty"`
@@ -60,4 +65,16 @@ type OnboardingRequest struct {
 	CreatedParty *primitive.ObjectID `bson:"created_party,omitempty" json:"created_party,omitempty"`
 	CreatedAt    time.Time           `bson:"created_at" json:"created_at"`
 	UpdatedAt    time.Time           `bson:"updated_at" json:"updated_at"`
+}
+
+// AdminHierarchy is the rural-UP administrative address chain captured at
+// farmer onboarding (geo-tap + manual confirm). All fields optional.
+type AdminHierarchy struct {
+	Village       string `bson:"village,omitempty"        json:"village,omitempty"`
+	GramPanchayat string `bson:"gram_panchayat,omitempty" json:"gram_panchayat,omitempty"`
+	Block         string `bson:"block,omitempty"          json:"block,omitempty"`
+	Tehsil        string `bson:"tehsil,omitempty"         json:"tehsil,omitempty"`
+	District      string `bson:"district,omitempty"       json:"district,omitempty"`
+	Mandal        string `bson:"mandal,omitempty"         json:"mandal,omitempty"`
+	State         string `bson:"state,omitempty"          json:"state,omitempty"`
 }

@@ -45,15 +45,16 @@ func Register(r chi.Router, d *deps.Deps) {
 		sr.With(middleware.RequireRoles(domain.RoleSamitiSacheev)).
 			Post("/", h.initiate)
 
-		// Approve / reject: a different authorised signatory (dual control is
-		// additionally enforced on party identity inside the service).
-		sr.With(middleware.RequireRoles(domain.RoleSamitiAdhyaksh, domain.RoleUnionPresident)).
+		// Approve / reject: the Union (Sangh) — the Adhyaksh role is RETIRED
+		// (political-name-neutral posture); dual control is additionally
+		// enforced on party identity inside the service (initiator ≠ approver).
+		sr.With(middleware.RequireRoles(domain.RoleUnionPresident)).
 			Post("/{id}/approve", h.approve)
-		sr.With(middleware.RequireRoles(domain.RoleSamitiAdhyaksh, domain.RoleUnionPresident)).
+		sr.With(middleware.RequireRoles(domain.RoleUnionPresident)).
 			Post("/{id}/reject", h.reject)
 
 		// Execute: hand the approved batch to the (mock) licensed PA.
-		sr.With(middleware.RequireRoles(domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh)).
+		sr.With(middleware.RequireRoles(domain.RoleSamitiSacheev, domain.RoleUnionPresident)).
 			Post("/{id}/execute", h.execute)
 
 		sr.With(readRoles).Get("/", h.list)

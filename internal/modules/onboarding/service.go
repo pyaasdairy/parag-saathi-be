@@ -112,6 +112,7 @@ func (s *service) submit(ctx context.Context, actor auth.Actor, req submitReques
 		Note:             req.Note,
 		DocumentRefs:     req.DocumentRefs,
 		Village:          req.Village,
+		AdminHierarchy:   req.AdminHierarchy,
 		DocumentType:     req.DocumentType,
 		DocumentNumber:   req.DocumentNumber,
 		KYCPhotoURL:      req.KYCPhotoURL,
