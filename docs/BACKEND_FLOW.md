@@ -291,3 +291,59 @@ Points a human reviewer should weigh (honest current state):
 ### One-command reality check
 `make smoke` runs the entire flow above (23 asserted steps: pour → gate → QR → settlement → KYC
 approval → concurrency proof → live SSE badge) against a scratch MongoDB. If it's green, this diagram is true.
+
+---
+
+## 11. Release 26.07.02 additions (2026-07 — store-note alignment)
+
+New fields and behaviour layered on top of the flow above. All additive; no
+existing field was removed.
+
+### 11.1 Onboarding case — richer doorstep KYC capture
+`onboarding_cases` (and the submit request) now carry, alongside the existing
+identity fields:
+
+| Field (bson) | Meaning |
+|---|---|
+| `father_husband_name` | पिता/पति का नाम — **required for farmers** at the FE; captured on the govt notice प्रारूप |
+| `mother_name` | माता का नाम (optional) |
+| `admin_hierarchy` | geo-tapped + executive-confirmed address chain: `village → gram_panchayat → block → tehsil → district (janpad) → mandal → state` |
+
+- Domain: `internal/domain/onboarding.go` (`AdminHierarchy` struct + the two name
+  fields on the case).
+- Wire: `internal/modules/onboarding/models.go` (request) → `service.go` passthrough.
+- Stored verbatim for the reviewer console; the **approval saga still only needs**
+  phone / full_name / requested_role / org_unit_id / requested_tier — these are
+  display/record fields, they do not change grant logic.
+- The Super Admin verify screen renders the full set (incl. Aadhaar number and
+  the KYC + profile photos) so a reviewer sees everything the executive captured.
+
+### 11.2 Animal registry — the farmer's name for the animal
+`animals` gains an optional `name` (e.g. "Lakshmi") set at `POST /cattle/animals`.
+The 12-digit **Pashu Aadhaar ear-tag stays the unique key** (409 on duplicate);
+`name` is a human label only. Farmers self-register (the route already admits
+`RoleFarmer` plus Sachiv/LRP/AI-tech/vet on a farmer's behalf).
+
+### 11.3 Settlement — Union (Sangh) approval + payments are display-only
+- **Adhyaksh retired from money authority.** Settlement approve/reject is now
+  `RoleUnionPresident` only (was Adhyaksh **or** Union). Dual control is
+  unchanged: initiator ≠ approver still enforced in the service.
+- **Settlement WRITE routes are disabled for the store-submission posture**
+  (`internal/modules/settlement/module.go`): `POST /settlements` (initiate),
+  `/{id}/approve`, `/{id}/reject`, `/{id}/execute` are **commented out with a
+  revival note** — uncomment to re-enable the full Mode-2 flow later. The
+  **read** routes stay live (`GET /settlements`, `GET /settlements/payouts`), so
+  the app shows payments as **earned amounts + history** (pour → invoice →
+  accrual) without any in-app approval step. Money movement happens outside the
+  app for now.
+
+### 11.4 QR trace resilience + fail-closed consumer gate (already live)
+- `publictrace` batch-code scans **survive a QR-secret rotation / secret drift**:
+  a scan by the full batch code always serves (drift is logged as an ops
+  warning); only short `/t/<token>` refs remain strictly verified
+  (`classifyBatchQRScan`). Fixes the "two deployments sharing one DB re-sign each
+  other's tokens" 404 storm.
+- `consumer` traceability + `/label` gate (`appKeyOK`) is **fail-closed**: an
+  unset `CONSUMER_APP_KEY` denies everyone (403) instead of opening the bridge.
+- `qrresign.go` boot backfill re-signs stored QR tokens after a secret change so
+  existing QRs keep resolving.
