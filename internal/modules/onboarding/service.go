@@ -13,6 +13,7 @@ import (
 
 	"github.com/pyaas/saathi-backend/internal/domain"
 	"github.com/pyaas/saathi-backend/internal/platform/audit"
+	"github.com/pyaas/saathi-backend/internal/platform/eventbus"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
@@ -148,7 +149,22 @@ func (s *service) submit(ctx context.Context, actor auth.Actor, req submitReques
 		slog.String("requested_tier", req.RequestedTier),
 		slog.String("org_unit_id", req.OrgUnitID.Hex()),
 		slog.String("actor_party_id", actor.PartyID))
+	// Nudge the Super Admin's live verify queue + KYC review badge (SSE hub) so
+	// a new enrolment appears without a reload.
+	s.publishQueueChanged("onboarding.submitted", request.ID)
 	return &request, nil
+}
+
+// publishQueueChanged nudges the live verify queue / KYC-review badge over the
+// event bus → SSE hub. Nudge only; subscribers re-query. Never blocks the path.
+func (s *service) publishQueueChanged(reason string, requestID primitive.ObjectID) {
+	if s.deps.Bus == nil {
+		return
+	}
+	s.deps.Bus.Publish(eventbus.TopicKYCQueueChanged, eventbus.KYCQueueEvent{
+		Reason:    reason,
+		SubjectID: requestID.Hex(),
+	})
 }
 
 // list pages the onboarding queue, constrained to org units the reviewer can
@@ -460,6 +476,7 @@ func (s *service) approve(ctx context.Context, actor auth.Actor, id primitive.Ob
 		slog.String("requested_tier", claimed.RequestedTier),
 		slog.String("new_tier", newTier),
 		slog.String("actor_party_id", actor.PartyID))
+	s.publishQueueChanged("onboarding.approved", id)
 	return updated, nil
 }
 
@@ -532,5 +549,6 @@ func (s *service) reject(ctx context.Context, actor auth.Actor, id primitive.Obj
 		slog.String("requested_role", updated.RequestedRole),
 		slog.String("actor_party_id", actor.PartyID),
 		slog.String("reason", reason))
+	s.publishQueueChanged("onboarding.rejected", id)
 	return updated, nil
 }
