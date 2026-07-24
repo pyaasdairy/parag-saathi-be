@@ -17,6 +17,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/modules/publictrace"
 	"github.com/pyaas/saathi-backend/internal/modules/quality"
 	"github.com/pyaas/saathi-backend/internal/modules/settlement"
+	"github.com/pyaas/saathi-backend/internal/modules/uploads"
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
 )
 
@@ -46,6 +47,7 @@ func RegisterModules(api chi.Router, d *deps.Deps) {
 	dashboards.Register(api, d)
 	onboarding.Register(api, d)
 	cms.Register(api, d)
+	uploads.Register(api, d)
 
 	// Consumer app backend — ADD-ONLY, isolated (own collections + consumer
 	// JWT), mounted at /api/v1/consumer. Nothing here mutates operator state.
