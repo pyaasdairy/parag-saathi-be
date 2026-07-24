@@ -499,7 +499,7 @@ func (s *service) patchMe(ctx context.Context, actor auth.Actor, req patchMeRequ
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.updatePartyProfile(ctx, aid, req.FullName, req.PreferredLanguage, req.PublicConsent, time.Now().UTC())
+	return s.repo.updatePartyProfile(ctx, aid, req.FullName, req.PreferredLanguage, req.PublicConsent, req.ProfilePhotoURL, time.Now().UTC())
 }
 
 // listPartiesByRole returns the parties holding an ACTIVE assignment of

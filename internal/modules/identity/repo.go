@@ -192,7 +192,7 @@ func (r *repository) upsertPartyByPhone(ctx context.Context, phone string, now t
 
 // updatePartyProfile sets the provided profile fields and returns the
 // updated party.
-func (r *repository) updatePartyProfile(ctx context.Context, id primitive.ObjectID, fullName, preferredLanguage *string, publicConsent *bool, now time.Time) (*domain.Party, error) {
+func (r *repository) updatePartyProfile(ctx context.Context, id primitive.ObjectID, fullName, preferredLanguage *string, publicConsent *bool, profilePhotoURL *string, now time.Time) (*domain.Party, error) {
 	set := bson.D{{Key: "updated_at", Value: now}}
 	if fullName != nil {
 		set = append(set, bson.E{Key: "full_name", Value: *fullName})
@@ -202,6 +202,9 @@ func (r *repository) updatePartyProfile(ctx context.Context, id primitive.Object
 	}
 	if publicConsent != nil {
 		set = append(set, bson.E{Key: "public_consent", Value: *publicConsent})
+	}
+	if profilePhotoURL != nil {
+		set = append(set, bson.E{Key: "profile_photo_url", Value: *profilePhotoURL})
 	}
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 	var p domain.Party

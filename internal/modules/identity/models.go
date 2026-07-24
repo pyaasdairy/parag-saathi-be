@@ -169,11 +169,21 @@ type patchMeRequest struct {
 	PreferredLanguage *string `json:"preferred_language,omitempty"`
 	// PublicConsent toggles the §6.7 opt-in to be named on the public QR trace.
 	PublicConsent *bool `json:"public_consent,omitempty"`
+	// ProfilePhotoURL points at the PRIVATE media seam (an authenticated
+	// /api/v1/uploads/view/… path from the uploads module) — never a public
+	// bucket URL. Empty string clears the photo.
+	ProfilePhotoURL *string `json:"profile_photo_url,omitempty"`
 }
 
 func (r patchMeRequest) validate() error {
-	if r.FullName == nil && r.PreferredLanguage == nil && r.PublicConsent == nil {
-		return httpx.BadRequest("EMPTY_PATCH", "provide at least one of full_name, preferred_language, public_consent")
+	if r.FullName == nil && r.PreferredLanguage == nil && r.PublicConsent == nil && r.ProfilePhotoURL == nil {
+		return httpx.BadRequest("EMPTY_PATCH", "provide at least one of full_name, preferred_language, public_consent, profile_photo_url")
+	}
+	if r.ProfilePhotoURL != nil {
+		u := strings.TrimSpace(*r.ProfilePhotoURL)
+		if u != "" && (!strings.HasPrefix(u, "/api/v1/uploads/view/") || len(u) > 512 || strings.Contains(u, "..")) {
+			return httpx.BadRequest("INVALID_PHOTO_URL", "profile_photo_url must be an /api/v1/uploads/view/… path")
+		}
 	}
 	if r.FullName != nil {
 		name := strings.TrimSpace(*r.FullName)
