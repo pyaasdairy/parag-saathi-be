@@ -28,6 +28,7 @@ type repository struct {
 	orgUnits        *mongo.Collection
 	parties         *mongo.Collection
 	roleAssignments *mongo.Collection
+	notifications   *mongo.Collection
 }
 
 func newRepository(db *mongo.Database) *repository {
@@ -45,6 +46,7 @@ func newRepository(db *mongo.Database) *repository {
 		orgUnits:        db.Collection("org_units"),
 		parties:         db.Collection("parties"),
 		roleAssignments: db.Collection("role_assignments"),
+		notifications:   db.Collection("notifications"),
 	}
 }
 

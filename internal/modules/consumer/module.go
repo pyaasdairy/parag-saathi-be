@@ -123,6 +123,7 @@ func Register(r chi.Router, d *deps.Deps) {
 				sm.Get("/stores/{storeId}/orders", h.storeOrders)
 				sm.Get("/stores/{storeId}/riders", h.storeRiders)
 				sm.Post("/stores/{storeId}/orders/{deliveryId}/assign", h.assignRider)
+				sm.Post("/stores/{storeId}/low-stock", h.lowStock)
 			})
 
 			// Delivery rider (DELIVERY_RIDER): the last-mile task lifecycle.
