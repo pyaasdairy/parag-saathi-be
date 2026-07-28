@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -41,12 +42,19 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		payMode = "PREPAID"
 	}
 	now := time.Now().UTC()
+	// Instant lane: the task carries a hard ETA (placed + 90 min) so the store
+	// console and rider queue can surface the countdown. The morning lane keeps
+	// the subscription slot window only.
+	eta := ""
+	if o.Lane == "instant" {
+		eta = now.Add(90 * time.Minute).Format(time.RFC3339)
+	}
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
 		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, Perishable: false,
-		Slot: o.DeliveryWindow, DistanceKm: round2(haversineKm(storeGeo, dest)),
+		Slot: o.DeliveryWindow, Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
 		Status: "ASSIGNED", AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
 	_ = s.repo.insertDelivery(ctx, del)
@@ -90,8 +98,12 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 	if err != nil {
 		return nil, err
 	}
-	// Rider position seam: riders start at the store (per-rider GPS lands with the
-	// maps integration). Distance is store→delivery — the escalation tier.
+	// NEARBY ranking: the instant lane reuses the SAME rider pool that runs the
+	// morning subscription round — but each rider's position is taken from the
+	// freshest last_known_geo on their own tasks (their live GPS trail), falling
+	// back to the store centre for riders who haven't moved yet. Distance is
+	// rider→drop, and the list is sorted nearest-first so the store manager's
+	// assign sheet leads with the closest rider.
 	storeGeo, _ := s.repo.storeGeo(ctx, storeID)
 	var dest *geoPt
 	if deliveryID != "" {
@@ -105,6 +117,8 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 	for _, rid := range riderIDs {
 		name, phone := s.repo.riderName(ctx, rid)
 		active, done := 0, 0
+		origin := storeGeo // position fallback: idle riders stage at the store
+		lastAt := ""
 		for _, d := range all {
 			if d.RiderPartyID != rid {
 				continue
@@ -115,14 +129,29 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 			if d.Status == "DELIVERED" && len(d.DeliveredAt) >= 10 && d.DeliveredAt[:10] == today {
 				done++
 			}
+			// Freshest GPS ping across the rider's tasks = their live position.
+			if d.LastKnownGeo != nil && d.LastLocationAt > lastAt {
+				lastAt = d.LastLocationAt
+				origin = *d.LastKnownGeo
+			}
 		}
 		dist := 0.0
 		if dest != nil {
-			dist = round2(haversineKm(storeGeo, *dest))
+			dist = round2(haversineKm(origin, *dest))
 		}
 		out = append(out, riderSummary{
 			PartyID: rid, Name: name, PhoneMasked: maskPhone(phone), VehicleNo: "",
 			ActiveDeliveries: active, CompletedToday: done, DistanceKm: dist, WithinTierKm: tierFor(dist),
+		})
+	}
+	// Nearest-first when ranking against a concrete drop; ties break on the
+	// lighter current workload so instant orders spread across free riders.
+	if dest != nil {
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].DistanceKm != out[j].DistanceKm {
+				return out[i].DistanceKm < out[j].DistanceKm
+			}
+			return out[i].ActiveDeliveries < out[j].ActiveDeliveries
 		})
 	}
 	return out, nil
