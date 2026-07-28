@@ -163,6 +163,20 @@ func (r *repository) findOrder(ctx context.Context, orderID, userID string) (*or
 	return &o, nil
 }
 
+// findOrderAnyUser — internal lookup with no ownership filter (delivery-side
+// guards that need the parent order's status). Never exposed on a route.
+func (r *repository) findOrderAnyUser(ctx context.Context, orderID string) (*order, error) {
+	var o order
+	err := r.orders.FindOne(ctx, bson.D{{Key: "order_id", Value: orderID}}).Decode(&o)
+	if isNoDocs(err) {
+		return nil, errNotFound("order not found")
+	}
+	if err != nil {
+		return nil, errInternal("order lookup failed")
+	}
+	return &o, nil
+}
+
 // updateOrder applies a $set scoped to (order_id, user_id) and returns the fresh
 // doc. optFilter adds extra guard conditions (e.g. a status precondition).
 func (r *repository) updateOrder(ctx context.Context, orderID, userID string, set bson.D, guard bson.D) (*order, error) {
@@ -235,9 +249,12 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	if pm == "" {
 		pm = "cod"
 	}
+	// Delivery lane: "morning" (5–7:30 subscription run) is the DEFAULT — the
+	// instant ≈90-min lane is an explicit, validated opt-in (an unknown value
+	// must never accidentally mint an instant ETA).
 	lane := in.Lane
-	if lane == "" {
-		lane = "instant"
+	if lane != "instant" {
+		lane = "morning"
 	}
 	priority := in.Priority
 	if priority == "" {
@@ -272,10 +289,27 @@ func (s *service) getOrder(ctx context.Context, userID, orderID string) (*order,
 func (s *service) cancelOrder(ctx context.Context, userID, orderID string) (*order, error) {
 	// Guard: only placed/confirmed orders may cancel — the $in precondition makes
 	// this atomic (no cancelling an order that just went out for delivery).
-	return s.repo.updateOrder(ctx, orderID, userID,
+	o, err := s.repo.updateOrder(ctx, orderID, userID,
 		bson.D{{Key: "status", Value: "cancelled"}},
 		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"placed", "confirmed"}}}}},
 	)
+	if err != nil {
+		return nil, err
+	}
+	// A cancelled order must not leave a LIVE delivery task behind — otherwise a
+	// rider could still deliver it, debit the wallet, and flip the order back to
+	// delivered. Fail the task (guarded: never touch one already terminal).
+	if d, _ := s.repo.findDeliveryByOrder(ctx, orderID); d != nil && d.Status != "DELIVERED" && d.Status != "FAILED" {
+		_, _ = s.repo.updateDelivery(ctx, d.ID,
+			bson.D{
+				{Key: "status", Value: "FAILED"},
+				{Key: "failure_reason", Value: "Order cancelled by the customer"},
+				{Key: "updated_at", Value: time.Now().UTC()},
+			},
+			bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
+		)
+	}
+	return o, nil
 }
 
 func (s *service) reviewOrder(ctx context.Context, userID, orderID string, rating int, comment string) (*order, error) {

@@ -42,12 +42,16 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		payMode = "PREPAID"
 	}
 	now := time.Now().UTC()
-	// Instant lane: the task carries a hard ETA (placed + 90 min) so the store
-	// console and rider queue can surface the countdown. The morning lane keeps
-	// the subscription slot window only.
+	// Instant lane: the task carries a hard ETA anchored to the ORDER's
+	// placed-at (+90 min) — not task-creation time, so a backfilled task keeps
+	// the customer's original promise instead of restarting the clock.
 	eta := ""
 	if o.Lane == "instant" {
-		eta = now.Add(90 * time.Minute).Format(time.RFC3339)
+		base := o.PlacedAt
+		if base.IsZero() {
+			base = now
+		}
+		eta = base.Add(90 * time.Minute).Format(time.RFC3339)
 	}
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
@@ -104,12 +108,18 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 	// back to the store centre for riders who haven't moved yet. Distance is
 	// rider→drop, and the list is sorted nearest-first so the store manager's
 	// assign sheet leads with the closest rider.
-	storeGeo, _ := s.repo.storeGeo(ctx, storeID)
+	storeGeo, geoOK := s.repo.storeGeo(ctx, storeID)
 	var dest *geoPt
 	if deliveryID != "" {
 		if d, e := s.repo.findDeliveryByID(ctx, deliveryID); e == nil {
 			dest = &d.Geo
 		}
+	}
+	// A store with no geo must not rank idle riders from (0,0) — thousands of
+	// phantom km. Stage geo-less stores AT the drop point (distance 0), letting
+	// riders with real GPS pings still rank truthfully.
+	if !geoOK && dest != nil {
+		storeGeo = *dest
 	}
 	all, _ := s.repo.listDeliveriesByStore(ctx, storeID)
 	today := time.Now().UTC().Format("2006-01-02")
@@ -291,6 +301,16 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	}
 	if d.Status != "OUT_FOR_DELIVERY" {
 		return nil, errConflict("NOT_OUT", "this delivery is not out for delivery")
+	}
+	// Belt + braces with cancelOrder's task-failing: refuse to deliver a task
+	// whose parent order was cancelled (a stale task must never debit money or
+	// resurrect a cancelled order to delivered).
+	if o, _ := s.repo.findOrderAnyUser(ctx, d.OrderID); o != nil && o.Status == "cancelled" {
+		_, _ = s.repo.updateDelivery(ctx, d.ID,
+			bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: "Order cancelled by the customer"}, {Key: "updated_at", Value: time.Now().UTC()}},
+			bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
+		)
+		return nil, errConflict("ORDER_CANCELLED", "this order was cancelled by the customer")
 	}
 	if in.ProofPhoto == "" {
 		return nil, errUnprocessable("PROOF_PHOTO_REQUIRED", "add a delivery photo as proof")
