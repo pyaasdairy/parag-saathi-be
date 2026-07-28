@@ -84,6 +84,9 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Get("/wallet/transactions", h.walletTxns)
 			pr.Post("/wallet/topup", h.topup)
 			pr.Post("/wallet/recharge", h.topup)
+			// Marketing grant seam (free-pack funnel): REWARDS-only credit,
+			// idempotent by ref, dev-gated like /wallet/topup.
+			pr.Post("/wallet/promo", h.promo)
 			// Real money-in path (Razorpay): create amount-bound order → verify
 			// signature server-side → credit exactly once.
 			pr.Post("/wallet/order", h.walletOrder)

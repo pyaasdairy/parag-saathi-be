@@ -384,6 +384,47 @@ func (s *service) topup(ctx context.Context, consumerID primitive.ObjectID, amou
 	return walletToView(wl), nil
 }
 
+// promoCredit credits the REWARDS bucket only (POST /wallet/promo) — the seam
+// for marketing grants like the free-pack "2 mornings on us" funnel. Same
+// exactly-once gate as creditTopup (unique (consumer, ref, type) ledger row
+// inserted FIRST), so a re-claimed pack can never double-credit. Dev-gated like
+// /wallet/topup until a server-side campaign registry decides eligibility.
+func (s *service) promoCredit(ctx context.Context, consumerID primitive.ObjectID, amount float64, ref, remark string) (walletView, error) {
+	if !s.deps.Cfg.OTPDevMode {
+		return walletView{}, errForbidden("not available")
+	}
+	amount = round2(amount)
+	if amount <= 0 || amount > 5000 {
+		return walletView{}, errBadRequest("promo amount must be between 1 and 5000")
+	}
+	if ref == "" {
+		return walletView{}, errBadRequest("a promo reference (ref) is required")
+	}
+	now := time.Now().UTC()
+	row := walletTxn{
+		ID: primitive.NewObjectID(), ConsumerID: consumerID,
+		Type: "BONUS", Bucket: "REWARDS", Amount: amount, RefType: "promo", RefID: ref,
+		Status: "SUCCESS", Remark: remark, CreatedAt: now,
+	}
+	dup, err := s.repo.insertWalletTxnGate(ctx, row)
+	if err != nil {
+		return walletView{}, err
+	}
+	if dup { // already granted — return the current balance, no second $inc
+		wl, gerr := s.getOrCreateWallet(ctx, consumerID)
+		if gerr != nil {
+			return walletView{}, gerr
+		}
+		return walletToView(wl), nil
+	}
+	updated, err := s.repo.incWallet(ctx, consumerID, 0, amount, 0, 1)
+	if err != nil {
+		return walletView{}, err
+	}
+	s.repo.updateWalletTxnBalances(ctx, row.ID, updated.ID, updated.Seq, updated.CashBalance, updated.RewardsBalance)
+	return walletToView(updated), nil
+}
+
 // createTopupOrder mints an amount-bound Razorpay order (POST /wallet/order).
 // The amount is persisted server-side so verifyPayment credits exactly what was
 // ordered — a tampered client cannot pay ₹1 for a ₹500 top-up.

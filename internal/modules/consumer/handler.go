@@ -188,6 +188,31 @@ func (h *handler) topup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// promo — POST /wallet/promo: REWARDS-only marketing grant (free-pack funnel).
+// Idempotent by ref; dev-gated like /wallet/topup.
+func (h *handler) promo(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var body struct {
+		Amount float64 `json:"amount"`
+		Ref    string  `json:"ref"`
+		Remark string  `json:"remark"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, err := h.svc.promoCredit(r.Context(), id, body.Amount, body.Ref, body.Remark)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
 // walletOrder — POST /wallet/order: create an amount-bound Razorpay order.
 func (h *handler) walletOrder(w http.ResponseWriter, r *http.Request) {
 	id, aerr := actorID(r)
