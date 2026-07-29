@@ -44,6 +44,10 @@ services:
       # Testing conveniences (flip OFF for production):
       - key: OTP_DEV_MODE
         value: "true"
+      # TESTING: offer ⚡ Instant wherever serviceable (before a store manager draws
+      # an instant zone). Flip OFF for production so instant is gated on the radius.
+      - key: INSTANT_TEST_OPEN
+        value: "true"
       - key: SEED_ADMIN_PHONE
         value: "9999999999"
       - key: ACCESS_TOKEN_TTL_MINUTES
