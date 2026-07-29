@@ -22,6 +22,7 @@ type repository struct {
 	consents   *mongo.Collection
 	payOrders  *mongo.Collection
 	mandates   *mongo.Collection
+	trials     *mongo.Collection
 	orders     *mongo.Collection
 	deliveries *mongo.Collection
 	catalog    *mongo.Collection
@@ -46,6 +47,7 @@ func newRepository(db *mongo.Database) *repository {
 		consents:        db.Collection(collConsents),
 		payOrders:       db.Collection(collPayOrders),
 		mandates:        db.Collection(collMandates),
+		trials:          db.Collection(collConsumerTrials),
 		orders:          db.Collection(collOrders),
 		deliveries:      db.Collection(collDeliveries),
 		catalog:         db.Collection(collCatalog),
@@ -103,6 +105,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	}
 	if err := r.ensureMandateIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer mandate indexes: %w", err)
+	}
+	if err := r.ensureTrialIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer trial indexes: %w", err)
 	}
 	return nil
 }

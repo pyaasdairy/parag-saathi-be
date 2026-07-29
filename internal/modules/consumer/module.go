@@ -120,6 +120,11 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/mandate/{id}/cancel", h.mandateAction("cancel"))
 			pr.Post("/mandate/{id}/execute", h.executeMandate) // dev-only manual tick
 
+			// Subscription welcome trial ("3 PAID then 3 FREE"): the caller's trial
+			// standing (phase + paid/free days remaining). The window is spent on
+			// DELIVERED days by the delivery settle path (trial.go), never here.
+			pr.Get("/trial/me", h.trialMe)
+
 			// Addresses.
 			pr.Get("/addresses", h.listAddresses)
 			pr.Post("/addresses", h.createAddress)
