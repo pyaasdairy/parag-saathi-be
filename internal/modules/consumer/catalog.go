@@ -82,10 +82,40 @@ const (
 	maxCatalogPrice = 100000.0
 )
 
+// variantDoc is one purchasable variant hanging off an addition (base) product:
+// a size/pack of the same product (e.g. "500ml Pouch" vs "1L Pouch") carrying
+// its own price, photo, stock flag and physical descriptors. The bson keys are
+// snake_case (storage); the json keys are the camelCase the contract canonicalises
+// on — so a variantDoc doubles as its own read-view (no separate projection type).
+type variantDoc struct {
+	VariantID  string            `bson:"variant_id"             json:"variantId"`
+	Label      string            `bson:"label"                  json:"label"`
+	Price      float64           `bson:"price"                  json:"price"`
+	ImageURL   string            `bson:"image_url,omitempty"    json:"imageUrl,omitempty"`
+	OutOfStock bool              `bson:"out_of_stock,omitempty" json:"outOfStock"`
+	VolumeMl   float64           `bson:"volume_ml,omitempty"    json:"volumeMl,omitempty"`
+	Unit       string            `bson:"unit,omitempty"         json:"unit,omitempty"`
+	Attributes map[string]string `bson:"attributes,omitempty"   json:"attributes,omitempty"`
+}
+
+// physicalDoc is the base product's physical envelope (used by delivery/packing
+// and, later, by the Dolibarr product sync). Same bson=storage / json=contract
+// camelCase split as variantDoc, so it is its own read-view too.
+type physicalDoc struct {
+	VolumeMl   float64 `bson:"volume_ml,omitempty" json:"volumeMl,omitempty"`
+	WeightG    float64 `bson:"weight_g,omitempty"  json:"weightG,omitempty"`
+	Dimensions string  `bson:"dimensions,omitempty" json:"dimensions,omitempty"`
+}
+
 // catalogDoc is one overlay row: a per-store override on a baseline SKU, or a
 // store-added SKU. Unified fields (price / in_stock / hidden) apply to both;
 // the name/category/variant/photo_url fields carry an addition's identity. kind
 // distinguishes the two so a baseline override never masquerades as a product.
+//
+// An addition is a BASE product that may carry many variants[] (sizes/packs) and
+// a physical{} envelope. base_id is an optional external/base handle (empty for a
+// natively-added product) that a future DOLIBARR-SYNC adapter can key on — see
+// the DOLIBARR-SYNC seam note below.
 type catalogDoc struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty"`
 	StoreID   string             `bson:"store_id"`
@@ -98,10 +128,23 @@ type catalogDoc struct {
 	Category  string             `bson:"category,omitempty"`
 	Variant   string             `bson:"variant,omitempty"`
 	PhotoURL  string             `bson:"photo_url,omitempty"`
+	BaseID    string             `bson:"base_id,omitempty"`
+	Variants  []variantDoc       `bson:"variants,omitempty"`
+	Physical  *physicalDoc       `bson:"physical,omitempty"`
 	UpdatedBy string             `bson:"updated_by"`
 	UpdatedAt time.Time          `bson:"updated_at"`
 	CreatedAt time.Time          `bson:"created_at"`
 }
+
+// DOLIBARR-SYNC seam (NOT integrated). Additions above are the exact shape a
+// future Dolibarr → Saathi product adapter would feed: Dolibarr's product +
+// variant (product_attribute) + weight/volume/dimension fields map 1:1 onto a
+// catalogDoc addition (base_id ← Dolibarr product ref, variants[] ← its
+// combinations, physical{} ← its weight/volume/length·width·height). When that
+// adapter lands it will UPSERT additions through the same repo methods the store
+// console uses (insertAddition / pushVariants / patchExisting), keyed by base_id,
+// so Dolibarr-sourced and hand-added products coexist in one overlay. Nothing
+// here calls Dolibarr today — this is a documented seam only.
 
 // ── Consumer-facing view (GET /consumer/catalog) ────────────────────────────
 
@@ -114,15 +157,20 @@ type overrideView struct {
 	Hidden  *bool    `json:"hidden,omitempty"`
 }
 
-// additionView is a store-added SKU as the consumer app consumes it.
+// additionView is a store-added SKU as the consumer app consumes it. A base
+// product carries its variants[] and physical{} envelope (both omitted when
+// empty, so a plain single-SKU addition still reads exactly as before).
 type additionView struct {
-	ID       string  `json:"id"`
-	Name     string  `json:"name"`
-	Category string  `json:"category"`
-	Variant  string  `json:"variant,omitempty"`
-	Price    float64 `json:"price"`
-	PhotoURL string  `json:"photo_url,omitempty"`
-	InStock  bool    `json:"in_stock"`
+	ID       string       `json:"id"`
+	BaseID   string       `json:"baseId,omitempty"`
+	Name     string       `json:"name"`
+	Category string       `json:"category"`
+	Variant  string       `json:"variant,omitempty"`
+	Price    float64      `json:"price"`
+	PhotoURL string       `json:"photo_url,omitempty"`
+	InStock  bool         `json:"in_stock"`
+	Variants []variantDoc `json:"variants,omitempty"`
+	Physical *physicalDoc `json:"physical,omitempty"`
 }
 
 // catalogResponse is the whole overlay: a map of baseline-SKU overrides keyed by
@@ -145,16 +193,55 @@ type storeOverrideView struct {
 }
 
 type storeAdditionView struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Category  string    `json:"category"`
-	Variant   string    `json:"variant,omitempty"`
-	Price     float64   `json:"price"`
-	PhotoURL  string    `json:"photo_url,omitempty"`
-	InStock   bool      `json:"in_stock"`
-	Hidden    bool      `json:"hidden,omitempty"`
-	UpdatedBy string    `json:"updated_by,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string       `json:"id"`
+	BaseID    string       `json:"baseId,omitempty"`
+	Name      string       `json:"name"`
+	Category  string       `json:"category"`
+	Variant   string       `json:"variant,omitempty"`
+	Price     float64      `json:"price"`
+	PhotoURL  string       `json:"photo_url,omitempty"`
+	InStock   bool         `json:"in_stock"`
+	Hidden    bool         `json:"hidden,omitempty"`
+	Variants  []variantDoc `json:"variants,omitempty"`
+	Physical  *physicalDoc `json:"physical,omitempty"`
+	UpdatedBy string       `json:"updated_by,omitempty"`
+	UpdatedAt time.Time    `json:"updated_at"`
+}
+
+// additionViewFromDoc / storeAdditionViewFromDoc project an addition catalogDoc
+// onto its consumer / store-console read shape (shared by the list + write paths
+// so every response serialises baseId + variants[] + physical{} identically).
+func additionViewFromDoc(d catalogDoc) additionView {
+	return additionView{
+		ID:       d.SkuID,
+		BaseID:   d.BaseID,
+		Name:     d.Name,
+		Category: d.Category,
+		Variant:  d.Variant,
+		Price:    valOrZero(d.Price),
+		PhotoURL: d.PhotoURL,
+		InStock:  d.InStock == nil || *d.InStock, // default in-stock
+		Variants: d.Variants,
+		Physical: d.Physical,
+	}
+}
+
+func storeAdditionViewFromDoc(d catalogDoc) storeAdditionView {
+	return storeAdditionView{
+		ID:        d.SkuID,
+		BaseID:    d.BaseID,
+		Name:      d.Name,
+		Category:  d.Category,
+		Variant:   d.Variant,
+		Price:     valOrZero(d.Price),
+		PhotoURL:  d.PhotoURL,
+		InStock:   d.InStock == nil || *d.InStock,
+		Hidden:    d.Hidden != nil && *d.Hidden,
+		Variants:  d.Variants,
+		Physical:  d.Physical,
+		UpdatedBy: d.UpdatedBy,
+		UpdatedAt: d.UpdatedAt,
+	}
 }
 
 type storeCatalogResponse struct {
@@ -166,20 +253,144 @@ type storeCatalogResponse struct {
 
 // ── Request bodies ──────────────────────────────────────────────────────────
 
-type addSkuRequest struct {
-	ID       string  `json:"id"`
-	Name     string  `json:"name"`
-	Category string  `json:"category"`
-	Variant  string  `json:"variant"`
-	Price    float64 `json:"price"`
-	PhotoURL string  `json:"photo_url"`
-	InStock  *bool   `json:"in_stock"`
+// variantInput is a variant on the wire (POST base+variants, POST variant-to-base,
+// or PATCH edit_variant). Following the km/unit tolerance style, every key is
+// accepted in BOTH snake_case and camelCase; normalize() folds the aliases onto
+// the canonical field. Price is a pointer so "absent" is distinguishable from 0
+// (a variant PATCH must not zero a price the caller never sent).
+type variantInput struct {
+	VariantID    string            `json:"variant_id"`
+	VariantIDC   string            `json:"variantId"`
+	Label        string            `json:"label"`
+	Price        *float64          `json:"price"`
+	ImageURL     string            `json:"image_url"`
+	ImageURLC    string            `json:"imageUrl"`
+	OutOfStock   *bool             `json:"out_of_stock"`
+	OutOfStockC  *bool             `json:"outOfStock"`
+	VolumeMl     float64           `json:"volume_ml"`
+	VolumeMlC    float64           `json:"volumeMl"`
+	Unit         string            `json:"unit"`
+	Attributes   map[string]string `json:"attributes"`
 }
 
+func (v *variantInput) normalize() {
+	if v.VariantID == "" && v.VariantIDC != "" {
+		v.VariantID = v.VariantIDC
+	}
+	if v.ImageURL == "" && v.ImageURLC != "" {
+		v.ImageURL = v.ImageURLC
+	}
+	if v.OutOfStock == nil && v.OutOfStockC != nil {
+		v.OutOfStock = v.OutOfStockC
+	}
+	if v.VolumeMl == 0 && v.VolumeMlC != 0 {
+		v.VolumeMl = v.VolumeMlC
+	}
+}
+
+// physicalInput is the physical{} envelope on the wire; snake+camel tolerant.
+type physicalInput struct {
+	VolumeMl   float64 `json:"volume_ml"`
+	VolumeMlC  float64 `json:"volumeMl"`
+	WeightG    float64 `json:"weight_g"`
+	WeightGC   float64 `json:"weightG"`
+	Dimensions string  `json:"dimensions"`
+}
+
+func (p *physicalInput) normalize() {
+	if p.VolumeMl == 0 && p.VolumeMlC != 0 {
+		p.VolumeMl = p.VolumeMlC
+	}
+	if p.WeightG == 0 && p.WeightGC != 0 {
+		p.WeightG = p.WeightGC
+	}
+}
+
+func (p *physicalInput) toDoc() *physicalDoc {
+	if p == nil {
+		return nil
+	}
+	return &physicalDoc{VolumeMl: p.VolumeMl, WeightG: p.WeightG, Dimensions: strings.TrimSpace(p.Dimensions)}
+}
+
+// addSkuRequest is the POST body. Two shapes share it (km/unit tolerance style,
+// snake+camel accepted throughout):
+//
+//   - ADD A BASE (base_id absent): name + category identify a new base product,
+//     optionally carrying variants[] and a physical{} envelope. A legacy flat
+//     single-SKU addition (top-level price/variant, no variants[]) still works.
+//   - ADD A VARIANT TO A BASE (base_id set): variants[] are appended to the
+//     existing addition whose id == base_id; the base's own fields are ignored.
+type addSkuRequest struct {
+	ID        string          `json:"id"`
+	BaseID    string          `json:"base_id"`
+	BaseIDC   string          `json:"baseId"`
+	Name      string          `json:"name"`
+	Category  string          `json:"category"`
+	Variant   string          `json:"variant"`
+	Price     float64         `json:"price"`
+	PhotoURL  string          `json:"photo_url"`
+	PhotoURLC string          `json:"photoUrl"`
+	InStock   *bool           `json:"in_stock"`
+	InStockC  *bool           `json:"inStock"`
+	Variants  []variantInput  `json:"variants"`
+	Physical  *physicalInput  `json:"physical"`
+}
+
+func (a *addSkuRequest) normalize() {
+	if a.BaseID == "" && a.BaseIDC != "" {
+		a.BaseID = a.BaseIDC
+	}
+	if a.PhotoURL == "" && a.PhotoURLC != "" {
+		a.PhotoURL = a.PhotoURLC
+	}
+	if a.InStock == nil && a.InStockC != nil {
+		a.InStock = a.InStockC
+	}
+	for i := range a.Variants {
+		a.Variants[i].normalize()
+	}
+	if a.Physical != nil {
+		a.Physical.normalize()
+	}
+}
+
+// patchSkuRequest edits ANY field of a base OR a specific variant. Base-level
+// fields are optional pointers (only sent keys are applied). When edit_variant
+// is present it patches the single variant it names (variantId); otherwise the
+// body patches the base / baseline override. snake+camel accepted throughout.
 type patchSkuRequest struct {
-	Price   *float64 `json:"price"`
-	InStock *bool    `json:"in_stock"`
-	Hidden  *bool    `json:"hidden"`
+	Price     *float64       `json:"price"`
+	InStock   *bool          `json:"in_stock"`
+	InStockC  *bool          `json:"inStock"`
+	Hidden    *bool          `json:"hidden"`
+	Name      *string        `json:"name"`
+	Category  *string        `json:"category"`
+	Variant   *string        `json:"variant"`
+	PhotoURL  *string        `json:"photo_url"`
+	PhotoURLC *string        `json:"photoUrl"`
+	Physical  *physicalInput `json:"physical"`
+
+	EditVariant  *variantInput `json:"edit_variant"`
+	EditVariantC *variantInput `json:"editVariant"`
+}
+
+func (p *patchSkuRequest) normalize() {
+	if p.InStock == nil && p.InStockC != nil {
+		p.InStock = p.InStockC
+	}
+	if p.PhotoURL == nil && p.PhotoURLC != nil {
+		p.PhotoURL = p.PhotoURLC
+	}
+	if p.Physical != nil {
+		p.Physical.normalize()
+	}
+	if p.EditVariant == nil && p.EditVariantC != nil {
+		p.EditVariant = p.EditVariantC
+	}
+	if p.EditVariant != nil {
+		p.EditVariant.normalize()
+	}
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -196,6 +407,54 @@ func validateCategory(c string) *apiError {
 		return errUnprocessable("INVALID_CATEGORY", "category is not a recognised product category")
 	}
 	return nil
+}
+
+// validateVariant enforces the variant contract: a label is required and a
+// price is required and in the same 1..100000 band as any other SKU. variantId
+// is optional on the way in (minted when absent).
+func validateVariant(v variantInput) *apiError {
+	if strings.TrimSpace(v.Label) == "" {
+		return errUnprocessable("VARIANT_LABEL_REQUIRED", "each variant needs a label")
+	}
+	if v.Price == nil {
+		return errUnprocessable("VARIANT_PRICE_REQUIRED", "each variant needs a price")
+	}
+	return validatePrice(*v.Price)
+}
+
+// validatePhysical rejects negative physical descriptors (0 = unset).
+func validatePhysical(p *physicalInput) *apiError {
+	if p == nil {
+		return nil
+	}
+	if p.VolumeMl < 0 || p.WeightG < 0 {
+		return errUnprocessable("INVALID_PHYSICAL", "physical volume/weight must not be negative")
+	}
+	return nil
+}
+
+// variantToDoc materialises a validated variantInput into a stored variantDoc,
+// minting a variant id when the caller did not supply one.
+func variantToDoc(v variantInput) variantDoc {
+	id := strings.TrimSpace(v.VariantID)
+	if id == "" {
+		id = "var-" + primitive.NewObjectID().Hex()
+	}
+	out := variantDoc{
+		VariantID:  id,
+		Label:      strings.TrimSpace(v.Label),
+		VolumeMl:   v.VolumeMl,
+		Unit:       strings.TrimSpace(v.Unit),
+		ImageURL:   strings.TrimSpace(v.ImageURL),
+		Attributes: v.Attributes,
+	}
+	if v.Price != nil {
+		out.Price = *v.Price
+	}
+	if v.OutOfStock != nil {
+		out.OutOfStock = *v.OutOfStock
+	}
+	return out
 }
 
 // ── Repository ──────────────────────────────────────────────────────────────
@@ -251,6 +510,112 @@ func (r *repository) insertAddition(ctx context.Context, doc *catalogDoc) error 
 	return nil
 }
 
+// pushVariants appends variants to an existing addition (base) product,
+// identified by (store, sku). Returns errNotFound if no such addition exists.
+func (r *repository) pushVariants(ctx context.Context, storeID, baseID string, variants []variantDoc, updatedBy string) (*catalogDoc, error) {
+	now := time.Now().UTC()
+	after := options.After
+	var doc catalogDoc
+	err := r.catalog.FindOneAndUpdate(ctx,
+		bson.D{
+			{Key: "store_id", Value: storeID},
+			{Key: "sku_id", Value: baseID},
+			{Key: "kind", Value: catalogKindAddition},
+		},
+		bson.D{
+			{Key: "$push", Value: bson.D{{Key: "variants", Value: bson.D{{Key: "$each", Value: variants}}}}},
+			{Key: "$set", Value: bson.D{
+				{Key: "updated_by", Value: updatedBy},
+				{Key: "updated_at", Value: now},
+			}},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(after),
+	).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, errNotFound("no base product with this id to add a variant to")
+		}
+		return nil, errInternal("catalog variant add failed")
+	}
+	return &doc, nil
+}
+
+// patchExisting applies a $set to an existing overlay row (used when the patch
+// touches addition-only fields like name/category/photo/physical, which must not
+// upsert a phantom doc onto a baseline sku). Returns errNotFound if absent.
+func (r *repository) patchExisting(ctx context.Context, storeID, skuID string, set bson.D, updatedBy string) (*catalogDoc, error) {
+	now := time.Now().UTC()
+	set = append(set,
+		bson.E{Key: "updated_by", Value: updatedBy},
+		bson.E{Key: "updated_at", Value: now},
+	)
+	after := options.After
+	var doc catalogDoc
+	err := r.catalog.FindOneAndUpdate(ctx,
+		bson.D{{Key: "store_id", Value: storeID}, {Key: "sku_id", Value: skuID}},
+		bson.D{{Key: "$set", Value: set}},
+		options.FindOneAndUpdate().SetReturnDocument(after),
+	).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, errNotFound("no catalog entry for this sku")
+		}
+		return nil, errInternal("catalog patch failed")
+	}
+	return &doc, nil
+}
+
+// patchVariant edits a single variant in place (positional arrayFilters on
+// variant_id) inside an addition. set holds the per-variant field writes already
+// keyed as variants.$[v].<field>. Returns errNotFound if the base or the named
+// variant does not exist.
+func (r *repository) patchVariant(ctx context.Context, storeID, skuID, variantID string, set bson.D, updatedBy string) (*catalogDoc, error) {
+	now := time.Now().UTC()
+	set = append(set,
+		bson.E{Key: "updated_by", Value: updatedBy},
+		bson.E{Key: "updated_at", Value: now},
+	)
+	after := options.After
+	var doc catalogDoc
+	err := r.catalog.FindOneAndUpdate(ctx,
+		bson.D{
+			{Key: "store_id", Value: storeID},
+			{Key: "sku_id", Value: skuID},
+			{Key: "variants.variant_id", Value: variantID},
+		},
+		bson.D{{Key: "$set", Value: set}},
+		options.FindOneAndUpdate().
+			SetReturnDocument(after).
+			SetArrayFilters(options.ArrayFilters{Filters: []interface{}{bson.M{"v.variant_id": variantID}}}),
+	).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, errNotFound("no variant with this id on this product")
+		}
+		return nil, errInternal("catalog variant patch failed")
+	}
+	return &doc, nil
+}
+
+// deleteVariant removes a single variant ($pull by variant_id) from an addition,
+// leaving the base product intact. Returns errNotFound if nothing was removed.
+func (r *repository) deleteVariant(ctx context.Context, storeID, skuID, variantID string) error {
+	res, err := r.catalog.UpdateOne(ctx,
+		bson.D{{Key: "store_id", Value: storeID}, {Key: "sku_id", Value: skuID}},
+		bson.D{
+			{Key: "$pull", Value: bson.D{{Key: "variants", Value: bson.D{{Key: "variant_id", Value: variantID}}}}},
+			{Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now().UTC()}}},
+		},
+	)
+	if err != nil {
+		return errInternal("catalog variant delete failed")
+	}
+	if res.ModifiedCount == 0 {
+		return errNotFound("no variant with this id on this product")
+	}
+	return nil
+}
+
 // deleteSku removes a store's overlay row for a SKU — clears a baseline override
 // (resetting it to the shipped default) or removes a store addition entirely.
 func (r *repository) deleteSku(ctx context.Context, storeID, skuID string) (int64, error) {
@@ -301,15 +666,7 @@ func (r *repository) catalogView(ctx context.Context) (*catalogResponse, error) 
 			if d.Hidden != nil && *d.Hidden {
 				continue // a hidden addition is not shown to shoppers
 			}
-			resp.Additions = append(resp.Additions, additionView{
-				ID:       d.SkuID,
-				Name:     d.Name,
-				Category: d.Category,
-				Variant:  d.Variant,
-				Price:    valOrZero(d.Price),
-				PhotoURL: d.PhotoURL,
-				InStock:  d.InStock == nil || *d.InStock, // default in-stock
-			})
+			resp.Additions = append(resp.Additions, additionViewFromDoc(d))
 			continue
 		}
 		resp.Overrides[d.SkuID] = overrideView{Price: d.Price, InStock: d.InStock, Hidden: d.Hidden}
@@ -353,18 +710,7 @@ func (s *service) storeSkus(ctx context.Context, actor auth.Actor, storeID strin
 	}
 	for _, d := range docs {
 		if d.Kind == catalogKindAddition {
-			resp.Additions = append(resp.Additions, storeAdditionView{
-				ID:        d.SkuID,
-				Name:      d.Name,
-				Category:  d.Category,
-				Variant:   d.Variant,
-				Price:     valOrZero(d.Price),
-				PhotoURL:  d.PhotoURL,
-				InStock:   d.InStock == nil || *d.InStock,
-				Hidden:    d.Hidden != nil && *d.Hidden,
-				UpdatedBy: d.UpdatedBy,
-				UpdatedAt: d.UpdatedAt,
-			})
+			resp.Additions = append(resp.Additions, storeAdditionViewFromDoc(d))
 			continue
 		}
 		resp.Overrides = append(resp.Overrides, storeOverrideView{
@@ -379,13 +725,42 @@ func (s *service) storeSkus(ctx context.Context, actor auth.Actor, storeID strin
 	return resp, nil
 }
 
-// addStoreSku validates and inserts a store-added SKU. name required, category
-// in the fixed set, price in 1..100000, and the id must not shadow a baseline
-// SKU (that would be an override, not an addition).
+// addStoreSku handles both POST shapes (see addSkuRequest). With base_id set it
+// APPENDS the request's variants[] to that existing base; otherwise it CREATES a
+// new base product (name required, category in the fixed set, id must not shadow
+// a baseline SKU) carrying its variants[] + physical{}. Every variant is
+// validated (label + price) either way; base_id itself is optional.
 func (s *service) addStoreSku(ctx context.Context, actor auth.Actor, storeID string, req addSkuRequest) (*storeAdditionView, error) {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
 	}
+	req.normalize()
+
+	// Validate any supplied variants up front (both shapes need this).
+	for _, v := range req.Variants {
+		if err := validateVariant(v); err != nil {
+			return nil, err
+		}
+	}
+
+	// Shape 2: add variant(s) to an existing base.
+	if baseID := strings.TrimSpace(req.BaseID); baseID != "" {
+		if len(req.Variants) == 0 {
+			return nil, errUnprocessable("VARIANTS_REQUIRED", "adding to a base needs at least one variant")
+		}
+		vdocs := make([]variantDoc, 0, len(req.Variants))
+		for _, v := range req.Variants {
+			vdocs = append(vdocs, variantToDoc(v))
+		}
+		doc, err := s.repo.pushVariants(ctx, storeID, baseID, vdocs, actor.PartyID)
+		if err != nil {
+			return nil, err
+		}
+		view := storeAdditionViewFromDoc(*doc)
+		return &view, nil
+	}
+
+	// Shape 1: create a new base product.
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		return nil, errUnprocessable("NAME_REQUIRED", "a product name is required")
@@ -393,8 +768,15 @@ func (s *service) addStoreSku(ctx context.Context, actor auth.Actor, storeID str
 	if err := validateCategory(strings.TrimSpace(req.Category)); err != nil {
 		return nil, err
 	}
-	if err := validatePrice(req.Price); err != nil {
+	if err := validatePhysical(req.Physical); err != nil {
 		return nil, err
+	}
+	// A base is priced either by its own top-level price OR entirely by its
+	// variants. Range-check the top-level price only when one is given.
+	if req.Price != 0 || len(req.Variants) == 0 {
+		if err := validatePrice(req.Price); err != nil {
+			return nil, err
+		}
 	}
 	id := strings.TrimSpace(req.ID)
 	if id == "" {
@@ -409,6 +791,10 @@ func (s *service) addStoreSku(ctx context.Context, actor auth.Actor, storeID str
 		inStock = *req.InStock
 	}
 	price := req.Price
+	var vdocs []variantDoc
+	for _, v := range req.Variants {
+		vdocs = append(vdocs, variantToDoc(v))
+	}
 	doc := &catalogDoc{
 		StoreID:   storeID,
 		SkuID:     id,
@@ -419,6 +805,9 @@ func (s *service) addStoreSku(ctx context.Context, actor auth.Actor, storeID str
 		Category:  strings.TrimSpace(req.Category),
 		Variant:   strings.TrimSpace(req.Variant),
 		PhotoURL:  strings.TrimSpace(req.PhotoURL),
+		BaseID:    strings.TrimSpace(req.BaseID),
+		Variants:  vdocs,
+		Physical:  req.Physical.toDoc(),
 		UpdatedBy: actor.PartyID,
 		UpdatedAt: now,
 		CreatedAt: now,
@@ -426,15 +815,16 @@ func (s *service) addStoreSku(ctx context.Context, actor auth.Actor, storeID str
 	if err := s.repo.insertAddition(ctx, doc); err != nil {
 		return nil, err
 	}
-	return &storeAdditionView{
-		ID: id, Name: name, Category: doc.Category, Variant: doc.Variant,
-		Price: price, PhotoURL: doc.PhotoURL, InStock: inStock,
-		UpdatedBy: actor.PartyID, UpdatedAt: now,
-	}, nil
+	view := storeAdditionViewFromDoc(*doc)
+	return &view, nil
 }
 
-// patchStoreSku applies a price/stock/visibility override to a SKU (baseline or
-// a store addition). At least one field must be present; price is range-checked.
+// patchStoreSku edits ANY field of a base OR of a specific variant. When
+// edit_variant is present it patches that one variant (price/stock/photo/volume/
+// unit/attributes) in place. Otherwise it patches the base: price/in_stock/hidden
+// keep upserting (so a baseline SKU override still works with no prior doc), while
+// addition-only fields (name/category/variant/photo/physical) update an existing
+// addition in place (never upsert a phantom onto a baseline sku).
 func (s *service) patchStoreSku(ctx context.Context, actor auth.Actor, storeID, skuID string, req patchSkuRequest) (*catalogDoc, error) {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
@@ -443,10 +833,49 @@ func (s *service) patchStoreSku(ctx context.Context, actor auth.Actor, storeID, 
 	if skuID == "" {
 		return nil, errBadRequest("a sku id is required")
 	}
-	if req.Price == nil && req.InStock == nil && req.Hidden == nil {
-		return nil, errBadRequest("nothing to update: set price, in_stock, or hidden")
+	req.normalize()
+
+	// Variant-level edit: patch the single named variant in place.
+	if ev := req.EditVariant; ev != nil {
+		vid := strings.TrimSpace(ev.VariantID)
+		if vid == "" {
+			return nil, errBadRequest("edit_variant needs a variantId to identify the variant")
+		}
+		set := bson.D{}
+		if ev.Price != nil {
+			if err := validatePrice(*ev.Price); err != nil {
+				return nil, err
+			}
+			set = append(set, bson.E{Key: "variants.$[v].price", Value: *ev.Price})
+		}
+		if strings.TrimSpace(ev.Label) != "" {
+			set = append(set, bson.E{Key: "variants.$[v].label", Value: strings.TrimSpace(ev.Label)})
+		}
+		if strings.TrimSpace(ev.ImageURL) != "" {
+			set = append(set, bson.E{Key: "variants.$[v].image_url", Value: strings.TrimSpace(ev.ImageURL)})
+		}
+		if ev.OutOfStock != nil {
+			set = append(set, bson.E{Key: "variants.$[v].out_of_stock", Value: *ev.OutOfStock})
+		}
+		if ev.VolumeMl != 0 {
+			set = append(set, bson.E{Key: "variants.$[v].volume_ml", Value: ev.VolumeMl})
+		}
+		if strings.TrimSpace(ev.Unit) != "" {
+			set = append(set, bson.E{Key: "variants.$[v].unit", Value: strings.TrimSpace(ev.Unit)})
+		}
+		if ev.Attributes != nil {
+			set = append(set, bson.E{Key: "variants.$[v].attributes", Value: ev.Attributes})
+		}
+		if len(set) == 0 {
+			return nil, errBadRequest("nothing to update on the variant")
+		}
+		return s.repo.patchVariant(ctx, storeID, skuID, vid, set, actor.PartyID)
 	}
+
+	// Base-level edit. Split overlay-safe fields (upsertable on a baseline sku)
+	// from addition-only fields (must target an existing addition doc).
 	set := bson.D{}
+	additionOnly := false
 	if req.Price != nil {
 		if err := validatePrice(*req.Price); err != nil {
 			return nil, err
@@ -459,18 +888,59 @@ func (s *service) patchStoreSku(ctx context.Context, actor auth.Actor, storeID, 
 	if req.Hidden != nil {
 		set = append(set, bson.E{Key: "hidden", Value: *req.Hidden})
 	}
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			return nil, errUnprocessable("NAME_REQUIRED", "a product name cannot be blank")
+		}
+		set = append(set, bson.E{Key: "name", Value: name})
+		additionOnly = true
+	}
+	if req.Category != nil {
+		cat := strings.TrimSpace(*req.Category)
+		if err := validateCategory(cat); err != nil {
+			return nil, err
+		}
+		set = append(set, bson.E{Key: "category", Value: cat})
+		additionOnly = true
+	}
+	if req.Variant != nil {
+		set = append(set, bson.E{Key: "variant", Value: strings.TrimSpace(*req.Variant)})
+		additionOnly = true
+	}
+	if req.PhotoURL != nil {
+		set = append(set, bson.E{Key: "photo_url", Value: strings.TrimSpace(*req.PhotoURL)})
+		additionOnly = true
+	}
+	if req.Physical != nil {
+		if err := validatePhysical(req.Physical); err != nil {
+			return nil, err
+		}
+		set = append(set, bson.E{Key: "physical", Value: req.Physical.toDoc()})
+		additionOnly = true
+	}
+	if len(set) == 0 {
+		return nil, errBadRequest("nothing to update: set price, stock, hidden, name, category, variant, photo, physical, or edit_variant")
+	}
+	if additionOnly {
+		return s.repo.patchExisting(ctx, storeID, skuID, set, actor.PartyID)
+	}
 	return s.repo.upsertOverride(ctx, storeID, skuID, set, actor.PartyID)
 }
 
-// deleteStoreSku removes a store's overlay for a SKU (clears a baseline override
-// or deletes a store addition).
-func (s *service) deleteStoreSku(ctx context.Context, actor auth.Actor, storeID, skuID string) error {
+// deleteStoreSku removes either a single VARIANT (variantID set → pull it, base
+// stays) or the WHOLE base/override (variantID empty → drop the overlay row: a
+// baseline override reset, or a store addition removed entirely).
+func (s *service) deleteStoreSku(ctx context.Context, actor auth.Actor, storeID, skuID, variantID string) error {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return err
 	}
 	skuID = strings.TrimSpace(skuID)
 	if skuID == "" {
 		return errBadRequest("a sku id is required")
+	}
+	if variantID = strings.TrimSpace(variantID); variantID != "" {
+		return s.repo.deleteVariant(ctx, storeID, skuID, variantID)
 	}
 	n, err := s.repo.deleteSku(ctx, storeID, skuID)
 	if err != nil {
@@ -541,6 +1011,12 @@ func (h *handler) patchSku(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
+	// An addition patch echoes the full product (variants/physical included); a
+	// baseline override echoes the compact override row.
+	if doc.Kind == catalogKindAddition {
+		httpx.JSON(w, http.StatusOK, storeAdditionViewFromDoc(*doc))
+		return
+	}
 	httpx.JSON(w, http.StatusOK, storeOverrideView{
 		SkuID: doc.SkuID, Price: doc.Price, InStock: doc.InStock, Hidden: doc.Hidden,
 		UpdatedBy: doc.UpdatedBy, UpdatedAt: doc.UpdatedAt,
@@ -548,9 +1024,15 @@ func (h *handler) patchSku(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteSkuHandler — DELETE /consumer/stores/{storeId}/skus/{skuId} (STORE_MANAGER).
+// ?variantId=… (snake ?variant_id=… tolerated) deletes just that variant; absent,
+// the whole base/override row is removed.
 func (h *handler) deleteSkuHandler(w http.ResponseWriter, r *http.Request) {
 	actor, _ := operatorActor(r)
-	if err := h.svc.deleteStoreSku(r.Context(), actor, chi.URLParam(r, "storeId"), chi.URLParam(r, "skuId")); err != nil {
+	variantID := r.URL.Query().Get("variantId")
+	if variantID == "" {
+		variantID = r.URL.Query().Get("variant_id")
+	}
+	if err := h.svc.deleteStoreSku(r.Context(), actor, chi.URLParam(r, "storeId"), chi.URLParam(r, "skuId"), variantID); err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
