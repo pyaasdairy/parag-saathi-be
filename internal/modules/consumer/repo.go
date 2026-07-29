@@ -24,6 +24,8 @@ type repository struct {
 	orders     *mongo.Collection
 	deliveries *mongo.Collection
 	catalog    *mongo.Collection
+	storeZones *mongo.Collection
+	waitlist   *mongo.Collection
 	// Operator collections — READ-mostly for the delivery flow (store/rider
 	// resolution). Deliveries are consumer_*; these are shared Saathi identity.
 	orgUnits        *mongo.Collection
@@ -45,6 +47,8 @@ func newRepository(db *mongo.Database) *repository {
 		orders:          db.Collection(collOrders),
 		deliveries:      db.Collection(collDeliveries),
 		catalog:         db.Collection(collCatalog),
+		storeZones:      db.Collection(collStoreZones),
+		waitlist:        db.Collection(collConsumerWaitlist),
 		orgUnits:        db.Collection("org_units"),
 		parties:         db.Collection("parties"),
 		roleAssignments: db.Collection("role_assignments"),
@@ -91,6 +95,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	}
 	if err := r.ensureCatalogIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer catalog indexes: %w", err)
+	}
+	if err := r.ensureGeoIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer geofence indexes: %w", err)
 	}
 	return nil
 }

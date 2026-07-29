@@ -70,6 +70,12 @@ func Register(r chi.Router, d *deps.Deps) {
 		// merges onto its shipped milk baseline (catalog.go).
 		cr.Get("/catalog", h.getCatalog)
 
+		// Geofence serviceability — consumer-app-gated (same X-Parag-App-Key).
+		// The app asks "can we deliver here, how fast?" before checkout, and lets
+		// an out-of-area shopper join the waitlist (upsert by phone). (geofence.go)
+		cr.Get("/serviceability", h.serviceability)
+		cr.Post("/waitlist", h.joinWaitlist)
+
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
 			pr.Use(svc.authenticate)
@@ -140,6 +146,11 @@ func Register(r chi.Router, d *deps.Deps) {
 				sm.Post("/stores/{storeId}/skus", h.addSku)
 				sm.Patch("/stores/{storeId}/skus/{skuId}", h.patchSku)
 				sm.Delete("/stores/{storeId}/skus/{skuId}", h.deleteSkuHandler)
+
+				// Serviceability zone (geofence.go): view / draw the store's serving
+				// area (instant + standard circles, include/exclude pincodes + polygons).
+				sm.Get("/stores/{storeId}/zone", h.getZone)
+				sm.Put("/stores/{storeId}/zone", h.putZone)
 			})
 
 			// Delivery rider (DELIVERY_RIDER): the last-mile task lifecycle.
