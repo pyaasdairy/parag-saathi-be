@@ -16,6 +16,11 @@ const (
 	collWalletTxns = "consumer_wallet_txns"
 	collConsents   = "consumer_consents"
 	collPayOrders  = "consumer_payment_orders"
+	// collCatalog holds the store-manager-owned consumer catalog OVERLAY:
+	// per-SKU price/stock/visibility overrides on the baseline milk products,
+	// plus store-added SKUs. A thin layer the consumer app reads (never a
+	// replacement for the baseline shipped in the app).
+	collCatalog = "consumer_catalog"
 )
 
 // ── Domain documents ────────────────────────────────────────────────────────

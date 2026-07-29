@@ -65,6 +65,11 @@ func Register(r chi.Router, d *deps.Deps) {
 		cr.Get("/traceability/{code}", h.traceByCode)
 		cr.Get("/traceability/{code}/label", h.traceLabel)
 
+		// Consumer catalog OVERLAY — consumer-app-gated (same X-Parag-App-Key as
+		// traceability). The store-manager-owned overrides + additions the app
+		// merges onto its shipped milk baseline (catalog.go).
+		cr.Get("/catalog", h.getCatalog)
+
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
 			pr.Use(svc.authenticate)
@@ -127,6 +132,14 @@ func Register(r chi.Router, d *deps.Deps) {
 				sm.Get("/stores/{storeId}/riders", h.storeRiders)
 				sm.Post("/stores/{storeId}/orders/{deliveryId}/assign", h.assignRider)
 				sm.Post("/stores/{storeId}/low-stock", h.lowStock)
+
+				// Consumer catalog overlay console (catalog.go): view the milk
+				// baseline + this store's overrides/additions, override a SKU's
+				// price/stock/visibility, and add or remove store SKUs.
+				sm.Get("/stores/{storeId}/skus", h.listSkus)
+				sm.Post("/stores/{storeId}/skus", h.addSku)
+				sm.Patch("/stores/{storeId}/skus/{skuId}", h.patchSku)
+				sm.Delete("/stores/{storeId}/skus/{skuId}", h.deleteSkuHandler)
 			})
 
 			// Delivery rider (DELIVERY_RIDER): the last-mile task lifecycle.
