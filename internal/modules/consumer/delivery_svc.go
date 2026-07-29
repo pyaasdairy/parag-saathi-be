@@ -43,7 +43,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	}
 	now := time.Now().UTC()
 	// Instant lane: the task carries a hard ETA anchored to the ORDER's
-	// placed-at (+90 min) — not task-creation time, so a backfilled task keeps
+	// placed-at (+20 min) — not task-creation time, so a backfilled task keeps
 	// the customer's original promise instead of restarting the clock.
 	eta := ""
 	if o.Lane == "instant" {
@@ -51,7 +51,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		if base.IsZero() {
 			base = now
 		}
-		eta = base.Add(90 * time.Minute).Format(time.RFC3339)
+		eta = base.Add(20 * time.Minute).Format(time.RFC3339)
 	}
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,

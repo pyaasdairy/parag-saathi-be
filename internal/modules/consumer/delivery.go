@@ -64,7 +64,7 @@ type delivery struct {
 	PaymentMode      string             `bson:"payment_mode"         json:"paymentMode"`
 	Perishable       bool               `bson:"perishable"           json:"perishable"`
 	Slot             string             `bson:"slot"                 json:"slot"`
-	// Lane mirrors the order's delivery lane: "instant" (≈90-min doorstep run,
+	// Lane mirrors the order's delivery lane: "instant" (≈20-min doorstep run,
 	// nearby-rider ranked) or "morning" (the 5-7:30 AM subscription run).
 	Lane             string             `bson:"lane,omitempty"       json:"lane,omitempty"`
 	// EtaAt is set for instant deliveries only: placed-at + 90 min (RFC3339).
