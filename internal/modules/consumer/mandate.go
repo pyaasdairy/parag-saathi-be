@@ -363,7 +363,11 @@ func (s *service) verifyMandate(ctx context.Context, consumerID primitive.Object
 	if !mandateCanTransition(m.Status, "active") {
 		return nil, errConflict("MANDATE_STATE", "mandate cannot be activated from its current state")
 	}
-	if !s.verifyRzpSignature(m.RegOrderID, paymentID, signature) {
+	// DEMO seam (no live secret + OTP dev mode): activation stands in for the real
+	// Razorpay recurring-checkout approval, so the whole subscribe→approve→charge
+	// flow is exercisable without moving real money — mirroring createRzpMandate's
+	// mock token. In production the secret is set and the signature is authoritative.
+	if !s.rzpDevMode() && !s.verifyRzpSignature(m.RegOrderID, paymentID, signature) {
 		return nil, errBadRequest("mandate signature verification failed")
 	}
 	next, _ := nextChargeAfter(m.Plan, time.Now().UTC())

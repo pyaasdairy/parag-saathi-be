@@ -117,23 +117,25 @@ type physicalDoc struct {
 // natively-added product) that a future DOLIBARR-SYNC adapter can key on — see
 // the DOLIBARR-SYNC seam note below.
 type catalogDoc struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty"`
-	StoreID   string             `bson:"store_id"`
-	SkuID     string             `bson:"sku_id"`
-	Kind      string             `bson:"kind"`
-	Price     *float64           `bson:"price,omitempty"`
-	InStock   *bool              `bson:"in_stock,omitempty"`
-	Hidden    *bool              `bson:"hidden,omitempty"`
-	Name      string             `bson:"name,omitempty"`
-	Category  string             `bson:"category,omitempty"`
-	Variant   string             `bson:"variant,omitempty"`
-	PhotoURL  string             `bson:"photo_url,omitempty"`
-	BaseID    string             `bson:"base_id,omitempty"`
-	Variants  []variantDoc       `bson:"variants,omitempty"`
-	Physical  *physicalDoc       `bson:"physical,omitempty"`
-	UpdatedBy string             `bson:"updated_by"`
-	UpdatedAt time.Time          `bson:"updated_at"`
-	CreatedAt time.Time          `bson:"created_at"`
+	ID           primitive.ObjectID `bson:"_id,omitempty"`
+	StoreID      string             `bson:"store_id"`
+	SkuID        string             `bson:"sku_id"`
+	Kind         string             `bson:"kind"`
+	Price        *float64           `bson:"price,omitempty"`
+	InStock      *bool              `bson:"in_stock,omitempty"`
+	Hidden       *bool              `bson:"hidden,omitempty"`
+	Name         string             `bson:"name,omitempty"`
+	Category     string             `bson:"category,omitempty"`
+	Variant      string             `bson:"variant,omitempty"`
+	Description  string             `bson:"description,omitempty"`
+	Subscribable *bool              `bson:"subscribable,omitempty"`
+	PhotoURL     string             `bson:"photo_url,omitempty"`
+	BaseID       string             `bson:"base_id,omitempty"`
+	Variants     []variantDoc       `bson:"variants,omitempty"`
+	Physical     *physicalDoc       `bson:"physical,omitempty"`
+	UpdatedBy    string             `bson:"updated_by"`
+	UpdatedAt    time.Time          `bson:"updated_at"`
+	CreatedAt    time.Time          `bson:"created_at"`
 }
 
 // DOLIBARR-SYNC seam (NOT integrated). Additions above are the exact shape a
@@ -161,16 +163,18 @@ type overrideView struct {
 // product carries its variants[] and physical{} envelope (both omitted when
 // empty, so a plain single-SKU addition still reads exactly as before).
 type additionView struct {
-	ID       string       `json:"id"`
-	BaseID   string       `json:"baseId,omitempty"`
-	Name     string       `json:"name"`
-	Category string       `json:"category"`
-	Variant  string       `json:"variant,omitempty"`
-	Price    float64      `json:"price"`
-	PhotoURL string       `json:"photo_url,omitempty"`
-	InStock  bool         `json:"in_stock"`
-	Variants []variantDoc `json:"variants,omitempty"`
-	Physical *physicalDoc `json:"physical,omitempty"`
+	ID           string       `json:"id"`
+	BaseID       string       `json:"baseId,omitempty"`
+	Name         string       `json:"name"`
+	Category     string       `json:"category"`
+	Variant      string       `json:"variant,omitempty"`
+	Description  string       `json:"description,omitempty"`
+	Subscribable bool         `json:"subscribable"`
+	Price        float64      `json:"price"`
+	PhotoURL     string       `json:"photo_url,omitempty"`
+	InStock      bool         `json:"in_stock"`
+	Variants     []variantDoc `json:"variants,omitempty"`
+	Physical     *physicalDoc `json:"physical,omitempty"`
 }
 
 // catalogResponse is the whole overlay: a map of baseline-SKU overrides keyed by
@@ -193,54 +197,70 @@ type storeOverrideView struct {
 }
 
 type storeAdditionView struct {
-	ID        string       `json:"id"`
-	BaseID    string       `json:"baseId,omitempty"`
-	Name      string       `json:"name"`
-	Category  string       `json:"category"`
-	Variant   string       `json:"variant,omitempty"`
-	Price     float64      `json:"price"`
-	PhotoURL  string       `json:"photo_url,omitempty"`
-	InStock   bool         `json:"in_stock"`
-	Hidden    bool         `json:"hidden,omitempty"`
-	Variants  []variantDoc `json:"variants,omitempty"`
-	Physical  *physicalDoc `json:"physical,omitempty"`
-	UpdatedBy string       `json:"updated_by,omitempty"`
-	UpdatedAt time.Time    `json:"updated_at"`
+	ID           string       `json:"id"`
+	BaseID       string       `json:"baseId,omitempty"`
+	Name         string       `json:"name"`
+	Category     string       `json:"category"`
+	Variant      string       `json:"variant,omitempty"`
+	Description  string       `json:"description,omitempty"`
+	Subscribable bool         `json:"subscribable"`
+	Price        float64      `json:"price"`
+	PhotoURL     string       `json:"photo_url,omitempty"`
+	InStock      bool         `json:"in_stock"`
+	Hidden       bool         `json:"hidden,omitempty"`
+	Variants     []variantDoc `json:"variants,omitempty"`
+	Physical     *physicalDoc `json:"physical,omitempty"`
+	UpdatedBy    string       `json:"updated_by,omitempty"`
+	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
 // additionViewFromDoc / storeAdditionViewFromDoc project an addition catalogDoc
 // onto its consumer / store-console read shape (shared by the list + write paths
 // so every response serialises baseId + variants[] + physical{} identically).
+// subscribableOrDairyDefault reports a stored addition's subscribable flag,
+// defaulting an unset flag to true for milk (so a hand-added milk SKU is
+// subscribable by default, matching the consumer's bundled behaviour).
+func subscribableOrDairyDefault(d catalogDoc) bool {
+	if d.Subscribable != nil {
+		return *d.Subscribable
+	}
+	return d.Category == "milk"
+}
+
 func additionViewFromDoc(d catalogDoc) additionView {
 	return additionView{
-		ID:       d.SkuID,
-		BaseID:   d.BaseID,
-		Name:     d.Name,
-		Category: d.Category,
-		Variant:  d.Variant,
-		Price:    valOrZero(d.Price),
-		PhotoURL: d.PhotoURL,
-		InStock:  d.InStock == nil || *d.InStock, // default in-stock
-		Variants: d.Variants,
-		Physical: d.Physical,
+		ID:           d.SkuID,
+		BaseID:       d.BaseID,
+		Name:         d.Name,
+		Category:     d.Category,
+		Variant:      d.Variant,
+		Description:  d.Description,
+		Subscribable: subscribableOrDairyDefault(d),
+		Price:        valOrZero(d.Price),
+		PhotoURL:     d.PhotoURL,
+		InStock:      d.InStock == nil || *d.InStock, // default in-stock
+		Variants:     d.Variants,
+		Physical:     d.Physical,
 	}
 }
 
 func storeAdditionViewFromDoc(d catalogDoc) storeAdditionView {
 	return storeAdditionView{
-		ID:        d.SkuID,
-		BaseID:    d.BaseID,
-		Name:      d.Name,
-		Category:  d.Category,
-		Variant:   d.Variant,
-		Price:     valOrZero(d.Price),
-		PhotoURL:  d.PhotoURL,
-		InStock:   d.InStock == nil || *d.InStock,
-		Hidden:    d.Hidden != nil && *d.Hidden,
-		Variants:  d.Variants,
-		Physical:  d.Physical,
-		UpdatedBy: d.UpdatedBy,
-		UpdatedAt: d.UpdatedAt,
+		ID:           d.SkuID,
+		BaseID:       d.BaseID,
+		Name:         d.Name,
+		Category:     d.Category,
+		Variant:      d.Variant,
+		Description:  d.Description,
+		Subscribable: subscribableOrDairyDefault(d),
+		Price:        valOrZero(d.Price),
+		PhotoURL:     d.PhotoURL,
+		InStock:      d.InStock == nil || *d.InStock,
+		Hidden:       d.Hidden != nil && *d.Hidden,
+		Variants:     d.Variants,
+		Physical:     d.Physical,
+		UpdatedBy:    d.UpdatedBy,
+		UpdatedAt:    d.UpdatedAt,
 	}
 }
 
@@ -259,18 +279,18 @@ type storeCatalogResponse struct {
 // the canonical field. Price is a pointer so "absent" is distinguishable from 0
 // (a variant PATCH must not zero a price the caller never sent).
 type variantInput struct {
-	VariantID    string            `json:"variant_id"`
-	VariantIDC   string            `json:"variantId"`
-	Label        string            `json:"label"`
-	Price        *float64          `json:"price"`
-	ImageURL     string            `json:"image_url"`
-	ImageURLC    string            `json:"imageUrl"`
-	OutOfStock   *bool             `json:"out_of_stock"`
-	OutOfStockC  *bool             `json:"outOfStock"`
-	VolumeMl     float64           `json:"volume_ml"`
-	VolumeMlC    float64           `json:"volumeMl"`
-	Unit         string            `json:"unit"`
-	Attributes   map[string]string `json:"attributes"`
+	VariantID   string            `json:"variant_id"`
+	VariantIDC  string            `json:"variantId"`
+	Label       string            `json:"label"`
+	Price       *float64          `json:"price"`
+	ImageURL    string            `json:"image_url"`
+	ImageURLC   string            `json:"imageUrl"`
+	OutOfStock  *bool             `json:"out_of_stock"`
+	OutOfStockC *bool             `json:"outOfStock"`
+	VolumeMl    float64           `json:"volume_ml"`
+	VolumeMlC   float64           `json:"volumeMl"`
+	Unit        string            `json:"unit"`
+	Attributes  map[string]string `json:"attributes"`
 }
 
 func (v *variantInput) normalize() {
@@ -322,19 +342,21 @@ func (p *physicalInput) toDoc() *physicalDoc {
 //   - ADD A VARIANT TO A BASE (base_id set): variants[] are appended to the
 //     existing addition whose id == base_id; the base's own fields are ignored.
 type addSkuRequest struct {
-	ID        string          `json:"id"`
-	BaseID    string          `json:"base_id"`
-	BaseIDC   string          `json:"baseId"`
-	Name      string          `json:"name"`
-	Category  string          `json:"category"`
-	Variant   string          `json:"variant"`
-	Price     float64         `json:"price"`
-	PhotoURL  string          `json:"photo_url"`
-	PhotoURLC string          `json:"photoUrl"`
-	InStock   *bool           `json:"in_stock"`
-	InStockC  *bool           `json:"inStock"`
-	Variants  []variantInput  `json:"variants"`
-	Physical  *physicalInput  `json:"physical"`
+	ID           string         `json:"id"`
+	BaseID       string         `json:"base_id"`
+	BaseIDC      string         `json:"baseId"`
+	Name         string         `json:"name"`
+	Category     string         `json:"category"`
+	Variant      string         `json:"variant"`
+	Description  string         `json:"description"`
+	Subscribable *bool          `json:"subscribable"`
+	Price        float64        `json:"price"`
+	PhotoURL     string         `json:"photo_url"`
+	PhotoURLC    string         `json:"photoUrl"`
+	InStock      *bool          `json:"in_stock"`
+	InStockC     *bool          `json:"inStock"`
+	Variants     []variantInput `json:"variants"`
+	Physical     *physicalInput `json:"physical"`
 }
 
 func (a *addSkuRequest) normalize() {
@@ -360,22 +382,35 @@ func (a *addSkuRequest) normalize() {
 // is present it patches the single variant it names (variantId); otherwise the
 // body patches the base / baseline override. snake+camel accepted throughout.
 type patchSkuRequest struct {
-	Price     *float64       `json:"price"`
-	InStock   *bool          `json:"in_stock"`
-	InStockC  *bool          `json:"inStock"`
-	Hidden    *bool          `json:"hidden"`
-	Name      *string        `json:"name"`
-	Category  *string        `json:"category"`
-	Variant   *string        `json:"variant"`
-	PhotoURL  *string        `json:"photo_url"`
-	PhotoURLC *string        `json:"photoUrl"`
-	Physical  *physicalInput `json:"physical"`
+	Price        *float64       `json:"price"`
+	InStock      *bool          `json:"in_stock"`
+	InStockC     *bool          `json:"inStock"`
+	OutOfStock   *bool          `json:"out_of_stock"` // Saathi console sends this; folded to in_stock
+	OutOfStockC  *bool          `json:"outOfStock"`
+	Hidden       *bool          `json:"hidden"`
+	Name         *string        `json:"name"`
+	Category     *string        `json:"category"`
+	Variant      *string        `json:"variant"`
+	Description  *string        `json:"description"`
+	Subscribable *bool          `json:"subscribable"`
+	PhotoURL     *string        `json:"photo_url"`
+	PhotoURLC    *string        `json:"photoUrl"`
+	Physical     *physicalInput `json:"physical"`
 
 	EditVariant  *variantInput `json:"edit_variant"`
 	EditVariantC *variantInput `json:"editVariant"`
 }
 
 func (p *patchSkuRequest) normalize() {
+	// out_of_stock (the console's field) is the inverse of the stored in_stock;
+	// fold it so a base OOS toggle actually persists. An explicit in_stock wins.
+	if p.OutOfStock == nil && p.OutOfStockC != nil {
+		p.OutOfStock = p.OutOfStockC
+	}
+	if p.InStock == nil && p.OutOfStock != nil {
+		v := !*p.OutOfStock
+		p.InStock = &v
+	}
 	if p.InStock == nil && p.InStockC != nil {
 		p.InStock = p.InStockC
 	}
@@ -796,21 +831,23 @@ func (s *service) addStoreSku(ctx context.Context, actor auth.Actor, storeID str
 		vdocs = append(vdocs, variantToDoc(v))
 	}
 	doc := &catalogDoc{
-		StoreID:   storeID,
-		SkuID:     id,
-		Kind:      catalogKindAddition,
-		Price:     &price,
-		InStock:   &inStock,
-		Name:      name,
-		Category:  strings.TrimSpace(req.Category),
-		Variant:   strings.TrimSpace(req.Variant),
-		PhotoURL:  strings.TrimSpace(req.PhotoURL),
-		BaseID:    strings.TrimSpace(req.BaseID),
-		Variants:  vdocs,
-		Physical:  req.Physical.toDoc(),
-		UpdatedBy: actor.PartyID,
-		UpdatedAt: now,
-		CreatedAt: now,
+		StoreID:      storeID,
+		SkuID:        id,
+		Kind:         catalogKindAddition,
+		Price:        &price,
+		InStock:      &inStock,
+		Name:         name,
+		Category:     strings.TrimSpace(req.Category),
+		Variant:      strings.TrimSpace(req.Variant),
+		Description:  strings.TrimSpace(req.Description),
+		Subscribable: req.Subscribable,
+		PhotoURL:     strings.TrimSpace(req.PhotoURL),
+		BaseID:       strings.TrimSpace(req.BaseID),
+		Variants:     vdocs,
+		Physical:     req.Physical.toDoc(),
+		UpdatedBy:    actor.PartyID,
+		UpdatedAt:    now,
+		CreatedAt:    now,
 	}
 	if err := s.repo.insertAddition(ctx, doc); err != nil {
 		return nil, err
@@ -906,6 +943,14 @@ func (s *service) patchStoreSku(ctx context.Context, actor auth.Actor, storeID, 
 	}
 	if req.Variant != nil {
 		set = append(set, bson.E{Key: "variant", Value: strings.TrimSpace(*req.Variant)})
+		additionOnly = true
+	}
+	if req.Description != nil {
+		set = append(set, bson.E{Key: "description", Value: strings.TrimSpace(*req.Description)})
+		additionOnly = true
+	}
+	if req.Subscribable != nil {
+		set = append(set, bson.E{Key: "subscribable", Value: *req.Subscribable})
 		additionOnly = true
 	}
 	if req.PhotoURL != nil {
