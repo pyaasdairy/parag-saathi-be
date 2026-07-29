@@ -250,7 +250,7 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 		pm = "cod"
 	}
 	// Delivery lane: "morning" (5–7:30 subscription run) is the DEFAULT — the
-	// instant ≈90-min lane is an explicit, validated opt-in (an unknown value
+	// instant ≈20-min lane is an explicit, validated opt-in (an unknown value
 	// must never accidentally mint an instant ETA).
 	lane := in.Lane
 	if lane != "instant" {
