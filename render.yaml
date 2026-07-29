@@ -30,8 +30,11 @@ services:
       # ── Consumer app backend ──
       # QR/traceability gate — set the SAME value in the consumer app's
       # EXPO_PUBLIC_CONSUMER_APP_KEY so only the PARAG app can resolve pack QRs.
+      # Must equal the consumer app's EXPO_PUBLIC_CONSUMER_APP_KEY (ships in the
+      # bundle — a soft anti-scrape token, not a secret), so catalog / serviceability
+      # / traceability reads from the PYAAS app are allowed instead of 403 FORBIDDEN.
       - key: CONSUMER_APP_KEY
-        sync: false
+        value: "parag_consumer_dev_key_v1"
       # Razorpay wallet top-ups — OPTIONAL. While OTP_DEV_MODE=true the offline
       # dev seam handles top-ups for testing; set these for real payments later.
       - key: RAZORPAY_KEY_ID
