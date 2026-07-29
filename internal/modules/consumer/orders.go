@@ -245,9 +245,13 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	subtotal = round2(subtotal)
 	fee := deliveryFeeFor(subtotal)
 	total := round2(subtotal + fee)
+	// Payment mode defaults to 'wallet' — the order is settled from the server
+	// wallet on delivery (the settle sweep debits /wallet/debit, idempotent by
+	// order id). A client may pass another mode (e.g. 'cod', or 'gateway' once the
+	// /orders/{id}/pay direct-pay seam is wired to verify).
 	pm := in.PaymentMethod
 	if pm == "" {
-		pm = "cod"
+		pm = "wallet"
 	}
 	// Delivery lane: "morning" (5–7:30 subscription run) is the DEFAULT — the
 	// instant ≈20-min lane is an explicit, validated opt-in (an unknown value
@@ -434,6 +438,23 @@ func (h *handler) reviewOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, o)
+}
+
+// payOrder — POST /orders/{id}/pay: create an amount-bound Razorpay order for
+// the order total so the FE can pay it directly via the gateway (seam). The
+// amount is the server-side order total; dev-gated in the service.
+func (h *handler) payOrder(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	view, err := h.svc.createOrderPayment(r.Context(), id, chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (h *handler) advanceOrder(w http.ResponseWriter, r *http.Request) {

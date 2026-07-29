@@ -65,6 +65,17 @@ func Register(r chi.Router, d *deps.Deps) {
 		cr.Get("/traceability/{code}", h.traceByCode)
 		cr.Get("/traceability/{code}/label", h.traceLabel)
 
+		// Consumer catalog OVERLAY — consumer-app-gated (same X-Parag-App-Key as
+		// traceability). The store-manager-owned overrides + additions the app
+		// merges onto its shipped milk baseline (catalog.go).
+		cr.Get("/catalog", h.getCatalog)
+
+		// Geofence serviceability — consumer-app-gated (same X-Parag-App-Key).
+		// The app asks "can we deliver here, how fast?" before checkout, and lets
+		// an out-of-area shopper join the waitlist (upsert by phone). (geofence.go)
+		cr.Get("/serviceability", h.serviceability)
+		cr.Post("/waitlist", h.joinWaitlist)
+
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
 			pr.Use(svc.authenticate)
@@ -95,6 +106,25 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/wallet/debit", h.walletDebit)
 			pr.Post("/wallet/refund", h.walletRefund)
 
+			// UPI-AutoPay / e-mandate — subscription auto-renewal (mandate.go).
+			// Create a recurring authorization (mock token in the dev seam), verify
+			// its registration payment, and drive the pause/resume/cancel state
+			// machine. Daily EXECUTIONS charge via the SAME exactly-once wallet
+			// settle path, idempotent by (mandateId, day). GET /me lists the
+			// caller's mandates.
+			pr.Post("/mandate/create", h.createMandate)
+			pr.Post("/mandate/verify", h.verifyMandate)
+			pr.Get("/mandate/me", h.listMandates)
+			pr.Post("/mandate/{id}/pause", h.mandateAction("pause"))
+			pr.Post("/mandate/{id}/resume", h.mandateAction("resume"))
+			pr.Post("/mandate/{id}/cancel", h.mandateAction("cancel"))
+			pr.Post("/mandate/{id}/execute", h.executeMandate) // dev-only manual tick
+
+			// Subscription welcome trial ("3 PAID then 3 FREE"): the caller's trial
+			// standing (phase + paid/free days remaining). The window is spent on
+			// DELIVERED days by the delivery settle path (trial.go), never here.
+			pr.Get("/trial/me", h.trialMe)
+
 			// Addresses.
 			pr.Get("/addresses", h.listAddresses)
 			pr.Post("/addresses", h.createAddress)
@@ -110,6 +140,11 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/orders/{id}/cancel", h.cancelOrder)
 			pr.Post("/orders/{id}/review", h.reviewOrder)
 			pr.Post("/orders/{id}/advance", h.advanceOrder) // dev-only status transition
+			// Pay an order directly via the gateway (seam): create an amount-bound
+			// Razorpay order for the order total. Default payment mode is 'wallet'
+			// (settled on delivery); this lets the FE offer a direct-pay path later.
+			// Dev-gated until the order-pay verify/capture flow lands.
+			pr.Post("/orders/{id}/pay", h.payOrder)
 		})
 
 		// ── Operator surfaces (SAATHI operator token + role) ──
@@ -127,6 +162,19 @@ func Register(r chi.Router, d *deps.Deps) {
 				sm.Get("/stores/{storeId}/riders", h.storeRiders)
 				sm.Post("/stores/{storeId}/orders/{deliveryId}/assign", h.assignRider)
 				sm.Post("/stores/{storeId}/low-stock", h.lowStock)
+
+				// Consumer catalog overlay console (catalog.go): view the milk
+				// baseline + this store's overrides/additions, override a SKU's
+				// price/stock/visibility, and add or remove store SKUs.
+				sm.Get("/stores/{storeId}/skus", h.listSkus)
+				sm.Post("/stores/{storeId}/skus", h.addSku)
+				sm.Patch("/stores/{storeId}/skus/{skuId}", h.patchSku)
+				sm.Delete("/stores/{storeId}/skus/{skuId}", h.deleteSkuHandler)
+
+				// Serviceability zone (geofence.go): view / draw the store's serving
+				// area (instant + standard circles, include/exclude pincodes + polygons).
+				sm.Get("/stores/{storeId}/zone", h.getZone)
+				sm.Put("/stores/{storeId}/zone", h.putZone)
 			})
 
 			// Delivery rider (DELIVERY_RIDER): the last-mile task lifecycle.

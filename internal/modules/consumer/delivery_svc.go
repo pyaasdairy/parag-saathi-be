@@ -328,8 +328,25 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 		if cerr != nil {
 			return nil, errInternal("bad consumer id on delivery")
 		}
-		if _, e := s.debit(ctx, cid, d.Amount, "delivery:"+d.OrderID, "Delivery "+d.OrderCode); e != nil {
-			return nil, e // INSUFFICIENT_FUNDS etc. surface to the rider app
+		amount := d.Amount
+		// Subscription deliveries (the morning run) flow through the "3 PAID then
+		// 3 FREE" welcome trial: the first 3 delivered days pay full, the next 3
+		// are on us (effective 0), then normal. The trial counts DELIVERED days and
+		// is idempotent by this delivered-day key, so a settle re-run never
+		// double-advances the window — independent of the wallet's per-order gate.
+		if d.Lane == "morning" {
+			day := time.Now().UTC().Format("2006-01-02")
+			eff, _, terr := s.trialChargeFor(ctx, cid, trialDeliveryKey(cid, day), d.Amount)
+			if terr != nil {
+				return nil, terr
+			}
+			amount = eff
+		}
+		// A free trial day settles to 0 — no wallet movement (debit rejects ≤0).
+		if amount > 0 {
+			if _, e := s.debit(ctx, cid, amount, "delivery:"+d.OrderID, "Delivery "+d.OrderCode); e != nil {
+				return nil, e // INSUFFICIENT_FUNDS etc. surface to the rider app
+			}
 		}
 	}
 	evt := in.EventID
