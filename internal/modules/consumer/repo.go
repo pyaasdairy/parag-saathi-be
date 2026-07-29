@@ -21,6 +21,7 @@ type repository struct {
 	walletTxns *mongo.Collection
 	consents   *mongo.Collection
 	payOrders  *mongo.Collection
+	mandates   *mongo.Collection
 	orders     *mongo.Collection
 	deliveries *mongo.Collection
 	catalog    *mongo.Collection
@@ -44,6 +45,7 @@ func newRepository(db *mongo.Database) *repository {
 		walletTxns:      db.Collection(collWalletTxns),
 		consents:        db.Collection(collConsents),
 		payOrders:       db.Collection(collPayOrders),
+		mandates:        db.Collection(collMandates),
 		orders:          db.Collection(collOrders),
 		deliveries:      db.Collection(collDeliveries),
 		catalog:         db.Collection(collCatalog),
@@ -98,6 +100,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	}
 	if err := r.ensureGeoIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer geofence indexes: %w", err)
+	}
+	if err := r.ensureMandateIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer mandate indexes: %w", err)
 	}
 	return nil
 }

@@ -106,6 +106,20 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/wallet/debit", h.walletDebit)
 			pr.Post("/wallet/refund", h.walletRefund)
 
+			// UPI-AutoPay / e-mandate — subscription auto-renewal (mandate.go).
+			// Create a recurring authorization (mock token in the dev seam), verify
+			// its registration payment, and drive the pause/resume/cancel state
+			// machine. Daily EXECUTIONS charge via the SAME exactly-once wallet
+			// settle path, idempotent by (mandateId, day). GET /me lists the
+			// caller's mandates.
+			pr.Post("/mandate/create", h.createMandate)
+			pr.Post("/mandate/verify", h.verifyMandate)
+			pr.Get("/mandate/me", h.listMandates)
+			pr.Post("/mandate/{id}/pause", h.mandateAction("pause"))
+			pr.Post("/mandate/{id}/resume", h.mandateAction("resume"))
+			pr.Post("/mandate/{id}/cancel", h.mandateAction("cancel"))
+			pr.Post("/mandate/{id}/execute", h.executeMandate) // dev-only manual tick
+
 			// Addresses.
 			pr.Get("/addresses", h.listAddresses)
 			pr.Post("/addresses", h.createAddress)
@@ -121,6 +135,11 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/orders/{id}/cancel", h.cancelOrder)
 			pr.Post("/orders/{id}/review", h.reviewOrder)
 			pr.Post("/orders/{id}/advance", h.advanceOrder) // dev-only status transition
+			// Pay an order directly via the gateway (seam): create an amount-bound
+			// Razorpay order for the order total. Default payment mode is 'wallet'
+			// (settled on delivery); this lets the FE offer a direct-pay path later.
+			// Dev-gated until the order-pay verify/capture flow lands.
+			pr.Post("/orders/{id}/pay", h.payOrder)
 		})
 
 		// ── Operator surfaces (SAATHI operator token + role) ──

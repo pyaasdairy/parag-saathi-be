@@ -439,11 +439,45 @@ func (s *service) createTopupOrder(ctx context.Context, consumerID primitive.Obj
 	}
 	if err := s.repo.insertPaymentOrder(ctx, &paymentOrder{
 		ID: primitive.NewObjectID(), OrderID: orderID, ConsumerID: consumerID,
-		AmountPaise: amountPaise, Receipt: receipt, Status: "CREATED", CreatedAt: time.Now().UTC(),
+		AmountPaise: amountPaise, Receipt: receipt, Purpose: "topup", Status: "CREATED", CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		return topupOrderView{}, err
 	}
 	return topupOrderView{OrderID: orderID, KeyID: s.rzpKeyID}, nil
+}
+
+// createOrderPayment mints an amount-bound Razorpay order for an EXISTING
+// consumer order's total (POST /orders/{id}/pay) — the seam for paying an order
+// directly via the gateway instead of the wallet. The order total is read
+// SERVER-SIDE (never a client amount), and the payment order is tagged
+// purpose="order" so the wallet/verify credit path refuses it (an order payment
+// must never top up the wallet). DEV-gated until the order-pay verify/capture
+// flow lands.
+func (s *service) createOrderPayment(ctx context.Context, consumerID primitive.ObjectID, orderID string) (topupOrderView, error) {
+	if !s.deps.Cfg.OTPDevMode {
+		return topupOrderView{}, errForbidden("not available")
+	}
+	ord, err := s.repo.findOrder(ctx, orderID, consumerID.Hex())
+	if err != nil {
+		return topupOrderView{}, err
+	}
+	amountPaise := int64(round2(ord.Total) * 100)
+	if amountPaise < 100 {
+		return topupOrderView{}, errBadRequest("order total is too low to pay via the gateway")
+	}
+	receipt := "ord_" + ord.OrderID
+	rzpOrderID, err := s.createRzpOrder(ctx, amountPaise, receipt)
+	if err != nil {
+		return topupOrderView{}, err
+	}
+	if err := s.repo.insertPaymentOrder(ctx, &paymentOrder{
+		ID: primitive.NewObjectID(), OrderID: rzpOrderID, ConsumerID: consumerID,
+		AmountPaise: amountPaise, Receipt: receipt, Purpose: "order", RefID: ord.OrderID,
+		Status: "CREATED", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		return topupOrderView{}, err
+	}
+	return topupOrderView{OrderID: rzpOrderID, KeyID: s.rzpKeyID, AmountPaise: amountPaise}, nil
 }
 
 // verifyPayment authoritatively verifies a completed Razorpay payment and
@@ -464,6 +498,12 @@ func (s *service) verifyPayment(ctx context.Context, consumerID primitive.Object
 	ord, err := s.repo.findPaymentOrder(ctx, orderID, consumerID)
 	if err != nil {
 		return verifyView{Verified: false}, nil // unknown/foreign order — not verifiable
+	}
+	// wallet/verify credits the WALLET — it must only ever act on a top-up order.
+	// An order-pay order (purpose="order") is not a wallet credit and is refused
+	// here so it can never mint wallet money. Empty purpose = legacy top-up.
+	if ord.Purpose != "" && ord.Purpose != "topup" {
+		return verifyView{Verified: false}, nil
 	}
 	amount := round2(float64(ord.AmountPaise) / 100)
 

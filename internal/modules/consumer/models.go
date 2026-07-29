@@ -126,10 +126,15 @@ type paymentOrder struct {
 	ConsumerID  primitive.ObjectID `bson:"consumer_id"` // owner
 	AmountPaise int64              `bson:"amount_paise"`
 	Receipt     string             `bson:"receipt,omitempty"`
-	Status      string             `bson:"status"` // CREATED | PAID
-	PaymentID   string             `bson:"payment_id,omitempty"`
-	CreatedAt   time.Time          `bson:"created_at"`
-	PaidAt      *time.Time         `bson:"paid_at,omitempty"`
+	// Purpose separates wallet top-ups from direct order payments so the
+	// wallet/verify credit path can NEVER be tricked into crediting the wallet for
+	// an order-pay order. Empty is treated as "topup" (backward compat).
+	Purpose   string     `bson:"purpose,omitempty"` // topup | order
+	RefID     string     `bson:"ref_id,omitempty"`  // linked consumer order id when purpose=order
+	Status    string     `bson:"status"`            // CREATED | PAID
+	PaymentID string     `bson:"payment_id,omitempty"`
+	CreatedAt time.Time  `bson:"created_at"`
+	PaidAt    *time.Time `bson:"paid_at,omitempty"`
 }
 
 // ── Wire response shapes the FE reads (raw, not enveloped) ──────────────────
@@ -142,10 +147,11 @@ type tokenPair struct {
 }
 
 // topupOrderView is POST /wallet/order — the amount-bound order the FE hands to
-// Razorpay checkout.
+// Razorpay checkout. Reused by POST /orders/{id}/pay (with amountPaise set).
 type topupOrderView struct {
-	OrderID string `json:"orderId"`
-	KeyID   string `json:"keyId"`
+	OrderID     string `json:"orderId"`
+	KeyID       string `json:"keyId"`
+	AmountPaise int64  `json:"amountPaise,omitempty"`
 }
 
 // verifyView is POST /wallet/verify — authoritative credit result.
