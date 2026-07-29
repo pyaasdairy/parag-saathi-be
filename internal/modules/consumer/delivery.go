@@ -67,7 +67,7 @@ type delivery struct {
 	// Lane mirrors the order's delivery lane: "instant" (≈20-min doorstep run,
 	// nearby-rider ranked) or "morning" (the 5-7:30 AM subscription run).
 	Lane             string             `bson:"lane,omitempty"       json:"lane,omitempty"`
-	// EtaAt is set for instant deliveries only: placed-at + 90 min (RFC3339).
+	// EtaAt is set for instant deliveries only: placed-at + 20 min (RFC3339).
 	EtaAt            string             `bson:"eta_at,omitempty"     json:"etaAt,omitempty"`
 	DistanceKm       float64            `bson:"distance_km"          json:"distanceKm"`
 	Status           string             `bson:"status"               json:"status"`
