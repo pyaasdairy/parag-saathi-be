@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -223,7 +224,7 @@ func evalZone(z zone, pt geoPt, pincode string) (int, float64) {
 
 type serviceabilityResult struct {
 	Serviceable bool    `json:"serviceable"`
-	Mode        string  `json:"mode"`  // "instant" | "standard" | "none"
+	Mode        string  `json:"mode"` // "instant" | "standard" | "none"
 	Instant     bool    `json:"instant"`
 	StoreID     string  `json:"storeId,omitempty"`
 	DistanceM   float64 `json:"distanceM,omitempty"`
@@ -352,14 +353,21 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 	}
 	pincode = strings.TrimSpace(pincode)
 
+	// TESTING SHORTCUT: with INSTANT_TEST_OPEN=true, instant is offered wherever
+	// the point is serviceable, so the ⚡ Instant tab can be exercised before a
+	// store manager has drawn an instant zone. OFF by default → production still
+	// gates instant strictly on the store's instant radius.
+	instantTestOpen := strings.EqualFold(os.Getenv("INSTANT_TEST_OPEN"), "true")
+
 	zones, err := s.repo.listActiveZones(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if len(zones) == 0 {
-		// No zone drawn yet — the pilot must not go dark. Open, standard service.
+		// No zone drawn yet — the pilot must not go dark. Open, standard service
+		// (instant only when the testing override is on).
 		return &serviceabilityResult{
-			Serviceable: true, Mode: modeString(svcStandard), Instant: false,
+			Serviceable: true, Mode: modeString(svcStandard), Instant: instantTestOpen,
 			DefaultOpen: true, Pincode: pincode,
 		}, nil
 	}
@@ -378,7 +386,7 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 	res := &serviceabilityResult{
 		Serviceable: best > svcNone,
 		Mode:        modeString(best),
-		Instant:     best == svcInstant,
+		Instant:     best == svcInstant || (instantTestOpen && best > svcNone),
 		Pincode:     pincode,
 	}
 	if best > svcNone {
@@ -631,23 +639,23 @@ func zoneView(z *zone, storeID string) map[string]any {
 	if z == nil {
 		return map[string]any{
 			"storeId": storeID, "active": false, "configured": false,
-			"center":             nil,
-			"standardRadiusM":    8000.0, "instantRadiusM": 2500.0,
+			"center":          nil,
+			"standardRadiusM": 8000.0, "instantRadiusM": 2500.0,
 			"standard_radius_km": 8.0, "instant_radius_km": 2.5,
-			"includePincodes":    []string{}, "excludePincodes": []string{},
-			"include_pincodes":   []string{}, "exclude_pincodes": []string{},
+			"includePincodes": []string{}, "excludePincodes": []string{},
+			"include_pincodes": []string{}, "exclude_pincodes": []string{},
 		}
 	}
 	c := z.centerPt()
 	return map[string]any{
 		"storeId": z.StoreID, "active": z.Active, "configured": true,
-		"center":             map[string]float64{"lat": c.Lat, "lng": c.Lng},
-		"standardRadiusM":    z.StandardRadiusM, "instantRadiusM": z.InstantRadiusM,
+		"center":          map[string]float64{"lat": c.Lat, "lng": c.Lng},
+		"standardRadiusM": z.StandardRadiusM, "instantRadiusM": z.InstantRadiusM,
 		"standard_radius_km": z.StandardRadiusM / 1000, "instant_radius_km": z.InstantRadiusM / 1000,
-		"includePincodes":    z.IncludePincodes, "excludePincodes": z.ExcludePincodes,
-		"include_pincodes":   z.IncludePincodes, "exclude_pincodes": z.ExcludePincodes,
-		"includePolygons":    z.IncludePolygons, "excludePolygons": z.ExcludePolygons,
-		"updatedAt":          z.UpdatedAt,
+		"includePincodes": z.IncludePincodes, "excludePincodes": z.ExcludePincodes,
+		"include_pincodes": z.IncludePincodes, "exclude_pincodes": z.ExcludePincodes,
+		"includePolygons": z.IncludePolygons, "excludePolygons": z.ExcludePolygons,
+		"updatedAt": z.UpdatedAt,
 	}
 }
 
