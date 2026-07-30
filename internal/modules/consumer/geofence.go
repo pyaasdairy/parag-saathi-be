@@ -166,6 +166,15 @@ type zone struct {
 	Center          geoJSONPoint       `bson:"center"                  json:"center"`
 	InstantRadiusM  float64            `bson:"instant_radius_m"        json:"instantRadiusM"`
 	StandardRadiusM float64            `bson:"standard_radius_m"       json:"standardRadiusM"`
+	// Monsoon surcharge (store-manager set) charged on INSTANT orders only.
+	MonsoonEnabled  bool               `bson:"monsoon_enabled"         json:"monsoonEnabled"`
+	MonsoonRupees   int                `bson:"monsoon_rupees"          json:"monsoonRupees"`
+	// Instant delivery hours (minutes since IST midnight) + a manual "closed now"
+	// switch. When instant is shut the consumer offers only the morning lane.
+	// InstantCloseMin==0 → no hours gating (legacy zones stay 24h instant).
+	InstantOpenMin  int                `bson:"instant_open_min"        json:"instantOpenMin"`
+	InstantCloseMin int                `bson:"instant_close_min"       json:"instantCloseMin"`
+	InstantPaused   bool               `bson:"instant_paused"          json:"instantPaused"`
 	IncludePincodes []string           `bson:"include_pincodes,omitempty" json:"includePincodes,omitempty"`
 	ExcludePincodes []string           `bson:"exclude_pincodes,omitempty" json:"excludePincodes,omitempty"`
 	// Polygon rings ([]geoPt, lat/lng). Include = an allowed area beyond the
@@ -230,6 +239,14 @@ type serviceabilityResult struct {
 	DistanceM   float64 `json:"distanceM,omitempty"`
 	Pincode     string  `json:"pincode,omitempty"`
 	DefaultOpen bool    `json:"defaultOpen,omitempty"` // true → no zone configured, open by default
+	// Monsoon surcharge (₹) the store charges on INSTANT orders; 0/absent = none.
+	MonsoonEnabled bool `json:"monsoonEnabled,omitempty"`
+	MonsoonRupees  int  `json:"monsoonRupees,omitempty"`
+	// Instant closed (store shut for the night / manually paused): the consumer
+	// hides instant and shows when it resumes (label + RFC3339, both IST-computed).
+	InstantClosed       bool   `json:"instantClosed,omitempty"`
+	InstantResumesLabel string `json:"instantResumesLabel,omitempty"`
+	InstantResumesAt    string `json:"instantResumesAt,omitempty"`
 }
 
 // ── Repository ──────────────────────────────────────────────────────────────
@@ -277,6 +294,11 @@ func (r *repository) upsertZone(ctx context.Context, z *zone) (*zone, error) {
 		{Key: "center", Value: z.Center},
 		{Key: "instant_radius_m", Value: z.InstantRadiusM},
 		{Key: "standard_radius_m", Value: z.StandardRadiusM},
+		{Key: "monsoon_enabled", Value: z.MonsoonEnabled},
+		{Key: "monsoon_rupees", Value: z.MonsoonRupees},
+		{Key: "instant_open_min", Value: z.InstantOpenMin},
+		{Key: "instant_close_min", Value: z.InstantCloseMin},
+		{Key: "instant_paused", Value: z.InstantPaused},
 		{Key: "include_pincodes", Value: z.IncludePincodes},
 		{Key: "exclude_pincodes", Value: z.ExcludePincodes},
 		{Key: "include_polygons", Value: z.IncludePolygons},
@@ -345,6 +367,57 @@ func (r *repository) upsertWaitlist(ctx context.Context, w waitlistEntry) error 
 
 // ── Service ─────────────────────────────────────────────────────────────────
 
+// effOpenMin/effCloseMin give a zone's INSTANT hours, defaulting a never-configured
+// zone (close==0) to 07:00–22:00 IST so the store console shows sensible times.
+func effOpenMin(z *zone) int {
+	if z.InstantCloseMin == 0 {
+		return 420
+	}
+	return z.InstantOpenMin
+}
+
+func effCloseMin(z *zone) int {
+	if z.InstantCloseMin == 0 {
+		return 1320
+	}
+	return z.InstantCloseMin
+}
+
+// instantWindow decides whether a store's INSTANT lane is open right now (IST) and,
+// when shut, a human "resumes …" label + the RFC3339 resume moment. A zone that
+// never set hours (InstantCloseMin==0) is 24h instant unless manually paused (then
+// it resumes at the 07:00 IST default).
+func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt string) {
+	nowIST := now.In(istZone)
+	cur := nowIST.Hour()*60 + nowIST.Minute()
+	openMin, closeMin := z.InstantOpenMin, z.InstantCloseMin
+	withinHours := true
+	if closeMin > 0 {
+		if openMin < closeMin {
+			withinHours = cur >= openMin && cur < closeMin
+		} else { // overnight window (opens in the evening, closes after midnight)
+			withinHours = cur >= openMin || cur < closeMin
+		}
+	} else {
+		openMin = 420 // no hours set → default resume 07:00 IST when manually paused
+	}
+	if withinHours && !z.InstantPaused {
+		return true, "", ""
+	}
+	// Next opening moment in IST (today if we are before today's open, else tomorrow).
+	oh, om := openMin/60, openMin%60
+	todayOpen := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), oh, om, 0, 0, istZone)
+	next := todayOpen
+	if !nowIST.Before(todayOpen) {
+		next = todayOpen.Add(24 * time.Hour)
+	}
+	day := "today"
+	if next.YearDay() != nowIST.YearDay() || next.Year() != nowIST.Year() {
+		day = "tomorrow"
+	}
+	return false, day + " at " + next.Format("3:04 PM"), next.UTC().Format(time.RFC3339)
+}
+
 // serviceability answers "can we deliver here, and how fast?" for a coordinate
 // (+ optional pincode). Defaults OPEN when no active zone is configured.
 func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode string) (*serviceabilityResult, error) {
@@ -376,10 +449,11 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 	best := svcNone
 	var bestStore string
 	var bestDist float64
+	var bestZone zone
 	for _, z := range zones {
 		lvl, dist := evalZone(z, pt, pincode)
 		if lvl > best {
-			best, bestStore, bestDist = lvl, z.StoreID, dist
+			best, bestStore, bestDist, bestZone = lvl, z.StoreID, dist, z
 		}
 	}
 
@@ -392,6 +466,22 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 	if best > svcNone {
 		res.StoreID = bestStore
 		res.DistanceM = math.Round(bestDist)
+		// Surface the winning store's monsoon surcharge so the consumer can show +
+		// charge it (the FE and createOrder both gate it to the INSTANT lane).
+		if bestZone.MonsoonEnabled && bestZone.MonsoonRupees > 0 {
+			res.MonsoonEnabled = true
+			res.MonsoonRupees = bestZone.MonsoonRupees
+		}
+		// Instant hours / manual close (IST): if this store would offer instant but
+		// it is shut right now, drop instant and tell the consumer when it resumes.
+		if res.Instant {
+			if openNow, label, at := instantWindow(bestZone, time.Now()); !openNow {
+				res.Instant = false
+				res.InstantClosed = true
+				res.InstantResumesLabel = label
+				res.InstantResumesAt = at
+			}
+		}
 	}
 	return res, nil
 }
@@ -431,6 +521,18 @@ type zoneInput struct {
 	ExcludePincodesS []string  `json:"exclude_pincodes"`
 	IncludePolygons  [][]geoPt `json:"includePolygons"`
 	ExcludePolygons  [][]geoPt `json:"excludePolygons"`
+	// Monsoon surcharge (₹, INSTANT orders only). Accept camel + snake (Saathi console).
+	MonsoonEnabled  bool `json:"monsoonEnabled"`
+	MonsoonRupees   int  `json:"monsoonRupees"`
+	MonsoonEnabledS bool `json:"monsoon_enabled"`
+	MonsoonRupeesS  int  `json:"monsoon_rupees"`
+	// Instant hours (minutes since IST midnight) + manual pause. camel + snake.
+	InstantOpenMin   *int  `json:"instantOpenMin"`
+	InstantCloseMin  *int  `json:"instantCloseMin"`
+	InstantPaused    *bool `json:"instantPaused"`
+	InstantOpenMinS  *int  `json:"instant_open_min"`
+	InstantCloseMinS *int  `json:"instant_close_min"`
+	InstantPausedS   *bool `json:"instant_paused"`
 }
 
 // normalize folds the km + snake aliases onto the canonical metres/camel fields.
@@ -446,6 +548,21 @@ func (in *zoneInput) normalize() {
 	}
 	if len(in.ExcludePincodes) == 0 && len(in.ExcludePincodesS) > 0 {
 		in.ExcludePincodes = in.ExcludePincodesS
+	}
+	if !in.MonsoonEnabled && in.MonsoonEnabledS {
+		in.MonsoonEnabled = in.MonsoonEnabledS
+	}
+	if in.MonsoonRupees == 0 && in.MonsoonRupeesS > 0 {
+		in.MonsoonRupees = in.MonsoonRupeesS
+	}
+	if in.InstantOpenMin == nil {
+		in.InstantOpenMin = in.InstantOpenMinS
+	}
+	if in.InstantCloseMin == nil {
+		in.InstantCloseMin = in.InstantCloseMinS
+	}
+	if in.InstantPaused == nil {
+		in.InstantPaused = in.InstantPausedS
 	}
 }
 
@@ -516,6 +633,24 @@ func (s *service) upsertZone(ctx context.Context, actor auth.Actor, storeID stri
 	if err := validateRings(in.IncludePolygons, "include"); err != nil {
 		return nil, err
 	}
+	if in.MonsoonRupees < 0 || in.MonsoonRupees > 500 {
+		return nil, errUnprocessable("INVALID_MONSOON", "monsoon surcharge must be between 0 and 500 rupees")
+	}
+	// Instant hours default to 07:00–22:00 IST; a manual pause shuts instant now.
+	openMin, closeMin := 420, 1320
+	if in.InstantOpenMin != nil {
+		openMin = *in.InstantOpenMin
+	}
+	if in.InstantCloseMin != nil {
+		closeMin = *in.InstantCloseMin
+	}
+	paused := false
+	if in.InstantPaused != nil {
+		paused = *in.InstantPaused
+	}
+	if openMin < 0 || openMin >= 1440 || closeMin < 0 || closeMin > 1440 {
+		return nil, errUnprocessable("INVALID_HOURS", "instant hours must be within a day (0..1440 minutes)")
+	}
 
 	active := true
 	if in.Active != nil {
@@ -531,6 +666,11 @@ func (s *service) upsertZone(ctx context.Context, actor auth.Actor, storeID stri
 		ExcludePincodes: cleanPincodes(in.ExcludePincodes),
 		IncludePolygons: in.IncludePolygons,
 		ExcludePolygons: in.ExcludePolygons,
+		MonsoonEnabled:  in.MonsoonEnabled,
+		MonsoonRupees:   in.MonsoonRupees,
+		InstantOpenMin:  openMin,
+		InstantCloseMin: closeMin,
+		InstantPaused:   paused,
 		UpdatedBy:       actor.PartyID,
 	}
 	return s.repo.upsertZone(ctx, z)
@@ -644,6 +784,10 @@ func zoneView(z *zone, storeID string) map[string]any {
 			"standard_radius_km": 8.0, "instant_radius_km": 2.5,
 			"includePincodes": []string{}, "excludePincodes": []string{},
 			"include_pincodes": []string{}, "exclude_pincodes": []string{},
+			"monsoonEnabled": false, "monsoonRupees": 15,
+			"monsoon_enabled": false, "monsoon_rupees": 15,
+			"instantOpenMin": 420, "instantCloseMin": 1320, "instantPaused": false,
+			"instant_open_min": 420, "instant_close_min": 1320, "instant_paused": false,
 		}
 	}
 	c := z.centerPt()
@@ -655,6 +799,10 @@ func zoneView(z *zone, storeID string) map[string]any {
 		"includePincodes": z.IncludePincodes, "excludePincodes": z.ExcludePincodes,
 		"include_pincodes": z.IncludePincodes, "exclude_pincodes": z.ExcludePincodes,
 		"includePolygons": z.IncludePolygons, "excludePolygons": z.ExcludePolygons,
+		"monsoonEnabled": z.MonsoonEnabled, "monsoonRupees": z.MonsoonRupees,
+		"monsoon_enabled": z.MonsoonEnabled, "monsoon_rupees": z.MonsoonRupees,
+		"instantOpenMin": effOpenMin(z), "instantCloseMin": effCloseMin(z), "instantPaused": z.InstantPaused,
+		"instant_open_min": effOpenMin(z), "instant_close_min": effCloseMin(z), "instant_paused": z.InstantPaused,
 		"updatedAt": z.UpdatedAt,
 	}
 }

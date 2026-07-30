@@ -82,6 +82,7 @@ type order struct {
 	Status         string             `bson:"status"                  json:"status"`
 	Subtotal       float64            `bson:"subtotal"                json:"subtotal"`
 	DeliveryFee    float64            `bson:"delivery_fee"            json:"delivery_fee"`
+	MonsoonFee     float64            `bson:"monsoon_fee,omitempty"   json:"monsoon_fee,omitempty"`
 	Total          float64            `bson:"total"                   json:"total"`
 	PaymentMethod  string             `bson:"payment_method"          json:"payment_method"`
 	AddressLabel   string             `bson:"address_label"           json:"address_label"`
@@ -260,6 +261,23 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	if lane != "instant" {
 		lane = "morning"
 	}
+	// Monsoon surcharge: INSTANT orders only, and only if the store manager enabled
+	// it on the delivery location's zone. Authoritative here — read from the zone,
+	// never trusted from the client payload, so a tampered client cannot skip it.
+	monsoonFee := 0.0
+	if lane == "instant" && in.Geo != nil {
+		if sv, sErr := s.serviceability(ctx, in.Geo.Lat, in.Geo.Lng, ""); sErr == nil {
+			// Store shut for the night / paused → refuse instant (defence in depth;
+			// the consumer already hides it, but a stale client must not slip through).
+			if sv.InstantClosed {
+				return nil, errUnprocessable("INSTANT_CLOSED", "instant delivery is closed right now; please choose the morning slot")
+			}
+			if sv.MonsoonEnabled && sv.MonsoonRupees > 0 {
+				monsoonFee = float64(sv.MonsoonRupees)
+			}
+		}
+	}
+	total = round2(total + monsoonFee)
 	priority := in.Priority
 	if priority == "" {
 		priority = "normal"
@@ -267,7 +285,7 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	now := time.Now().UTC()
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: userID, Status: "placed",
-		Subtotal: subtotal, DeliveryFee: fee, Total: total, PaymentMethod: pm,
+		Subtotal: subtotal, DeliveryFee: fee, MonsoonFee: monsoonFee, Total: total, PaymentMethod: pm,
 		AddressLabel: in.AddressLabel, AddressText: in.AddressText, RiderID: nil,
 		PlacedAt: now, Priority: priority, DeliveryWindow: in.DeliveryWindow, Lane: lane,
 		Items: items, Rider: nil, CanReview: false, Review: nil,
