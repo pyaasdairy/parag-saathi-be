@@ -30,8 +30,8 @@ import (
 const collConsumerTrials = "consumer_trials"
 
 const (
-	trialPaidDays = 3 // full-price delivered days at the start of the trial
-	trialFreeDays = 3 // free (charged 0) delivered days that follow
+	trialPaidDays = 2 // full-price delivered days at the start of the trial (PYAAS Taaza)
+	trialFreeDays = 2 // free (charged 0) delivered days that follow
 
 	trialPhasePaid = "paid" // still inside the first 3 full-price days
 	trialPhaseFree = "free" // inside the 3 free days (charge 0)
