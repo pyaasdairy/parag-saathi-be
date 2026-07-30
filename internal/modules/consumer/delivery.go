@@ -45,44 +45,47 @@ type deliveryItem struct {
 // delivery is the last-mile task. bson = storage; json = the camelCase FE
 // Delivery shape (src/core/types/domain.ts) the Saathi client reads verbatim.
 type delivery struct {
-	MongoID          primitive.ObjectID `bson:"_id,omitempty"        json:"-"`
-	ID               string             `bson:"delivery_id"          json:"id"`
-	OrderID          string             `bson:"order_id"             json:"-"`
-	OrderCode        string             `bson:"order_code"           json:"orderCode"`
-	StoreID          string             `bson:"store_id"             json:"storeId"`
-	RiderPartyID     string             `bson:"rider_party_id"       json:"riderPartyId"`
-	ConsumerID       string             `bson:"consumer_id"          json:"consumerPartyId,omitempty"`
-	ConsumerName     string             `bson:"consumer_name"        json:"consumerName"`
-	PhoneMasked      string             `bson:"phone_masked"         json:"phoneMasked"`
-	Phone            string             `bson:"phone,omitempty"      json:"phone,omitempty"`
-	AddressLabel     string             `bson:"address_label"        json:"addressLabel"`
-	AddressLine      string             `bson:"address_line"         json:"addressLine"`
-	Landmark         string             `bson:"landmark,omitempty"   json:"landmark,omitempty"`
-	Geo              geoPt              `bson:"geo"                  json:"geo"`
-	Items            []deliveryItem     `bson:"items"                json:"items"`
-	Amount           float64            `bson:"amount"               json:"amount"`
-	PaymentMode      string             `bson:"payment_mode"         json:"paymentMode"`
-	Perishable       bool               `bson:"perishable"           json:"perishable"`
-	Slot             string             `bson:"slot"                 json:"slot"`
+	MongoID      primitive.ObjectID `bson:"_id,omitempty"        json:"-"`
+	ID           string             `bson:"delivery_id"          json:"id"`
+	OrderID      string             `bson:"order_id"             json:"-"`
+	OrderCode    string             `bson:"order_code"           json:"orderCode"`
+	StoreID      string             `bson:"store_id"             json:"storeId"`
+	RiderPartyID string             `bson:"rider_party_id"       json:"riderPartyId"`
+	ConsumerID   string             `bson:"consumer_id"          json:"consumerPartyId,omitempty"`
+	ConsumerName string             `bson:"consumer_name"        json:"consumerName"`
+	PhoneMasked  string             `bson:"phone_masked"         json:"phoneMasked"`
+	Phone        string             `bson:"phone,omitempty"      json:"phone,omitempty"`
+	AddressLabel string             `bson:"address_label"        json:"addressLabel"`
+	AddressLine  string             `bson:"address_line"         json:"addressLine"`
+	Landmark     string             `bson:"landmark,omitempty"   json:"landmark,omitempty"`
+	Geo          geoPt              `bson:"geo"                  json:"geo"`
+	Items        []deliveryItem     `bson:"items"                json:"items"`
+	Amount       float64            `bson:"amount"               json:"amount"`
+	PaymentMode  string             `bson:"payment_mode"         json:"paymentMode"`
+	// TrialEligible is set at creation when the order is a PYAAS Taaza subscription
+	// item — only then may the 2-paid/2-free welcome trial waive its settle charge.
+	TrialEligible bool   `bson:"trial_eligible,omitempty" json:"-"`
+	Perishable    bool   `bson:"perishable"           json:"perishable"`
+	Slot          string `bson:"slot"                 json:"slot"`
 	// Lane mirrors the order's delivery lane: "instant" (≈20-min doorstep run,
 	// nearby-rider ranked) or "morning" (the 5-7:30 AM subscription run).
-	Lane             string             `bson:"lane,omitempty"       json:"lane,omitempty"`
+	Lane string `bson:"lane,omitempty"       json:"lane,omitempty"`
 	// EtaAt is set for instant deliveries only: placed-at + 20 min (RFC3339).
-	EtaAt            string             `bson:"eta_at,omitempty"     json:"etaAt,omitempty"`
-	DistanceKm       float64            `bson:"distance_km"          json:"distanceKm"`
-	Status           string             `bson:"status"               json:"status"`
-	AssignedAt       string             `bson:"assigned_at"          json:"assignedAt"`
-	OutForDeliveryAt string             `bson:"out_for_delivery_at,omitempty" json:"outForDeliveryAt,omitempty"`
-	DeliveredAt      string             `bson:"delivered_at,omitempty" json:"deliveredAt,omitempty"`
-	ProofNote        string             `bson:"proof_note,omitempty" json:"proofNote,omitempty"`
-	ProofPhotoURI    string             `bson:"proof_photo_uri,omitempty" json:"proofPhotoUri,omitempty"`
-	ProofGeo         *geoPt             `bson:"proof_geo,omitempty"  json:"proofGeo,omitempty"`
-	LastKnownGeo     *geoPt             `bson:"last_known_geo,omitempty" json:"lastKnownGeo,omitempty"`
-	LastLocationAt   string             `bson:"last_location_at,omitempty" json:"lastLocationAt,omitempty"`
-	FailureReason    string             `bson:"failure_reason,omitempty" json:"failureReason,omitempty"`
-	DeliveryEventID  string             `bson:"delivery_event_id,omitempty" json:"deliveryEventId,omitempty"`
-	CreatedAt        time.Time          `bson:"created_at"           json:"-"`
-	UpdatedAt        time.Time          `bson:"updated_at"           json:"-"`
+	EtaAt            string    `bson:"eta_at,omitempty"     json:"etaAt,omitempty"`
+	DistanceKm       float64   `bson:"distance_km"          json:"distanceKm"`
+	Status           string    `bson:"status"               json:"status"`
+	AssignedAt       string    `bson:"assigned_at"          json:"assignedAt"`
+	OutForDeliveryAt string    `bson:"out_for_delivery_at,omitempty" json:"outForDeliveryAt,omitempty"`
+	DeliveredAt      string    `bson:"delivered_at,omitempty" json:"deliveredAt,omitempty"`
+	ProofNote        string    `bson:"proof_note,omitempty" json:"proofNote,omitempty"`
+	ProofPhotoURI    string    `bson:"proof_photo_uri,omitempty" json:"proofPhotoUri,omitempty"`
+	ProofGeo         *geoPt    `bson:"proof_geo,omitempty"  json:"proofGeo,omitempty"`
+	LastKnownGeo     *geoPt    `bson:"last_known_geo,omitempty" json:"lastKnownGeo,omitempty"`
+	LastLocationAt   string    `bson:"last_location_at,omitempty" json:"lastLocationAt,omitempty"`
+	FailureReason    string    `bson:"failure_reason,omitempty" json:"failureReason,omitempty"`
+	DeliveryEventID  string    `bson:"delivery_event_id,omitempty" json:"deliveryEventId,omitempty"`
+	CreatedAt        time.Time `bson:"created_at"           json:"-"`
+	UpdatedAt        time.Time `bson:"updated_at"           json:"-"`
 }
 
 // riderSummary mirrors the FE RiderSummary (store roster).

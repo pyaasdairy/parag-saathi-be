@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -43,6 +44,20 @@ const (
 // same ledger entry and never double-counts: "sub:<consumerId>:<YYYY-MM-DD>".
 func trialDeliveryKey(consumerID primitive.ObjectID, day string) string {
 	return "sub:" + consumerID.Hex() + ":" + day
+}
+
+// istZone is India Standard Time (UTC+5:30) as a fixed offset (no tzdata needed).
+var istZone = time.FixedZone("IST", 5*3600+1800)
+
+// trialDay is the IST calendar day (YYYY-MM-DD) a delivery counts toward. The
+// morning run is an IST-morning event, so dating in IST (not UTC) keeps one IST
+// morning = exactly one trial day, regardless of the 05:30-IST UTC-midnight seam.
+func trialDay(t time.Time) string { return t.In(istZone).Format("2006-01-02") }
+
+// isTaazaProduct reports whether a product id is a PYAAS Taaza SKU — the only
+// product the 2-paid/2-free welcome trial applies to.
+func isTaazaProduct(productID string) bool {
+	return strings.HasPrefix(productID, "taaza-")
 }
 
 // ── Documents + wire shapes ─────────────────────────────────────────────────
