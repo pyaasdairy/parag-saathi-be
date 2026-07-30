@@ -34,8 +34,12 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		dest = *at
 	}
 	items := make([]deliveryItem, 0, len(o.Items))
+	trialEligible := false
 	for _, it := range o.Items {
 		items = append(items, deliveryItem{Name: it.Name, Qty: it.Qty})
+		if isTaazaProduct(it.ProductID) {
+			trialEligible = true // 2+2 welcome trial applies to PYAAS Taaza only
+		}
 	}
 	payMode := "COD"
 	if o.PaymentMethod == "wallet" || o.PaymentMethod == "prepaid" {
@@ -57,7 +61,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
-		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, Perishable: false,
+		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
 		Slot: o.DeliveryWindow, Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
 		Status: "ASSIGNED", AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
@@ -329,13 +333,14 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 			return nil, errInternal("bad consumer id on delivery")
 		}
 		amount := d.Amount
-		// Subscription deliveries (the morning run) flow through the "3 PAID then
-		// 3 FREE" welcome trial: the first 3 delivered days pay full, the next 3
-		// are on us (effective 0), then normal. The trial counts DELIVERED days and
-		// is idempotent by this delivered-day key, so a settle re-run never
-		// double-advances the window — independent of the wallet's per-order gate.
-		if d.Lane == "morning" {
-			day := time.Now().UTC().Format("2006-01-02")
+		// PYAAS Taaza subscription deliveries (the morning run) flow through the
+		// "2 PAID then 2 FREE" welcome trial: the first 2 delivered days pay full,
+		// the next 2 are on us (effective 0), then normal. The window counts
+		// DELIVERED days (dated in IST) and is idempotent by this delivered-day key,
+		// so a settle re-run never double-advances it. Only Taaza qualifies
+		// (TrialEligible), so a gold/shakti/chai subscription never gets free days.
+		if d.Lane == "morning" && d.TrialEligible {
+			day := trialDay(time.Now())
 			eff, _, terr := s.trialChargeFor(ctx, cid, trialDeliveryKey(cid, day), d.Amount)
 			if terr != nil {
 				return nil, terr
