@@ -147,7 +147,23 @@ func run() error {
 		}
 	}
 
-	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2, dcs3}
+	// ── Consumer last-mile STORE (delivery hub) — DELIVERY_RIDER assignments +
+	//    consumer orders scope to this org unit. Parent = Lucknow union. ────────
+	store, err := upsertOrg(ctx, db, domain.OrgUnit{
+		Type: domain.OrgTypeStore, Name: "PYAAS Store, Gomti Nagar (Lucknow)", NameHi: "पयास स्टोर, गोमती नगर (लखनऊ)", Code: "STORE-LKO-01",
+		ParentID: &union.ID, Path: []primitive.ObjectID{federation.ID, union.ID},
+		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		return err
+	}
+	// Store centre (Gomti Nagar) for the delivery map + nearby-store ranking.
+	if _, err := db.Collection(mongodb.CollOrgUnits).UpdateByID(ctx, store.ID,
+		bson.D{{Key: "$set", Value: bson.D{{Key: "geo_lat", Value: 26.8500}, {Key: "geo_lng", Value: 81.0000}, {Key: "updated_at", Value: now}}}}); err != nil {
+		return fmt.Errorf("store geo refresh: %w", err)
+	}
+
+	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2, dcs3, store}
 
 	// ── Deploy-test minimal mode: org tree + admin + one onboarding exec ────
 	if *minimalMode {
@@ -160,6 +176,8 @@ func run() error {
 		for _, sp := range []minParty{
 			{cfg.SeedAdminPhone, "Platform Admin", "", domain.KYCTierHighest, domain.RoleSuperAdmin, federation.ID},
 			{"9876500014", "Neha Tripathi", "नेहा त्रिपाठी", domain.KYCTierHigh, domain.RoleOnboardingExecutive, union.ID},
+			// Live-test delivery rider for the Lucknow store (anonymous fixture).
+			{"8708885900", "Test Rider (Lucknow)", "टेस्ट राइडर (लखनऊ)", domain.KYCTierRider, domain.RoleDeliveryRider, store.ID},
 		} {
 			party, err := upsertParty(ctx, db, domain.Party{
 				Phone: sp.phone, FullName: sp.name, FullNameHi: sp.nameHi,
@@ -207,6 +225,8 @@ func run() error {
 		{"9000000014", "Kamla Devi", "कमला देवी", "Kasmandi Kalan", "hi", domain.KYCTierFarmer, domain.RoleFarmer, dcs3.ID},
 		{"9000000005", "Barabanki Dugdh Sangh", "बाराबंकी दुग्ध संघ", "", "hi", domain.KYCTierHigh, domain.RoleUnionPresident, union.ID},
 		{"9000000021", "Salim Khan", "सलीम खान", "Malihabad", "hi", domain.KYCTierRider, domain.RoleVanRider, union.ID},
+		// Live-test delivery rider for the Lucknow store (anonymous fixture).
+		{"8708885900", "Test Rider (Lucknow)", "टेस्ट राइडर (लखनऊ)", "Gomti Nagar", "hi", domain.KYCTierRider, domain.RoleDeliveryRider, store.ID},
 		{"9000000031", "Vikas Singh", "विकास सिंह", "Malihabad", "hi", domain.KYCTierStandard, domain.RoleBMCOperator, bmc.ID},
 		{"9000000041", "Rajeev Ranjan", "राजीव रंजन", "", "hi", domain.KYCTierHigh, domain.RolePlantOperator, plant.ID},
 		{"9000000042", "Priya Sharma", "प्रिया शर्मा", "", "en", domain.KYCTierHigh, domain.RolePlantLabAnalyst, plant.ID},
