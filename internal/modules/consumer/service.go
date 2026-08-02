@@ -15,6 +15,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/modules/publictrace"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
+	"github.com/pyaas/saathi-backend/internal/platform/sms"
 )
 
 const (
@@ -46,6 +47,9 @@ type service struct {
 	// ships EXPO_PUBLIC_CONSUMER_APP_KEY and sends it as X-Parag-App-Key; the
 	// backend requires a match. Empty → gate disabled (local dev without a key).
 	appKey string
+	// sms delivers the login OTP over MSG91 (env MSG91_AUTHKEY + MSG91_TEMPLATE_ID).
+	// Disabled → dev echo only (see requestOTP).
+	sms *sms.MSG91
 }
 
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
@@ -58,6 +62,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		rzpKeySecret: os.Getenv("RAZORPAY_KEY_SECRET"),
 		trace:        publictrace.NewService(d, log),
 		appKey:       os.Getenv("CONSUMER_APP_KEY"),
+		sms:          sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
 	}
 }
 
@@ -94,6 +99,15 @@ func (s *service) requestOTP(ctx context.Context, phone string) (string, time.Ti
 	}
 	if err := s.repo.insertOTP(ctx, ch); err != nil {
 		return "", time.Time{}, err
+	}
+	// Deliver the code over SMS (MSG91) SYNCHRONOUSLY — a login OTP must not wait
+	// on the outbox worker. The code is still generated + verified by us; MSG91 is
+	// only the transport. If it isn't configured we fall through to dev echo.
+	if s.sms.Enabled() {
+		if err := s.sms.SendOTP(ctx, phone, code); err != nil {
+			s.log.ErrorContext(ctx, "consumer otp sms send failed", slog.String("phone", phone), slog.Any("err", err))
+			return "", time.Time{}, errInternal("could not send the OTP right now — please try again")
+		}
 	}
 	devOTP := ""
 	if s.deps.Cfg.OTPDevMode {

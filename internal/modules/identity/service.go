@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
 	"github.com/pyaas/saathi-backend/internal/platform/eventbus"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
+	"github.com/pyaas/saathi-backend/internal/platform/sms"
 )
 
 // Module-local constants. AADHAAR_EKYC is a consent purpose string, not a
@@ -131,12 +133,18 @@ type service struct {
 	deps *deps.Deps
 	repo *repository
 	log  *slog.Logger
+	// sms delivers the login OTP over MSG91 (env MSG91_AUTHKEY + MSG91_TEMPLATE_ID).
+	// Disabled → dev echo only + the queued outbox notification (mock worker).
+	sms *sms.MSG91
 }
 
 // newService wires the service. log is the module-scoped logger derived in
 // Register.
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
-	return &service{deps: d, repo: repo, log: log}
+	return &service{
+		deps: d, repo: repo, log: log,
+		sms: sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
+	}
 }
 
 // --- Auth: OTP login ---
@@ -200,6 +208,17 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 	if err := s.repo.insertNotification(ctx, notification); err != nil {
 		s.log.ErrorContext(ctx, "otp notification queue failed", slog.String("phone", phone), slog.Any("err", err))
 		return nil, err
+	}
+
+	// Deliver the code over SMS (MSG91) SYNCHRONOUSLY so an operator gets their
+	// login OTP immediately — the outbox notification above stays for audit, but
+	// the (mock) worker never actually delivers. If MSG91 isn't configured we fall
+	// through to dev echo below.
+	if s.sms.Enabled() {
+		if err := s.sms.SendOTP(ctx, phone, code); err != nil {
+			s.log.ErrorContext(ctx, "otp sms send failed", slog.String("phone", phone), slog.Any("err", err))
+			return nil, httpx.Internal(fmt.Errorf("otp sms delivery failed: %w", err))
+		}
 	}
 
 	s.log.InfoContext(ctx, "otp requested", slog.String("phone", phone))
