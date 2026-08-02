@@ -171,6 +171,8 @@ func run() error {
 			{"9876500014", "Neha Tripathi", "नेहा त्रिपाठी", domain.KYCTierHigh, domain.RoleOnboardingExecutive, union.ID},
 			// Live-test delivery rider for the Lucknow store (anonymous fixture).
 			{"8708885900", "Test Rider (Lucknow)", "टेस्ट राइडर (लखनऊ)", domain.KYCTierRider, domain.RoleDeliveryRider, riderStoreID},
+			// Live-test store manager for the Gomti Nagar Parag store.
+			{"8307474208", "Store Manager (Gomti Nagar)", "स्टोर मैनेजर (गोमती नगर)", domain.KYCTierHigh, domain.RoleStoreManager, riderStoreID},
 		} {
 			party, err := upsertParty(ctx, db, domain.Party{
 				Phone: sp.phone, FullName: sp.name, FullNameHi: sp.nameHi,
