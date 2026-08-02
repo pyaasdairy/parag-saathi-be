@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -69,6 +70,12 @@ const (
 	minRadiusM = 100.0
 	maxRadiusM = 60000.0
 )
+
+// defaultFenceKm — the hard delivery radius (km) around the nearest STORE OrgUnit,
+// applied when no store-manager zone is drawn yet (the live pilot state). Beyond
+// this a point is honestly non-serviceable instead of the old fail-open "serve
+// everywhere". Product-owned pilot default.
+const defaultFenceKm = 5.0
 
 func modeString(level int) string {
 	switch level {
@@ -247,6 +254,11 @@ type serviceabilityResult struct {
 	InstantClosed       bool   `json:"instantClosed,omitempty"`
 	InstantResumesLabel string `json:"instantResumesLabel,omitempty"`
 	InstantResumesAt    string `json:"instantResumesAt,omitempty"`
+	// Nearest serving store + distance (km) and a natural-language reason, used by
+	// the consumer's Coming-Soon screen when a point is outside the delivery fence.
+	StoreName  string  `json:"storeName,omitempty"`
+	DistanceKm float64 `json:"distanceKm,omitempty"`
+	Reason     string  `json:"reason,omitempty"`
 }
 
 // ── Repository ──────────────────────────────────────────────────────────────
@@ -436,16 +448,37 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 	if err != nil {
 		return nil, err
 	}
+	pt := geoPt{Lat: lat, Lng: lng}
 	if len(zones) == 0 {
-		// No zone drawn yet — the pilot must not go dark. Open, standard service
-		// (instant only when the testing override is on).
+		// No manager zone drawn yet — apply the hard STORE-OrgUnit fence so a point in
+		// another city (e.g. Hyderabad while the store is Lucknow) is honestly told we
+		// don't serve it yet, instead of the old fail-open "serviceable everywhere". If
+		// NO store has a usable geo, keep the pilot open (never go dark).
+		storeID, name, _, distKm, ok, err := s.repo.nearestStoreNamed(ctx, pt)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return &serviceabilityResult{
+				Serviceable: true, Mode: modeString(svcStandard), Instant: instantTestOpen,
+				DefaultOpen: true, Pincode: pincode,
+			}, nil
+		}
+		dKm := math.Round(distKm*10) / 10
+		if distKm <= defaultFenceKm {
+			return &serviceabilityResult{
+				Serviceable: true, Mode: modeString(svcStandard), Instant: instantTestOpen,
+				DefaultOpen: true, Pincode: pincode,
+				StoreID: storeID, StoreName: name, DistanceKm: dKm,
+			}, nil
+		}
 		return &serviceabilityResult{
-			Serviceable: true, Mode: modeString(svcStandard), Instant: instantTestOpen,
-			DefaultOpen: true, Pincode: pincode,
+			Serviceable: false, Mode: modeString(svcNone), Instant: false,
+			Pincode: pincode, StoreID: storeID, StoreName: name, DistanceKm: dKm,
+			Reason: fmt.Sprintf("We don’t deliver to your area yet. The nearest PYAAS store, %s, is about %.1f km away and we currently deliver within %.0f km. We’re expanding fast — we’ll let you know the moment we reach you.", name, distKm, defaultFenceKm),
 		}, nil
 	}
 
-	pt := geoPt{Lat: lat, Lng: lng}
 	best := svcNone
 	var bestStore string
 	var bestDist float64
@@ -466,6 +499,9 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 	if best > svcNone {
 		res.StoreID = bestStore
 		res.DistanceM = math.Round(bestDist)
+		if name, ok := s.repo.storeName(ctx, bestStore); ok {
+			res.StoreName = name
+		}
 		// Surface the winning store's monsoon surcharge so the consumer can show +
 		// charge it (the FE and createOrder both gate it to the INSTANT lane).
 		if bestZone.MonsoonEnabled && bestZone.MonsoonRupees > 0 {

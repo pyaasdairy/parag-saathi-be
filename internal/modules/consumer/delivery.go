@@ -270,6 +270,66 @@ func (r *repository) nearestStore(ctx context.Context, at *geoPt) (string, geoPt
 	return s.ID.Hex(), geoPt{Lat: s.Lat, Lng: s.Lng}, nil
 }
 
+// geoSane rejects out-of-range and Null-Island (0,0 = missing geo) coordinates,
+// so a store that was never given a centre can't win "nearest".
+func geoSane(lat, lng float64) bool {
+	if lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+		return false
+	}
+	return !(lat == 0 && lng == 0)
+}
+
+// nearestStoreNamed returns the closest active STORE org-unit WITH a usable geo to
+// a point, plus its display name and the great-circle distance in km. ok=false
+// when no store has valid coordinates (caller then keeps the pilot fail-open).
+func (r *repository) nearestStoreNamed(ctx context.Context, at geoPt) (storeID, name string, geo geoPt, distanceKm float64, ok bool, err error) {
+	cur, e := r.orgUnits.Find(ctx, bson.D{{Key: "type", Value: "STORE"}, {Key: "active", Value: true}})
+	if e != nil {
+		return "", "", geoPt{}, 0, false, errInternal("store lookup failed")
+	}
+	var stores []struct {
+		ID   primitive.ObjectID `bson:"_id"`
+		Name string             `bson:"name"`
+		Lat  float64            `bson:"geo_lat"`
+		Lng  float64            `bson:"geo_lng"`
+	}
+	if e := cur.All(ctx, &stores); e != nil {
+		return "", "", geoPt{}, 0, false, errInternal("store decode failed")
+	}
+	bestD := math.MaxFloat64
+	for _, s := range stores {
+		if !geoSane(s.Lat, s.Lng) {
+			continue
+		}
+		d := haversineKm(at, geoPt{Lat: s.Lat, Lng: s.Lng})
+		if d < bestD {
+			bestD = d
+			storeID, name, geo, ok = s.ID.Hex(), s.Name, geoPt{Lat: s.Lat, Lng: s.Lng}, true
+		}
+	}
+	distanceKm = bestD
+	if !ok {
+		distanceKm = 0
+	}
+	return storeID, name, geo, distanceKm, ok, nil
+}
+
+// storeName resolves a STORE org-unit's display name (for the serviceability +
+// Coming-Soon copy). ok=false when the id is unknown.
+func (r *repository) storeName(ctx context.Context, storeID string) (string, bool) {
+	oid, err := primitive.ObjectIDFromHex(storeID)
+	if err != nil {
+		return "", false
+	}
+	var doc struct {
+		Name string `bson:"name"`
+	}
+	if err := r.orgUnits.FindOne(ctx, bson.D{{Key: "_id", Value: oid}}).Decode(&doc); err != nil {
+		return "", false
+	}
+	return doc.Name, true
+}
+
 // riderName resolves a rider party's display name + masked/real phone.
 func (r *repository) riderName(ctx context.Context, partyID string) (name, phone string) {
 	oid, err := primitive.ObjectIDFromHex(partyID)
