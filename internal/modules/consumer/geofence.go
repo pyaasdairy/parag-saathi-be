@@ -519,6 +519,16 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 			}
 		}
 	}
+	if best == svcNone {
+		// Out of every drawn zone → give the Coming-Soon screen the nearest store +
+		// a natural reason, so it reads the same whether or not a zone is drawn.
+		if storeID, name, _, distKm, ok, e := s.repo.nearestStoreNamed(ctx, pt); e == nil && ok {
+			res.StoreID = storeID
+			res.StoreName = name
+			res.DistanceKm = math.Round(distKm*10) / 10
+			res.Reason = fmt.Sprintf("We don’t deliver to your area yet. The nearest PYAAS store, %s, is about %.1f km away. We’re expanding fast — we’ll let you know the moment we reach you.", name, distKm)
+		}
+	}
 	return res, nil
 }
 
