@@ -13,7 +13,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"time"
 
@@ -148,56 +147,16 @@ func run() error {
 		}
 	}
 
-	// ── Consumer last-mile STORE (delivery hub) — DELIVERY_RIDER assignments +
-	//    consumer orders scope to this org unit. Parent = Lucknow union. ────────
-	store, err := upsertOrg(ctx, db, domain.OrgUnit{
-		Type: domain.OrgTypeStore, Name: "PYAAS Store, Gomti Nagar (Lucknow)", NameHi: "पयास स्टोर, गोमती नगर (लखनऊ)", Code: "STORE-LKO-01",
-		ParentID: &union.ID, Path: []primitive.ObjectID{federation.ID, union.ID},
-		District: "Lucknow", State: "Uttar Pradesh", Active: true, CreatedAt: now, UpdatedAt: now,
-	})
+	// ── Live-test delivery rider serves the DEPLOYED Lucknow store
+	//    ("Parag Store — Gomti Nagar"). Assign the rider straight to that store id;
+	//    no new store is created. ────────────────────────────────────────────────
+	riderStoreID, err := primitive.ObjectIDFromHex("6a53fb242b4fd88066524d41")
 	if err != nil {
-		return err
+		return fmt.Errorf("bad rider store id: %w", err)
 	}
-	// Store centre (Gomti Nagar) for the delivery map + nearby-store ranking.
-	if _, err := db.Collection(mongodb.CollOrgUnits).UpdateByID(ctx, store.ID,
-		bson.D{{Key: "$set", Value: bson.D{{Key: "geo_lat", Value: 26.8500}, {Key: "geo_lng", Value: 81.0000}, {Key: "updated_at", Value: now}}}}); err != nil {
-		return fmt.Errorf("store geo refresh: %w", err)
-	}
+	fmt.Printf("  live-test rider → store %s\n", riderStoreID.Hex())
 
-	// Attach the live-test rider to the store that ACTUALLY serves Gomti Nagar:
-	// prefer the NEAREST existing active STORE (so the rider lands on the deployed
-	// "Parag Store — Gomti Nagar" even if it has a different code), and fall back to
-	// the STORE-LKO-01 we just upserted only if none exists.
-	riderStoreID := store.ID
-	{
-		const gLat, gLng = 26.8500, 81.0000
-		if cur, ferr := db.Collection(mongodb.CollOrgUnits).Find(ctx,
-			bson.D{{Key: "type", Value: domain.OrgTypeStore}, {Key: "active", Value: true}}); ferr == nil {
-			var rows []struct {
-				ID  primitive.ObjectID `bson:"_id"`
-				Lat float64            `bson:"geo_lat"`
-				Lng float64            `bson:"geo_lng"`
-			}
-			if cur.All(ctx, &rows) == nil {
-				best := math.MaxFloat64
-				for _, s := range rows {
-					if s.Lat == 0 && s.Lng == 0 {
-						continue // skip stores without a real geo
-					}
-					dLat := (s.Lat - gLat) * math.Pi / 180
-					dLng := (s.Lng - gLng) * math.Pi / 180
-					h := math.Sin(dLat/2)*math.Sin(dLat/2) +
-						math.Cos(gLat*math.Pi/180)*math.Cos(s.Lat*math.Pi/180)*math.Sin(dLng/2)*math.Sin(dLng/2)
-					if d := 2 * 6371 * math.Asin(math.Sqrt(h)); d < best {
-						best, riderStoreID = d, s.ID
-					}
-				}
-			}
-		}
-		fmt.Printf("  live-test rider → store %s\n", riderStoreID.Hex())
-	}
-
-	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2, dcs3, store}
+	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2, dcs3}
 
 	// ── Deploy-test minimal mode: org tree + admin + one onboarding exec ────
 	if *minimalMode {
