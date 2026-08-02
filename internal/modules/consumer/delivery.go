@@ -75,6 +75,13 @@ type delivery struct {
 	DistanceKm       float64   `bson:"distance_km"          json:"distanceKm"`
 	Status           string    `bson:"status"               json:"status"`
 	AssignedAt       string    `bson:"assigned_at"          json:"assignedAt"`
+	// Auto-dispatch (instant lane): the task is broadcast as OFFERED and the first
+	// rider to claim it wins. OfferedAt anchors the offer; RejectedBy lists riders
+	// who declined (never re-offered to them); ReofferCount counts re-broadcasts.
+	OfferedAt        string    `bson:"offered_at,omitempty"    json:"offeredAt,omitempty"`
+	AcceptedAt       string    `bson:"accepted_at,omitempty"   json:"acceptedAt,omitempty"`
+	RejectedBy       []string  `bson:"rejected_by,omitempty"   json:"-"`
+	ReofferCount     int       `bson:"reoffer_count,omitempty" json:"reofferCount,omitempty"`
 	OutForDeliveryAt string    `bson:"out_for_delivery_at,omitempty" json:"outForDeliveryAt,omitempty"`
 	DeliveredAt      string    `bson:"delivered_at,omitempty" json:"deliveredAt,omitempty"`
 	ProofNote        string    `bson:"proof_note,omitempty" json:"proofNote,omitempty"`
@@ -223,6 +230,115 @@ func (r *repository) updateDelivery(ctx context.Context, id string, set bson.D, 
 		return nil, errInternal("delivery update failed")
 	}
 	return &d, nil
+}
+
+// claimDelivery is the FIRST-ACCEPT-WINS atomic claim. The first rider whose call
+// matches {OFFERED, no rider, not already declined by them} flips it to ACCEPTED and
+// wins; every later caller matches nothing and gets a conflict. Single-writer via
+// one Mongo FindOneAndUpdate — correct across replicas with no external lock/Redis.
+func (r *repository) claimDelivery(ctx context.Context, id, riderPartyID string, now time.Time) (*delivery, error) {
+	after := options.After
+	var d delivery
+	err := r.deliveries.FindOneAndUpdate(ctx,
+		bson.D{
+			{Key: "delivery_id", Value: id},
+			{Key: "status", Value: "OFFERED"},
+			{Key: "rider_party_id", Value: ""},
+			{Key: "rejected_by", Value: bson.D{{Key: "$ne", Value: riderPartyID}}},
+		},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "rider_party_id", Value: riderPartyID},
+			{Key: "status", Value: "ACCEPTED"},
+			{Key: "assigned_at", Value: now.Format(time.RFC3339)},
+			{Key: "accepted_at", Value: now.Format(time.RFC3339)},
+			{Key: "updated_at", Value: now},
+		}}},
+		&options.FindOneAndUpdateOptions{ReturnDocument: &after},
+	).Decode(&d)
+	if isNoDocs(err) {
+		return nil, errConflict("CLAIMED_BY_OTHER", "another rider already took this order")
+	}
+	if err != nil {
+		return nil, errInternal("delivery claim failed")
+	}
+	return &d, nil
+}
+
+// rejectOffer atomically returns a rider's accepted-but-declined task to the OFFERED
+// pool (a re-broadcast), records the decline so it's never re-offered to that rider,
+// and bumps the re-offer counter. Guarded to the current owner + pre-pickup states so
+// it can never race a pickup/delivery.
+func (r *repository) rejectOffer(ctx context.Context, id, riderPartyID string, now time.Time) (*delivery, error) {
+	after := options.After
+	var d delivery
+	err := r.deliveries.FindOneAndUpdate(ctx,
+		bson.D{
+			{Key: "delivery_id", Value: id},
+			{Key: "rider_party_id", Value: riderPartyID},
+			{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"ACCEPTED", "ASSIGNED"}}}},
+		},
+		bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "status", Value: "OFFERED"},
+				{Key: "rider_party_id", Value: ""},
+				{Key: "offered_at", Value: now.Format(time.RFC3339)},
+				{Key: "updated_at", Value: now},
+			}},
+			{Key: "$addToSet", Value: bson.D{{Key: "rejected_by", Value: riderPartyID}}},
+			{Key: "$inc", Value: bson.D{{Key: "reoffer_count", Value: 1}}},
+		},
+		&options.FindOneAndUpdateOptions{ReturnDocument: &after},
+	).Decode(&d)
+	if isNoDocs(err) {
+		return nil, errConflict("INVALID_STATE", "this order can no longer be declined")
+	}
+	if err != nil {
+		return nil, errInternal("delivery reject failed")
+	}
+	return &d, nil
+}
+
+// storesForRider lists the store ids the rider holds an ACTIVE DELIVERY_RIDER role at.
+func (r *repository) storesForRider(ctx context.Context, riderPartyID string) ([]string, error) {
+	oid, err := primitive.ObjectIDFromHex(riderPartyID)
+	if err != nil {
+		return nil, errBadRequest("bad rider id")
+	}
+	cur, err := r.roleAssignments.Find(ctx, bson.D{
+		{Key: "party_id", Value: oid}, {Key: "role_code", Value: "DELIVERY_RIDER"}, {Key: "status", Value: "ACTIVE"},
+	})
+	if err != nil {
+		return nil, errInternal("rider store lookup failed")
+	}
+	var rows []struct {
+		OrgUnitID primitive.ObjectID `bson:"org_unit_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, errInternal("rider store decode failed")
+	}
+	ids := make([]string, 0, len(rows))
+	for _, x := range rows {
+		ids = append(ids, x.OrgUnitID.Hex())
+	}
+	return ids, nil
+}
+
+// listOfferedForStores is a rider's "available orders" feed: OFFERED (unclaimed)
+// tasks across the stores they serve that they have NOT already declined.
+func (r *repository) listOfferedForStores(ctx context.Context, storeIDs []string, riderPartyID string) ([]delivery, error) {
+	if len(storeIDs) == 0 {
+		return []delivery{}, nil
+	}
+	ids := bson.A{}
+	for _, s := range storeIDs {
+		ids = append(ids, s)
+	}
+	return r.listDeliveries(ctx, bson.D{
+		{Key: "store_id", Value: bson.D{{Key: "$in", Value: ids}}},
+		{Key: "status", Value: "OFFERED"},
+		{Key: "rider_party_id", Value: ""},
+		{Key: "rejected_by", Value: bson.D{{Key: "$ne", Value: riderPartyID}}},
+	})
 }
 
 // storeGeo reads a STORE org-unit's centre coordinate (read-only) for distance.

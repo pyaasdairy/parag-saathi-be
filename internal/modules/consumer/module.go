@@ -181,8 +181,11 @@ func Register(r chi.Router, d *deps.Deps) {
 			op.Group(func(dr chi.Router) {
 				dr.Use(middleware.RequireRoles(domain.RoleDeliveryRider))
 				dr.Get("/delivery/tasks", h.riderDeliveries)
+				dr.Get("/delivery/tasks/available", h.riderAvailable) // OFFERED broadcast pool
 				dr.Get("/delivery/tasks/{deliveryId}", h.riderGetDelivery)
-				dr.Post("/delivery/tasks/{deliveryId}/accept", h.riderAccept)
+				dr.Post("/delivery/tasks/{deliveryId}/accept", h.riderAccept) // manager-assigned
+				dr.Post("/delivery/tasks/{deliveryId}/claim", h.riderClaim)   // first-accept-wins
+				dr.Post("/delivery/tasks/{deliveryId}/reject", h.riderReject) // decline → re-broadcast
 				dr.Post("/delivery/tasks/{deliveryId}/pickup", h.riderPickup)
 				dr.Post("/delivery/tasks/{deliveryId}/location", h.riderLocation)
 				dr.Post("/delivery/tasks/{deliveryId}/deliver", h.riderDeliver)

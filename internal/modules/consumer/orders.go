@@ -38,8 +38,10 @@ func deliveryFeeFor(subtotal float64) float64 {
 	return deliveryFee
 }
 
-// Statuses a placed order may still be cancelled from.
-var cancellableStatuses = map[string]bool{"placed": true, "confirmed": true}
+// Statuses a placed order may still be cancelled from. "assigned" is included so a
+// customer can still cancel AFTER a rider claims/accepts but BEFORE pickup — once the
+// order is picked up (out_for_delivery) it can no longer be cancelled or returned.
+var cancellableStatuses = map[string]bool{"placed": true, "confirmed": true, "assigned": true}
 
 // ── Documents (bson) + wire shape (json matches the FE Order) ────────────────
 

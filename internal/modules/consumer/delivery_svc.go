@@ -57,13 +57,20 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		}
 		eta = base.Add(20 * time.Minute).Format(time.RFC3339)
 	}
+	// Instant orders BROADCAST as OFFERED to the store's riders — the first rider to
+	// claim it wins (auto-dispatch). Morning/subscription tasks stay unassigned
+	// ASSIGNED for the store manager's batch route-assign.
+	status, offeredAt := "ASSIGNED", ""
+	if o.Lane == "instant" {
+		status, offeredAt = "OFFERED", now.Format(time.RFC3339)
+	}
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
 		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
 		Slot: o.DeliveryWindow, Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
-		Status: "ASSIGNED", AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
+		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
 	_ = s.repo.insertDelivery(ctx, del)
 }
@@ -237,6 +244,41 @@ func (s *service) riderDeliveries(ctx context.Context, actor auth.Actor) ([]deli
 	return all, nil
 }
 
+// offeredForRider is the rider's "available orders" feed — OFFERED (broadcast)
+// instant tasks at any store they serve, minus ones they already declined.
+func (s *service) offeredForRider(ctx context.Context, actor auth.Actor) ([]delivery, error) {
+	stores, err := s.repo.storesForRider(ctx, actor.PartyID)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.listOfferedForStores(ctx, stores, actor.PartyID)
+}
+
+// claimOfferedDelivery is the FIRST-ACCEPT-WINS path: the first rider to claim an
+// OFFERED task wins it atomically; everyone else gets CLAIMED_BY_OTHER (409).
+func (s *service) claimOfferedDelivery(ctx context.Context, actor auth.Actor, id string) (*delivery, error) {
+	d, err := s.repo.claimDelivery(ctx, id, actor.PartyID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	s.syncOrderAssigned(ctx, d) // consumer immediately sees the assigned rider
+	return d, nil
+}
+
+// rejectOfferedDelivery returns a claimed (pre-pickup) task to the pool so a nearby
+// rider can take it — the re-broadcast. Not allowed once picked up.
+func (s *service) rejectOfferedDelivery(ctx context.Context, actor auth.Actor, id string) (*delivery, error) {
+	d, err := s.repo.rejectOffer(ctx, id, actor.PartyID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	s.syncOrderFindingRider(ctx, d)
+	return d, nil
+}
+
+// acceptDelivery is the MANAGER-ASSIGNED (morning/subscription) accept: a rider
+// accepts a task the store manager already assigned to them. Instant/OFFERED tasks
+// go through claimOfferedDelivery (first-accept-wins) instead.
 func (s *service) acceptDelivery(ctx context.Context, actor auth.Actor, id string) (*delivery, error) {
 	return s.riderTransition(ctx, actor, id, "ASSIGNED",
 		bson.D{{Key: "status", Value: "ACCEPTED"}}, "")
@@ -416,6 +458,22 @@ func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "delivered"}, {Key: "can_review", Value: true}, {Key: "proof_photo_url", Value: d.ProofPhotoURI}, {Key: "updated_at", Value: time.Now().UTC()}}}})
 }
 
+// syncOrderAssigned surfaces the winning rider to the consumer the moment a rider
+// claims (or is assigned) the task — the order flips placed→assigned.
+func (s *service) syncOrderAssigned(ctx context.Context, d *delivery) {
+	name, phone := s.repo.riderName(ctx, d.RiderPartyID)
+	rd := &rider{ID: d.RiderPartyID, FullName: name, Phone: phone}
+	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "assigned"}, {Key: "rider_id", Value: d.RiderPartyID}, {Key: "riders", Value: rd}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+}
+
+// syncOrderFindingRider drops the order back to placed (finding a rider) when a
+// claimed task is rejected and re-broadcast, so the consumer sees it's re-offered.
+func (s *service) syncOrderFindingRider(ctx context.Context, d *delivery) {
+	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "placed"}, {Key: "rider_id", Value: ""}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+}
+
 func contains(xs []string, v string) bool {
 	for _, x := range xs {
 		if x == v {
@@ -501,6 +559,28 @@ func (h *handler) riderAccept(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) riderPickup(w http.ResponseWriter, r *http.Request) {
 	h.riderAct(w, r, h.svc.pickupDelivery)
+}
+
+// riderAvailable — GET /delivery/tasks/available: the OFFERED (broadcast) pool the
+// rider's accept-popup polls.
+func (h *handler) riderAvailable(w http.ResponseWriter, r *http.Request) {
+	actor, _ := operatorActor(r)
+	ds, err := h.svc.offeredForRider(r.Context(), actor)
+	if err != nil {
+		httpx.Error(w, r, toHTTPErr(err))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, ds)
+}
+
+// riderClaim — POST /delivery/tasks/{id}/claim: first-accept-wins (409 if taken).
+func (h *handler) riderClaim(w http.ResponseWriter, r *http.Request) {
+	h.riderAct(w, r, h.svc.claimOfferedDelivery)
+}
+
+// riderReject — POST /delivery/tasks/{id}/reject: decline a claimed task, re-broadcast.
+func (h *handler) riderReject(w http.ResponseWriter, r *http.Request) {
+	h.riderAct(w, r, h.svc.rejectOfferedDelivery)
 }
 
 func (h *handler) riderAct(w http.ResponseWriter, r *http.Request, fn func(context.Context, auth.Actor, string) (*delivery, error)) {
