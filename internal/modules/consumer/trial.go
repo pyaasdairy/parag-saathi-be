@@ -55,11 +55,12 @@ var istZone = time.FixedZone("IST", 5*3600+1800)
 func trialDay(t time.Time) string { return t.In(istZone).Format("2006-01-02") }
 
 // isTrialProduct reports whether a product id is covered by the 2-paid/2-free
-// welcome trial. The launch funnel subscribes PYAAS Gold (gold-500ml) while the
-// original trial ran on Taaza — both zero their free days, so the app's "first
-// days on us" promise is honoured whichever SKU the funnel starts.
+// welcome trial. THE OFFER APPLIES ONLY TO THE FULL-CREAM SKU the funnel
+// subscribes (PYAAS Gold, gold-*): a Taaza/Shakti/Chai subscription neither
+// consumes trial days nor earns the free ones — the member stays a 2+2
+// candidate until they complete the paid days on the full cream itself.
 func isTrialProduct(productID string) bool {
-	return strings.HasPrefix(productID, "taaza-") || strings.HasPrefix(productID, "gold-")
+	return strings.HasPrefix(productID, "gold-")
 }
 
 // ── Documents + wire shapes ─────────────────────────────────────────────────

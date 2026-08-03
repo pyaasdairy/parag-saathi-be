@@ -39,7 +39,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	for _, it := range o.Items {
 		items = append(items, deliveryItem{Name: it.Name, Qty: it.Qty})
 		if isTrialProduct(it.ProductID) {
-			trialEligible = true // 2+2 welcome trial (Taaza or Gold launch SKUs)
+			trialEligible = true // 2+2 welcome trial — full-cream (gold-*) only
 		}
 	}
 	payMode := "COD"
@@ -560,8 +560,10 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	}
 	// Belt + braces with cancelOrder's task-failing: refuse to deliver a task
 	// whose parent order was cancelled (a stale task must never debit money or
-	// resurrect a cancelled order to delivered).
-	if o, _ := s.repo.findOrderAnyUser(ctx, d.OrderID); o != nil && o.Status == "cancelled" {
+	// resurrect a cancelled order to delivered). The parent is kept for the
+	// trial gate below (trial pricing applies only to SUBSCRIPTION deliveries).
+	parent, _ := s.repo.findOrderAnyUser(ctx, d.OrderID)
+	if parent != nil && parent.Status == "cancelled" {
 		_, _ = s.repo.updateDelivery(ctx, d.ID,
 			bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: "Order cancelled by the customer"}, {Key: "updated_at", Value: time.Now().UTC()}},
 			bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
@@ -585,13 +587,15 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 			return nil, errInternal("bad consumer id on delivery")
 		}
 		amount := d.Amount
-		// PYAAS Taaza subscription deliveries (the morning run) flow through the
+		// FULL-CREAM SUBSCRIPTION deliveries (the morning run) flow through the
 		// "2 PAID then 2 FREE" welcome trial: the first 2 delivered days pay full,
 		// the next 2 are on us (effective 0), then normal. The window counts
 		// DELIVERED days (dated in IST) and is idempotent by this delivered-day key,
-		// so a settle re-run never double-advances it. Only Taaza qualifies
-		// (TrialEligible), so a gold/shakti/chai subscription never gets free days.
-		if d.Lane == "morning" && d.TrialEligible {
+		// so a settle re-run never double-advances it. Gates: the SKU must be the
+		// offer's full cream (TrialEligible ← isTrialProduct, gold-*) AND the
+		// parent order must be SUBSCRIPTION-linked — a one-time morning order of
+		// the same milk never consumes or earns trial days.
+		if d.Lane == "morning" && d.TrialEligible && parent != nil && parent.SubscriptionID != "" {
 			day := trialDay(time.Now())
 			eff, _, terr := s.trialChargeFor(ctx, cid, trialDeliveryKey(cid, day), d.Amount)
 			if terr != nil {
