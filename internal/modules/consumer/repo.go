@@ -21,10 +21,11 @@ type repository struct {
 	walletTxns *mongo.Collection
 	consents   *mongo.Collection
 	payOrders  *mongo.Collection
-	mandates   *mongo.Collection
-	trials     *mongo.Collection
-	orders     *mongo.Collection
-	deliveries *mongo.Collection
+	mandates      *mongo.Collection
+	subscriptions *mongo.Collection
+	trials        *mongo.Collection
+	orders        *mongo.Collection
+	deliveries    *mongo.Collection
 	catalog    *mongo.Collection
 	storeZones *mongo.Collection
 	waitlist   *mongo.Collection
@@ -47,6 +48,7 @@ func newRepository(db *mongo.Database) *repository {
 		consents:        db.Collection(collConsents),
 		payOrders:       db.Collection(collPayOrders),
 		mandates:        db.Collection(collMandates),
+		subscriptions:   db.Collection(collSubscriptions),
 		trials:          db.Collection(collConsumerTrials),
 		orders:          db.Collection(collOrders),
 		deliveries:      db.Collection(collDeliveries),
@@ -105,6 +107,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	}
 	if err := r.ensureMandateIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer mandate indexes: %w", err)
+	}
+	if err := r.ensureSubscriptionIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer subscription indexes: %w", err)
 	}
 	if err := r.ensureTrialIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer trial indexes: %w", err)

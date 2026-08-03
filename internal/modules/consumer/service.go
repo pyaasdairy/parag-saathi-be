@@ -648,7 +648,8 @@ func (s *service) createAddress(ctx context.Context, consumerID primitive.Object
 	a := &address{
 		ID: primitive.NewObjectID(), ConsumerID: consumerID,
 		Label: in.Label, Line1: in.Line1, Line2: in.Line2, City: in.City, Pincode: in.Pincode,
-		IsDefault: in.IsDefault, Lat: in.Lat, Lng: in.Lng, CreatedAt: now,
+		IsDefault: in.IsDefault, Lat: in.Lat, Lng: in.Lng,
+		Preferences: in.preferencesOf(), CreatedAt: now,
 	}
 	// Serving-store resolution seam (§6): resolve address geo → store polygon.
 	// Kept as a pilot stub — the store registry lands in Phase 2.

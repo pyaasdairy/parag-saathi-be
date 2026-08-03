@@ -333,6 +333,43 @@ type addressInput struct {
 	IsDefault bool     `json:"is_default"`
 	Lat       *float64 `json:"lat"`
 	Lng       *float64 `json:"lng"`
+	// Doorstep capture extras (the app's AddressCapture) — persisted onto the
+	// address Preferences map so the DB holds the COMPLETE delivery profile the
+	// rider needs (who receives, bell/call, instructions, door photo, pin words).
+	ReceiverName string `json:"receiver_name"`
+	GeoLabel     string `json:"geo_label"`
+	RingBell     *bool  `json:"ring_bell"`
+	CallBefore   *bool  `json:"call_before"`
+	Instructions string `json:"instructions"`
+	DoorPhotoURI string `json:"door_photo_uri"`
+}
+
+// preferencesOf packs the doorstep extras into the address Preferences map
+// (only the fields actually provided — an empty capture stores nothing).
+func (in addressInput) preferencesOf() map[string]any {
+	p := map[string]any{}
+	if in.ReceiverName != "" {
+		p["receiver_name"] = in.ReceiverName
+	}
+	if in.GeoLabel != "" {
+		p["geo_label"] = in.GeoLabel
+	}
+	if in.RingBell != nil {
+		p["ring_bell"] = *in.RingBell
+	}
+	if in.CallBefore != nil {
+		p["call_before"] = *in.CallBefore
+	}
+	if in.Instructions != "" {
+		p["instructions"] = in.Instructions
+	}
+	if in.DoorPhotoURI != "" {
+		p["door_photo_uri"] = in.DoorPhotoURI
+	}
+	if len(p) == 0 {
+		return nil
+	}
+	return p
 }
 
 func (h *handler) listAddresses(w http.ResponseWriter, r *http.Request) {

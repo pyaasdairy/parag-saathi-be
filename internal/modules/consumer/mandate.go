@@ -47,8 +47,9 @@ const collMandates = "consumer_mandates"
 
 // mandatePlans maps a subscription plan to its charge cadence.
 var mandatePlans = map[string]time.Duration{
-	"daily":  24 * time.Hour,
-	"weekly": 7 * 24 * time.Hour,
+	"daily":     24 * time.Hour,
+	"alternate": 48 * time.Hour, // every 2nd day — matches the FE cadence
+	"weekly":    7 * 24 * time.Hour,
 }
 
 // mandateTransitions is the mandate state machine: current status → the set of
@@ -306,7 +307,7 @@ const (
 
 func validateMandate(plan string, amount, maxAmount float64) *apiError {
 	if _, ok := mandatePlans[plan]; !ok {
-		return errBadRequest("plan must be one of: daily, weekly")
+		return errBadRequest("plan must be one of: daily, alternate, weekly")
 	}
 	if amount < mandateAmountMin || amount > mandateAmountMax {
 		return errBadRequest("amount must be between ₹1 and ₹5,000")

@@ -39,6 +39,13 @@ func Register(r chi.Router, d *deps.Deps) {
 	// Best-effort: runs in the background, never blocks or fails boot.
 	go resignQRTokens(d, log)
 
+	// Server-owned subscription scheduler (subscriptions.go): every 15 min,
+	// turn today's DUE subscriptions (daily/alternate/weekly, minus vacations)
+	// into morning-lane orders + store delivery tasks — so the store manager's
+	// queue fills even when no consumer opens the app. Exactly-once per
+	// (subscription, IST day); money still settles on delivery.
+	go svc.subscriptionOrderWorker(context.Background())
+
 	r.Route("/consumer", func(cr chi.Router) {
 		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
 		// operator envelope, on unknown consumer routes.
@@ -119,6 +126,19 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/mandate/{id}/resume", h.mandateAction("resume"))
 			pr.Post("/mandate/{id}/cancel", h.mandateAction("cancel"))
 			pr.Post("/mandate/{id}/execute", h.executeMandate) // dev-only manual tick
+
+			// Server-owned subscriptions (subscriptions.go) — the backend twin of
+			// the app's local subscription rows. The worker turns these into the
+			// daily/alternate/weekly MORNING orders (store-routed via the default
+			// saved address), so delivery no longer depends on the app being open.
+			pr.Post("/subscriptions", h.createSubscription)
+			pr.Get("/subscriptions", h.listSubscriptions)
+			pr.Get("/subscriptions/me", h.listSubscriptions)
+			pr.Patch("/subscriptions/{id}", h.patchSubscription)
+			pr.Post("/subscriptions/{id}/pause", h.subscriptionAction("pause"))
+			pr.Post("/subscriptions/{id}/resume", h.subscriptionAction("resume"))
+			pr.Post("/subscriptions/{id}/cancel", h.subscriptionAction("cancel"))
+			pr.Post("/subscriptions/sweep", h.sweepSubscriptions) // dev-only manual tick
 
 			// Subscription welcome trial ("3 PAID then 3 FREE"): the caller's trial
 			// standing (phase + paid/free days remaining). The window is spent on

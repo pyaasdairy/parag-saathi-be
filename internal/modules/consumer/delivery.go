@@ -170,9 +170,15 @@ func (r *repository) findDeliveryByID(ctx context.Context, id string) (*delivery
 
 // recentFulfillableOrders returns still-open orders (for backfilling any that
 // are missing a delivery task — e.g. placed before a Parag Store existed).
+// Subscription-scheduled orders are EXCLUDED: their delivery task is created by
+// the subscription worker at the midnight lock, never earlier — the backfill
+// must not leak tomorrow's still-modifiable upcoming order into the store queue.
 func (r *repository) recentFulfillableOrders(ctx context.Context) ([]order, error) {
 	cur, err := r.orders.Find(ctx,
-		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"placed", "confirmed", "preparing", "assigned"}}}}},
+		bson.D{
+			{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"placed", "confirmed", "preparing", "assigned"}}}},
+			{Key: "subscription_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+		},
 		options.Find().SetSort(bson.D{{Key: "placed_at", Value: -1}}).SetLimit(300))
 	if err != nil {
 		return nil, errInternal("orders scan failed")

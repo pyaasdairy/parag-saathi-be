@@ -105,6 +105,16 @@ type order struct {
 	Geo          *geoPoint `bson:"geo,omitempty"           json:"-"`
 	CreatedAt    time.Time `bson:"created_at"              json:"-"`
 	UpdatedAt    time.Time `bson:"updated_at"              json:"-"`
+	// Subscription linkage (worker-created morning orders, subscriptions.go).
+	// ScheduledFor is the IST day it delivers — surfaced as delivery_date (the
+	// FE Order field), so tomorrow's order shows as UPCOMING in the app from
+	// the moment it is scheduled. SubLockedAt is stamped at the midnight lock:
+	// before it, the order is a modifiable preview (subscription edits
+	// reconcile it, the shopper may cancel it); after it, the delivery task
+	// exists and the store owns it.
+	SubscriptionID string `bson:"subscription_id,omitempty" json:"-"`
+	ScheduledFor   string `bson:"scheduled_for,omitempty"   json:"delivery_date,omitempty"`
+	SubLockedAt    string `bson:"sub_locked_at,omitempty"   json:"-"`
 }
 
 func newOrderID() string {
