@@ -398,21 +398,46 @@ func (s *service) topup(ctx context.Context, consumerID primitive.ObjectID, amou
 	return walletToView(wl), nil
 }
 
+// promoCampaignPrefixes is the server-side campaign registry: the ONLY promo
+// refs a PRODUCTION (non-dev) deployment will credit, prefix-matched and
+// amount-capped. Everything else remains dev-only (OTP_DEV_MODE).
+var promoCampaignPrefixes = map[string]float64{
+	"trial_2plus2:": 200, // welcome funnel: 2 free days of the launch SKU (per-phone ref)
+	"starter7:":     200, // ₹100-unlock starter grant (legacy ref, same funnel)
+}
+
+// promoCampaignCap returns the amount cap for a whitelisted campaign ref.
+func promoCampaignCap(ref string) (float64, bool) {
+	for prefix, limit := range promoCampaignPrefixes {
+		if strings.HasPrefix(ref, prefix) {
+			return limit, true
+		}
+	}
+	return 0, false
+}
+
 // promoCredit credits the REWARDS bucket only (POST /wallet/promo) — the seam
 // for marketing grants like the free-pack "2 mornings on us" funnel. Same
 // exactly-once gate as creditTopup (unique (consumer, ref, type) ledger row
-// inserted FIRST), so a re-claimed pack can never double-credit. Dev-gated like
-// /wallet/topup until a server-side campaign registry decides eligibility.
+// inserted FIRST), so a re-claimed pack can never double-credit. In production
+// only the campaign-registry refs above are allowed; the rest stay dev-gated.
 func (s *service) promoCredit(ctx context.Context, consumerID primitive.ObjectID, amount float64, ref, remark string) (walletView, error) {
-	if !s.deps.Cfg.OTPDevMode {
-		return walletView{}, errForbidden("not available")
-	}
 	amount = round2(amount)
 	if amount <= 0 || amount > 5000 {
 		return walletView{}, errBadRequest("promo amount must be between 1 and 5000")
 	}
 	if ref == "" {
 		return walletView{}, errBadRequest("a promo reference (ref) is required")
+	}
+	// Production gate: only WHITELISTED campaign refs may credit (prefix-matched
+	// + amount-capped); anything else stays dev-only. The unique (consumer, ref,
+	// type) ledger gate below keeps each campaign grant exactly-once per account,
+	// so a replayed/forged duplicate ref can never double-credit.
+	if !s.deps.Cfg.OTPDevMode {
+		limit, ok := promoCampaignCap(ref)
+		if !ok || amount > limit {
+			return walletView{}, errForbidden("not available")
+		}
 	}
 	now := time.Now().UTC()
 	row := walletTxn{

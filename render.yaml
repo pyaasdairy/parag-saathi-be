@@ -6,6 +6,10 @@ services:
   - type: web
     name: saathi-backend
     runtime: docker
+    # Pin the deploy branch so a redeploy can't silently fall back to a branch
+    # without the consumer order→dispatch feature (OFFERED broadcast, claim,
+    # reject, /delivery/tasks/available). Keep in sync with the active release.
+    branch: release/26.07.02
     plan: free # upgrade to starter for always-on (free spins down when idle)
     dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz
@@ -35,11 +39,19 @@ services:
       # / traceability reads from the PYAAS app are allowed instead of 403 FORBIDDEN.
       - key: CONSUMER_APP_KEY
         value: "parag_consumer_dev_key_v1"
-      # Razorpay wallet top-ups — OPTIONAL. While OTP_DEV_MODE=true the offline
-      # dev seam handles top-ups for testing; set these for real payments later.
+      # Razorpay wallet top-ups — set in the Render dashboard (kept out of git).
+      # While OTP_DEV_MODE=true the offline dev seam handles top-ups for testing;
+      # with real keys set the consumer app runs the live Razorpay checkout.
       - key: RAZORPAY_KEY_ID
         sync: false
       - key: RAZORPAY_KEY_SECRET
+        sync: false
+      # SMS OTP (MSG91) — set in the Render dashboard. Required for real SMS
+      # login once OTP_DEV_MODE=false; while OTP_DEV_MODE=true the dev seam
+      # handles OTP so these may stay unset for emulator testing.
+      - key: MSG91_AUTHKEY
+        sync: false
+      - key: MSG91_TEMPLATE_ID
         sync: false
       # Testing conveniences (flip OFF for production):
       - key: OTP_DEV_MODE

@@ -37,8 +37,8 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	trialEligible := false
 	for _, it := range o.Items {
 		items = append(items, deliveryItem{Name: it.Name, Qty: it.Qty})
-		if isTaazaProduct(it.ProductID) {
-			trialEligible = true // 2+2 welcome trial applies to PYAAS Taaza only
+		if isTrialProduct(it.ProductID) {
+			trialEligible = true // 2+2 welcome trial (Taaza or Gold launch SKUs)
 		}
 	}
 	payMode := "COD"

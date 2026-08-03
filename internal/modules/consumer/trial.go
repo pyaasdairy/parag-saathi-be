@@ -54,10 +54,12 @@ var istZone = time.FixedZone("IST", 5*3600+1800)
 // morning = exactly one trial day, regardless of the 05:30-IST UTC-midnight seam.
 func trialDay(t time.Time) string { return t.In(istZone).Format("2006-01-02") }
 
-// isTaazaProduct reports whether a product id is a PYAAS Taaza SKU — the only
-// product the 2-paid/2-free welcome trial applies to.
-func isTaazaProduct(productID string) bool {
-	return strings.HasPrefix(productID, "taaza-")
+// isTrialProduct reports whether a product id is covered by the 2-paid/2-free
+// welcome trial. The launch funnel subscribes PYAAS Gold (gold-500ml) while the
+// original trial ran on Taaza — both zero their free days, so the app's "first
+// days on us" promise is honoured whichever SKU the funnel starts.
+func isTrialProduct(productID string) bool {
+	return strings.HasPrefix(productID, "taaza-") || strings.HasPrefix(productID, "gold-")
 }
 
 // ── Documents + wire shapes ─────────────────────────────────────────────────
