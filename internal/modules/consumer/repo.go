@@ -26,6 +26,7 @@ type repository struct {
 	trials        *mongo.Collection
 	orders        *mongo.Collection
 	deliveries    *mongo.Collection
+	riderPresence *mongo.Collection
 	catalog    *mongo.Collection
 	storeZones *mongo.Collection
 	waitlist   *mongo.Collection
@@ -52,6 +53,7 @@ func newRepository(db *mongo.Database) *repository {
 		trials:          db.Collection(collConsumerTrials),
 		orders:          db.Collection(collOrders),
 		deliveries:      db.Collection(collDeliveries),
+		riderPresence:   db.Collection(collRiderPresence),
 		catalog:         db.Collection(collCatalog),
 		storeZones:      db.Collection(collStoreZones),
 		waitlist:        db.Collection(collConsumerWaitlist),

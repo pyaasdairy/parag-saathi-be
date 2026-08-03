@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -140,6 +141,12 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 		active, done := 0, 0
 		origin := storeGeo // position fallback: idle riders stage at the store
 		lastAt := ""
+		// Duty presence (the fix the rider's offer poll reports every ~8 s) is
+		// the truest live position — task pings below only win if fresher.
+		if g, at, ok := s.repo.findRiderPresence(ctx, rid); ok {
+			lastAt = at
+			origin = g
+		}
 		for _, d := range all {
 			if d.RiderPartyID != rid {
 				continue
@@ -255,30 +262,43 @@ const offerPingFreshness = 10 * time.Minute
 // fenced to the 15-km broadcast radius (riderTiersKm[0]): the accept-request
 // only reaches riders within 15 km of the drop; the first to claim wins
 // (claimDelivery is atomic, so exactly one rider can ever take it).
-func (s *service) offeredForRider(ctx context.Context, actor auth.Actor) ([]delivery, error) {
+func (s *service) offeredForRider(ctx context.Context, actor auth.Actor, live *geoPt) ([]delivery, error) {
 	stores, err := s.repo.storesForRider(ctx, actor.PartyID)
 	if err != nil {
 		return nil, err
+	}
+	// The rider app sends its CURRENT fix with every offer poll — the position
+	// at the very moment the offer would be shown. Record it as the rider's
+	// duty presence so the manager's assign ranking sees it too.
+	if live != nil {
+		s.repo.upsertRiderPresence(ctx, actor.PartyID, *live, time.Now())
 	}
 	offered, err := s.repo.listOfferedForStores(ctx, stores, actor.PartyID)
 	if err != nil {
 		return nil, err
 	}
-	// Rider origin = their freshest GPS ping across their own tasks (the live
-	// trail) — but ONLY if it is FRESH. A stale/stuck ping (older than the
-	// freshness window) is discarded: it may be yesterday's position, so it must
-	// never include OR exclude a rider from an offer. No fresh ping → the rider
-	// stages AT their store (the duty station), the same positioning rule the
-	// manager's assign sheet uses.
+	// Rider origin, best first: (1) the live fix on THIS poll; (2) their last
+	// duty presence, if FRESH; (3) the freshest FRESH GPS ping across their own
+	// tasks. A stale/stuck fix (older than the freshness window) is discarded —
+	// it may be yesterday's position, so it must never include OR exclude a
+	// rider from an offer. Nothing fresh → the rider stages AT their store (the
+	// duty station), the same positioning rule the manager's assign sheet uses.
 	cutoff := time.Now().UTC().Add(-offerPingFreshness).Format(time.RFC3339)
-	mine, _ := s.repo.listDeliveriesByRider(ctx, actor.PartyID)
-	var origin *geoPt
-	lastAt := ""
-	for i := range mine {
-		d := &mine[i]
-		if d.LastKnownGeo != nil && d.LastLocationAt > lastAt && d.LastLocationAt >= cutoff {
-			lastAt = d.LastLocationAt
-			origin = d.LastKnownGeo
+	origin := live
+	if origin == nil {
+		if g, at, ok := s.repo.findRiderPresence(ctx, actor.PartyID); ok && at >= cutoff {
+			origin = &g
+		}
+	}
+	if origin == nil {
+		mine, _ := s.repo.listDeliveriesByRider(ctx, actor.PartyID)
+		lastAt := ""
+		for i := range mine {
+			d := &mine[i]
+			if d.LastKnownGeo != nil && d.LastLocationAt > lastAt && d.LastLocationAt >= cutoff {
+				lastAt = d.LastLocationAt
+				origin = d.LastKnownGeo
+			}
 		}
 	}
 	storeGeos := map[string]*geoPt{}
@@ -614,10 +634,21 @@ func (h *handler) riderPickup(w http.ResponseWriter, r *http.Request) {
 }
 
 // riderAvailable — GET /delivery/tasks/available: the OFFERED (broadcast) pool the
-// rider's accept-popup polls.
+// rider's accept-popup polls. The app sends its current GPS as ?lat=&lng= so the
+// 15-km fence judges the rider's position AT THIS MOMENT (and the fix is stored
+// as their duty presence for the manager's ranking).
 func (h *handler) riderAvailable(w http.ResponseWriter, r *http.Request) {
 	actor, _ := operatorActor(r)
-	ds, err := h.svc.offeredForRider(r.Context(), actor)
+	var live *geoPt
+	if latS, lngS := r.URL.Query().Get("lat"), r.URL.Query().Get("lng"); latS != "" && lngS != "" {
+		lat, e1 := strconv.ParseFloat(latS, 64)
+		lng, e2 := strconv.ParseFloat(lngS, 64)
+		// (0,0) is the null island a failed device fix reports — never a rider.
+		if e1 == nil && e2 == nil && !(lat == 0 && lng == 0) {
+			live = &geoPt{Lat: lat, Lng: lng}
+		}
+	}
+	ds, err := h.svc.offeredForRider(r.Context(), actor, live)
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return

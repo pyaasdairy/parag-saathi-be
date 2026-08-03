@@ -29,6 +29,12 @@ import (
 
 const collDeliveries = "consumer_deliveries"
 
+// collRiderPresence — the rider's LIVE duty position: upserted from the fix the
+// rider app sends with every offer poll (~8 s while the app is open), so the
+// 15-km offer fence and the manager's assign ranking judge the rider where they
+// are RIGHT NOW, not where their last delivery ended.
+const collRiderPresence = "consumer_rider_presence"
+
 // Distance tiers (km) a store manager escalates through when picking riders.
 var riderTiersKm = []float64{15, 30, 60}
 
@@ -143,7 +149,39 @@ func (r *repository) ensureDeliveryIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "rider_party_id", Value: 1}}},
 		{Keys: bson.D{{Key: "order_id", Value: 1}}, Options: options.Index().SetUnique(true)},
 	})
+	if err != nil {
+		return err
+	}
+	_, err = r.riderPresence.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "party_id", Value: 1}}, Options: options.Index().SetUnique(true),
+	})
 	return err
+}
+
+// upsertRiderPresence records the rider's live duty position (one row per rider).
+func (r *repository) upsertRiderPresence(ctx context.Context, partyID string, g geoPt, at time.Time) {
+	upsert := true
+	_, _ = r.riderPresence.UpdateOne(ctx,
+		bson.D{{Key: "party_id", Value: partyID}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "lat", Value: g.Lat},
+			{Key: "lng", Value: g.Lng},
+			{Key: "at", Value: at.UTC().Format(time.RFC3339)},
+		}}},
+		&options.UpdateOptions{Upsert: &upsert})
+}
+
+// findRiderPresence returns the rider's last duty ping (position + RFC3339 time).
+func (r *repository) findRiderPresence(ctx context.Context, partyID string) (geoPt, string, bool) {
+	var doc struct {
+		Lat float64 `bson:"lat"`
+		Lng float64 `bson:"lng"`
+		At  string  `bson:"at"`
+	}
+	if err := r.riderPresence.FindOne(ctx, bson.D{{Key: "party_id", Value: partyID}}).Decode(&doc); err != nil {
+		return geoPt{}, "", false
+	}
+	return geoPt{Lat: doc.Lat, Lng: doc.Lng}, doc.At, true
 }
 
 func (r *repository) insertDelivery(ctx context.Context, d *delivery) error {
