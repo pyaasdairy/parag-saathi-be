@@ -245,13 +245,55 @@ func (s *service) riderDeliveries(ctx context.Context, actor auth.Actor) ([]deli
 }
 
 // offeredForRider is the rider's "available orders" feed — OFFERED (broadcast)
-// instant tasks at any store they serve, minus ones they already declined.
+// instant tasks at any store they serve, minus ones they already declined,
+// fenced to the 15-km broadcast radius (riderTiersKm[0]): the accept-request
+// only reaches riders within 15 km of the drop; the first to claim wins
+// (claimDelivery is atomic, so exactly one rider can ever take it).
 func (s *service) offeredForRider(ctx context.Context, actor auth.Actor) ([]delivery, error) {
 	stores, err := s.repo.storesForRider(ctx, actor.PartyID)
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.listOfferedForStores(ctx, stores, actor.PartyID)
+	offered, err := s.repo.listOfferedForStores(ctx, stores, actor.PartyID)
+	if err != nil {
+		return nil, err
+	}
+	// Rider origin = their freshest GPS ping across their own tasks (the live
+	// trail); a rider who hasn't moved yet stages AT their store — the same
+	// positioning rule the manager's assign sheet uses.
+	mine, _ := s.repo.listDeliveriesByRider(ctx, actor.PartyID)
+	var origin *geoPt
+	lastAt := ""
+	for i := range mine {
+		d := &mine[i]
+		if d.LastKnownGeo != nil && d.LastLocationAt > lastAt {
+			lastAt = d.LastLocationAt
+			origin = d.LastKnownGeo
+		}
+	}
+	storeGeos := map[string]*geoPt{}
+	out := make([]delivery, 0, len(offered))
+	for i := range offered {
+		d := &offered[i]
+		from := origin
+		if from == nil {
+			g, seen := storeGeos[d.StoreID]
+			if !seen {
+				if sg, ok := s.repo.storeGeo(ctx, d.StoreID); ok {
+					cp := sg
+					g = &cp
+				}
+				storeGeos[d.StoreID] = g
+			}
+			from = g
+		}
+		// Unknown geo on both sides → still offered: an order must never be
+		// stranded just because we cannot rank the distance.
+		if from == nil || haversineKm(*from, d.Geo) <= riderTiersKm[0] {
+			out = append(out, *d)
+		}
+	}
+	return out, nil
 }
 
 // claimOfferedDelivery is the FIRST-ACCEPT-WINS path: the first rider to claim an
