@@ -244,6 +244,12 @@ func (s *service) riderDeliveries(ctx context.Context, actor auth.Actor) ([]deli
 	return all, nil
 }
 
+// offerPingFreshness — how recent a rider's GPS ping must be to count as their
+// LIVE position for the 15-km offer fence. Riders push location every ~20 s
+// while on a delivery, so 10 minutes comfortably spans a run; anything older is
+// a stale/stuck fix and falls back to the store-staging rule.
+const offerPingFreshness = 10 * time.Minute
+
 // offeredForRider is the rider's "available orders" feed — OFFERED (broadcast)
 // instant tasks at any store they serve, minus ones they already declined,
 // fenced to the 15-km broadcast radius (riderTiersKm[0]): the accept-request
@@ -259,14 +265,18 @@ func (s *service) offeredForRider(ctx context.Context, actor auth.Actor) ([]deli
 		return nil, err
 	}
 	// Rider origin = their freshest GPS ping across their own tasks (the live
-	// trail); a rider who hasn't moved yet stages AT their store — the same
-	// positioning rule the manager's assign sheet uses.
+	// trail) — but ONLY if it is FRESH. A stale/stuck ping (older than the
+	// freshness window) is discarded: it may be yesterday's position, so it must
+	// never include OR exclude a rider from an offer. No fresh ping → the rider
+	// stages AT their store (the duty station), the same positioning rule the
+	// manager's assign sheet uses.
+	cutoff := time.Now().UTC().Add(-offerPingFreshness).Format(time.RFC3339)
 	mine, _ := s.repo.listDeliveriesByRider(ctx, actor.PartyID)
 	var origin *geoPt
 	lastAt := ""
 	for i := range mine {
 		d := &mine[i]
-		if d.LastKnownGeo != nil && d.LastLocationAt > lastAt {
+		if d.LastKnownGeo != nil && d.LastLocationAt > lastAt && d.LastLocationAt >= cutoff {
 			lastAt = d.LastLocationAt
 			origin = d.LastKnownGeo
 		}
