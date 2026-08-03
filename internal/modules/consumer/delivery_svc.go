@@ -230,6 +230,144 @@ func (s *service) assignRider(ctx context.Context, actor auth.Actor, storeID, de
 	)
 }
 
+// ── Store manager order surgery (damage at handover) ────────────────────────
+
+// storeCancelDelivery — the manager cancels an order BEFORE it is delivered
+// (e.g. the whole crate got damaged). The task fails, the parent order flips
+// cancelled — and since money only ever moves ON delivery, nothing was charged
+// and nothing needs refunding. A DELIVERED order can never be cancelled.
+func (s *service) storeCancelDelivery(ctx context.Context, actor auth.Actor, storeID, deliveryID, reason string) (*delivery, error) {
+	if err := s.assertStore(ctx, actor, storeID); err != nil {
+		return nil, err
+	}
+	d, err := s.repo.findDeliveryByID(ctx, deliveryID)
+	if err != nil {
+		return nil, err
+	}
+	if d.StoreID != storeID {
+		return nil, errForbidden("delivery belongs to another store")
+	}
+	if d.Status == "DELIVERED" {
+		return nil, errConflict("ALREADY_DELIVERED", "a delivered order can no longer be cancelled")
+	}
+	if reason == "" {
+		reason = "Cancelled by the store"
+	}
+	upd, err := s.repo.updateDelivery(ctx, deliveryID,
+		bson.D{
+			{Key: "status", Value: "FAILED"},
+			{Key: "failure_reason", Value: reason},
+			{Key: "updated_at", Value: time.Now().UTC()},
+		},
+		bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED"}}}}},
+	)
+	if err != nil {
+		return nil, err
+	}
+	// The consumer sees the cancellation immediately (their Orders screen).
+	_, _ = s.repo.orders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: d.OrderID}, {Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"delivered", "cancelled"}}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "cancelled"}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+	return upd, nil
+}
+
+// itemAdjust is one requested line change — the ABSOLUTE new quantity,
+// reduction only (a store can shrink a bill, never inflate one).
+type itemAdjust struct {
+	Name string `json:"name"`
+	Qty  int    `json:"qty"`
+}
+
+// storeAdjustDelivery — the manager reduces item quantities before handover
+// (3 packets ordered, 1 damaged → deliver 2; qty 0 removes the line). The
+// ORDER and its TASK are re-billed server-side (subtotal, delivery fee and
+// total recomputed under the same rules as order creation), and because the
+// wallet debit happens AT DELIVERY from the task's amount, the customer pays
+// exactly for what is actually delivered. COD collects the updated amount;
+// the morning Taaza trial maths also read the updated amount — no flow forks.
+func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, storeID, deliveryID string, changes []itemAdjust) (*delivery, error) {
+	if err := s.assertStore(ctx, actor, storeID); err != nil {
+		return nil, err
+	}
+	if len(changes) == 0 {
+		return nil, errBadRequest("no item changes given")
+	}
+	d, err := s.repo.findDeliveryByID(ctx, deliveryID)
+	if err != nil {
+		return nil, err
+	}
+	if d.StoreID != storeID {
+		return nil, errForbidden("delivery belongs to another store")
+	}
+	if d.Status == "DELIVERED" || d.Status == "FAILED" {
+		return nil, errConflict("NOT_ADJUSTABLE", "only an open order can be adjusted")
+	}
+	o, err := s.repo.findOrderAnyUser(ctx, d.OrderID)
+	if err != nil {
+		return nil, err
+	}
+	if o.Status == "delivered" || o.Status == "cancelled" {
+		return nil, errConflict("NOT_ADJUSTABLE", "only an open order can be adjusted")
+	}
+	want := map[string]int{}
+	for _, c := range changes {
+		want[c.Name] = c.Qty
+	}
+	newItems := make([]orderItem, 0, len(o.Items))
+	changed := false
+	for _, it := range o.Items {
+		q, ok := want[it.Name]
+		if !ok {
+			newItems = append(newItems, it)
+			continue
+		}
+		if q < 0 || q > it.Qty {
+			return nil, errUnprocessable("REDUCE_ONLY", "an adjustment can only reduce a quantity, never raise it")
+		}
+		if q != it.Qty {
+			changed = true
+		}
+		if q == 0 {
+			continue // damaged out entirely — the line is removed
+		}
+		it.Qty = q
+		newItems = append(newItems, it)
+	}
+	if !changed {
+		return d, nil // idempotent no-op (absolute quantities)
+	}
+	if len(newItems) == 0 {
+		return nil, errUnprocessable("USE_CANCEL", "removing every item cancels the order — use cancel instead")
+	}
+	var subtotal float64
+	for _, it := range newItems {
+		subtotal += it.Price * float64(it.Qty)
+	}
+	subtotal = round2(subtotal)
+	fee := deliveryFeeFor(subtotal)
+	total := round2(subtotal + fee + o.MonsoonFee)
+	now := time.Now().UTC()
+	if _, uerr := s.repo.orders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: o.OrderID}, {Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"delivered", "cancelled"}}}}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "order_items", Value: newItems},
+			{Key: "subtotal", Value: subtotal},
+			{Key: "delivery_fee", Value: fee},
+			{Key: "total", Value: total},
+			{Key: "updated_at", Value: now},
+		}}}); uerr != nil {
+		return nil, errInternal("order adjust failed")
+	}
+	dItems := make([]deliveryItem, 0, len(newItems))
+	for _, it := range newItems {
+		dItems = append(dItems, deliveryItem{Name: it.Name, Qty: it.Qty})
+	}
+	return s.repo.updateDelivery(ctx, deliveryID,
+		bson.D{{Key: "items", Value: dItems}, {Key: "amount", Value: total}, {Key: "updated_at", Value: now}},
+		bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
+	)
+}
+
 func (s *service) assertStore(ctx context.Context, actor auth.Actor, storeID string) error {
 	owned, err := s.repo.storeForActor(ctx, actor.PartyID, "STORE_MANAGER")
 	if err != nil {
@@ -595,6 +733,36 @@ func (h *handler) assignRider(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = decode(r, &body)
 	d, err := h.svc.assignRider(r.Context(), actor, chi.URLParam(r, "storeId"), chi.URLParam(r, "deliveryId"), body.RiderPartyID)
+	if err != nil {
+		httpx.Error(w, r, toHTTPErr(err))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, d)
+}
+
+// storeCancelDelivery — POST /stores/{storeId}/orders/{deliveryId}/cancel.
+func (h *handler) storeCancelDelivery(w http.ResponseWriter, r *http.Request) {
+	actor, _ := operatorActor(r)
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = decode(r, &body)
+	d, err := h.svc.storeCancelDelivery(r.Context(), actor, chi.URLParam(r, "storeId"), chi.URLParam(r, "deliveryId"), body.Reason)
+	if err != nil {
+		httpx.Error(w, r, toHTTPErr(err))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, d)
+}
+
+// storeAdjustDelivery — PATCH /stores/{storeId}/orders/{deliveryId}/items.
+func (h *handler) storeAdjustDelivery(w http.ResponseWriter, r *http.Request) {
+	actor, _ := operatorActor(r)
+	var body struct {
+		Items []itemAdjust `json:"items"`
+	}
+	_ = decode(r, &body)
+	d, err := h.svc.storeAdjustDelivery(r.Context(), actor, chi.URLParam(r, "storeId"), chi.URLParam(r, "deliveryId"), body.Items)
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return

@@ -181,6 +181,11 @@ func Register(r chi.Router, d *deps.Deps) {
 				sm.Get("/stores/{storeId}/orders", h.storeOrders)
 				sm.Get("/stores/{storeId}/riders", h.storeRiders)
 				sm.Post("/stores/{storeId}/orders/{deliveryId}/assign", h.assignRider)
+				// Order surgery at handover: cancel (crate damaged) or reduce
+				// quantities (deliver 2 of 3) — the bill re-computes and the
+				// customer is charged only for what actually ships.
+				sm.Post("/stores/{storeId}/orders/{deliveryId}/cancel", h.storeCancelDelivery)
+				sm.Patch("/stores/{storeId}/orders/{deliveryId}/items", h.storeAdjustDelivery)
 				sm.Post("/stores/{storeId}/low-stock", h.lowStock)
 
 				// Consumer catalog overlay console (catalog.go): view the milk
