@@ -25,6 +25,18 @@ const (
 	maxOTPAttempts   = 5 // wrong-code attempts before a challenge is burned
 )
 
+// Google Play review login. A store reviewer signs in with this fixed number +
+// OTP from anywhere in the world (no live SMS, no IP/geo restriction) and lands
+// in a self-healing account pre-funded with wallet credit and a Lucknow
+// serviceable address — so the whole shopper→order flow can be exercised without
+// a real payment. The bypass is gated to THIS EXACT number in requestOTP /
+// verifyOTP; every other number keeps the normal OTP-over-SMS path unchanged.
+const (
+	reviewPhone       = "9999900000" // normalized 10-digit; canonical "+919999900000"
+	reviewOTP         = "123456"     // fixed code — accepted ONLY for reviewPhone
+	reviewWalletFloor = 500.0        // ₹ kept available on every review login
+)
+
 var phoneRe = regexp.MustCompile(`^[6-9]\d{9}$`)
 
 type service struct {
@@ -85,6 +97,12 @@ func (s *service) requestOTP(ctx context.Context, phone string) (string, time.Ti
 		return "", time.Time{}, errBadRequest("phone must be a 10-digit Indian mobile number")
 	}
 	now := time.Now().UTC()
+	// Google Play review number: never mint or send a code — the OTP is the fixed
+	// reviewOTP constant, verified in verifyOTP. Return success (before the MSG91
+	// call) so the app advances to the code screen; no SMS, works from any country.
+	if phone == reviewPhone {
+		return "", now.Add(s.deps.Cfg.OTPTTL), nil
+	}
 	code, err := auth.GenerateNumericOTP(otpLength)
 	if err != nil {
 		return "", time.Time{}, errInternal("otp generation failed")
@@ -123,6 +141,18 @@ func (s *service) verifyOTP(ctx context.Context, phone, code string) (*tokenPair
 	phone = normalizePhone(phone)
 	if !phoneRe.MatchString(phone) {
 		return nil, errBadRequest("phone must be a 10-digit Indian mobile number")
+	}
+	// Google Play review number: accept the fixed code with NO challenge lookup
+	// (so it never expires and needs no prior /request), then ensure the
+	// self-healing review account (wallet floor + Lucknow address) before issuing
+	// tokens. Gated to reviewPhone + reviewOTP, so no real shopper is affected.
+	if phone == reviewPhone && code == reviewOTP {
+		now := time.Now().UTC()
+		acct, err := s.ensureReviewAccount(ctx, now)
+		if err != nil {
+			return nil, err
+		}
+		return s.issueTokens(ctx, acct, now)
 	}
 	ch, err := s.repo.latestOTP(ctx, phone)
 	if err != nil {
@@ -174,6 +204,65 @@ func (s *service) verifyOTP(ctx context.Context, phone, code string) (*tokenPair
 		})
 	}
 	return s.issueTokens(ctx, acct, now)
+}
+
+// ensureReviewAccount idempotently provisions the Google Play review shopper
+// (+919999900000): an ACTIVE named account, a wallet kept topped to
+// reviewWalletFloor, and a default Lucknow serviceable address (Gomti Nagar,
+// inside the store fence). Self-healing so a reviewer can place a full order on
+// any fresh deploy, from any country, without a live payment. Called ONLY from
+// verifyOTP's review-number branch, so it can never run for a real shopper.
+func (s *service) ensureReviewAccount(ctx context.Context, now time.Time) (*account, error) {
+	const canonical = "+91" + reviewPhone
+	acct, err := s.repo.findAccountByPhone(ctx, canonical)
+	if err != nil {
+		return nil, err
+	}
+	if acct == nil {
+		name := "Play Reviewer" // pre-named so login skips the complete-profile step
+		acct = &account{
+			ID: primitive.NewObjectID(), Phone: canonical, FullName: &name,
+			Status: "ACTIVE", CreatedAt: now, UpdatedAt: now,
+		}
+		if err := s.repo.insertAccount(ctx, acct); err != nil {
+			// A concurrent verify created it — re-read and continue.
+			existing, e := s.repo.findAccountByPhone(ctx, canonical)
+			if e != nil || existing == nil {
+				return nil, err
+			}
+			acct = existing
+		}
+	}
+	// Wallet: create if missing, then top up any shortfall to the floor so every
+	// review login starts funded (a prior review run may have spent it down). We
+	// write the stored balance directly (authoritative for GET /wallet) — no
+	// ledger/ref bookkeeping, since this is a fixed test account, not real money.
+	wl, err := s.getOrCreateWallet(ctx, acct.ID)
+	if err != nil {
+		return nil, err
+	}
+	if wl.CashBalance < reviewWalletFloor {
+		if _, err := s.repo.incWallet(ctx, acct.ID, round2(reviewWalletFloor-wl.CashBalance), 0, 0, 0); err != nil {
+			return nil, err
+		}
+	}
+	// Default Lucknow address once — Gomti Nagar store centre, well inside the
+	// 5 km serviceability fence, so a reviewer never hits "coming soon".
+	addrs, err := s.repo.listAddresses(ctx, acct.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(addrs) == 0 {
+		lat, lng := 26.85, 81.00
+		if err := s.repo.insertAddress(ctx, &address{
+			ID: primitive.NewObjectID(), ConsumerID: acct.ID,
+			Label: "Home", Line1: "1, Vipin Khand, Gomti Nagar", City: "Lucknow",
+			Pincode: "226010", IsDefault: true, Lat: &lat, Lng: &lng, CreatedAt: now,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return acct, nil
 }
 
 func (s *service) issueTokens(ctx context.Context, acct *account, now time.Time) (*tokenPair, error) {
