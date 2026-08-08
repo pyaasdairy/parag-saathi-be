@@ -34,6 +34,17 @@ func Register(r chi.Router, d *deps.Deps) {
 		panic("consumer: index setup failed: " + err.Error())
 	}
 
+	// Seed the baseline catalog products (idempotent, single BulkWrite). Runs
+	// AFTER the money-gate indexes and is deliberately NON-FATAL: unlike the
+	// wallet index above, a transient DB blip while loading catalog DATA must not
+	// take the whole backend down — the catalog just serves the store overlay
+	// until the next boot re-seeds. Its own timeout, not the index budget.
+	seedCtx, seedCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if err := repo.seedConsumerProducts(seedCtx); err != nil {
+		log.Error("consumer product seed failed — serving without the baseline this boot", slog.Any("err", err))
+	}
+	seedCancel()
+
 	// Repair QR integrity tokens signed under an older QR_SIGNING_SECRET so
 	// already-printed QRs keep resolving after a secret rotation (qrresign.go).
 	// Best-effort: runs in the background, never blocks or fails boot.

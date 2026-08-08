@@ -104,9 +104,6 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	if err := r.ensureCatalogIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer catalog indexes: %w", err)
 	}
-	if err := r.seedConsumerProducts(ctx); err != nil {
-		return fmt.Errorf("consumer product seed: %w", err)
-	}
 	if err := r.ensureGeoIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer geofence indexes: %w", err)
 	}

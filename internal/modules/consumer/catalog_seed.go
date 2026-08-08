@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -95,6 +96,7 @@ func (r *repository) seedConsumerProducts(ctx context.Context) error {
 	if err := json.Unmarshal(embeddedProductsSeed, &products); err != nil {
 		return fmt.Errorf("consumer product seed parse: %w", err)
 	}
+	models := make([]mongo.WriteModel, 0, len(products))
 	for _, p := range products {
 		set := bson.D{
 			{Key: "name", Value: p.Name},
@@ -136,21 +138,26 @@ func (r *repository) seedConsumerProducts(ctx context.Context) error {
 		if p.BackImageAsset != "" {
 			set = append(set, bson.E{Key: "back_photo_url", Value: catalogImagePath(p.BackImageAsset)})
 		}
-		_, err := r.catalog.UpdateOne(ctx,
-			bson.D{{Key: "store_id", Value: globalCatalogStore}, {Key: "sku_id", Value: p.ID}},
-			bson.D{
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.D{{Key: "store_id", Value: globalCatalogStore}, {Key: "sku_id", Value: p.ID}}).
+			SetUpdate(bson.D{
 				{Key: "$set", Value: set},
 				{Key: "$setOnInsert", Value: bson.D{
 					{Key: "kind", Value: catalogKindProduct},
 					{Key: "stock_count", Value: defaultSeedStock}, // store manager edits; never re-seeded over
 					{Key: "created_at", Value: seedProductStamp},
 				}},
-			},
-			options.Update().SetUpsert(true),
-		)
-		if err != nil {
-			return fmt.Errorf("consumer product seed upsert %s: %w", p.ID, err)
-		}
+			}).
+			SetUpsert(true))
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	// ONE round-trip instead of len(products) sequential upserts — the 48-upsert
+	// loop blew the boot deadline against a remote Atlas cluster. Unordered so
+	// every upsert applies independently (one bad row can't abort the rest).
+	if _, err := r.catalog.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("consumer product seed bulk upsert: %w", err)
 	}
 	return nil
 }
