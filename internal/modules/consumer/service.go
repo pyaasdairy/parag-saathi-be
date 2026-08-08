@@ -62,19 +62,28 @@ type service struct {
 	// sms delivers the login OTP over MSG91 (env MSG91_AUTHKEY + MSG91_TEMPLATE_ID).
 	// Disabled → dev echo only (see requestOTP).
 	sms *sms.MSG91
+	// catalogServeSeeded gates whether GET /consumer/catalog emits the seeded
+	// baseline products (kind="product"). Off → response is byte-identical to the
+	// overlay-only behaviour. Env CONSUMER_CATALOG_SEED_SERVE=true flips it on.
+	catalogServeSeeded bool
+	// b2img is the download-only B2 client behind the PUBLIC catalog image proxy
+	// (catalog_images.go). Reads B2_* env; nil-safe (route 503s if unconfigured).
+	b2img *b2DownloadClient
 }
 
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 	return &service{
-		deps:         d,
-		repo:         repo,
-		log:          log,
-		consumerKey:  []byte(auth.HMACHash(d.Cfg.JWTSecret, "consumer-jwt-v1")),
-		rzpKeyID:     os.Getenv("RAZORPAY_KEY_ID"),
-		rzpKeySecret: os.Getenv("RAZORPAY_KEY_SECRET"),
-		trace:        publictrace.NewService(d, log),
-		appKey:       os.Getenv("CONSUMER_APP_KEY"),
-		sms:          sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
+		deps:               d,
+		repo:               repo,
+		log:                log,
+		consumerKey:        []byte(auth.HMACHash(d.Cfg.JWTSecret, "consumer-jwt-v1")),
+		rzpKeyID:           os.Getenv("RAZORPAY_KEY_ID"),
+		rzpKeySecret:       os.Getenv("RAZORPAY_KEY_SECRET"),
+		trace:              publictrace.NewService(d, log),
+		appKey:             os.Getenv("CONSUMER_APP_KEY"),
+		sms:                sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
+		catalogServeSeeded: os.Getenv("CONSUMER_CATALOG_SEED_SERVE") == "true",
+		b2img:              newB2DownloadClient(),
 	}
 }
 

@@ -77,6 +77,10 @@ var validCategories = map[string]struct{}{
 const (
 	catalogKindOverride = "override"
 	catalogKindAddition = "addition"
+	// catalogKindProduct is a seeded, store-agnostic baseline product (store_id =
+	// globalCatalogStore). It projects to the consumer exactly like an addition,
+	// but only when CONSUMER_CATALOG_SEED_SERVE is on (see catalogView).
+	catalogKindProduct = "product"
 
 	minCatalogPrice = 1.0
 	maxCatalogPrice = 100000.0
@@ -133,9 +137,27 @@ type catalogDoc struct {
 	BaseID       string             `bson:"base_id,omitempty"`
 	Variants     []variantDoc       `bson:"variants,omitempty"`
 	Physical     *physicalDoc       `bson:"physical,omitempty"`
-	UpdatedBy    string             `bson:"updated_by"`
-	UpdatedAt    time.Time          `bson:"updated_at"`
-	CreatedAt    time.Time          `bson:"created_at"`
+	// Extended product fields — carried by seeded baseline products (kind=product)
+	// and available to additions. All optional; the consumer view emits them when
+	// present, and the app falls back to its own defaults when absent.
+	MRP            *float64       `bson:"mrp,omitempty"`
+	Unit           string         `bson:"unit,omitempty"`
+	Tag            string         `bson:"tag,omitempty"`
+	Rating         *float64       `bson:"rating,omitempty"`
+	RatingCount    *int           `bson:"rating_count,omitempty"`
+	MostOrdered    *bool          `bson:"most_ordered,omitempty"`
+	PackCount      *int           `bson:"pack_count,omitempty"`
+	BackPhotoURL   string         `bson:"back_photo_url,omitempty"`
+	ImageAsset     string         `bson:"image_asset,omitempty"`
+	BackImageAsset string         `bson:"back_image_asset,omitempty"`
+	Compliance     *complianceDoc `bson:"compliance,omitempty"`
+	// StockCount is the store console's on-hand number. NEVER projected to the
+	// consumer (see additionViewFromDoc / catalogView).
+	StockCount  *int      `bson:"stock_count,omitempty"`
+	SeedVersion int       `bson:"seed_version,omitempty"`
+	UpdatedBy   string    `bson:"updated_by"`
+	UpdatedAt   time.Time `bson:"updated_at"`
+	CreatedAt   time.Time `bson:"created_at"`
 }
 
 // DOLIBARR-SYNC seam (NOT integrated). Additions above are the exact shape a
@@ -175,6 +197,18 @@ type additionView struct {
 	InStock      bool         `json:"in_stock"`
 	Variants     []variantDoc `json:"variants,omitempty"`
 	Physical     *physicalDoc `json:"physical,omitempty"`
+	// Extended fields (present for seeded baseline products). Note: stock_count is
+	// intentionally NOT here — on-hand stock is store-console-only, never shown to
+	// shoppers.
+	MRP          *float64       `json:"mrp,omitempty"`
+	Unit         string         `json:"unit,omitempty"`
+	Tag          string         `json:"tag,omitempty"`
+	Rating       *float64       `json:"rating,omitempty"`
+	RatingCount  *int           `json:"ratingCount,omitempty"`
+	MostOrdered  bool           `json:"mostOrdered,omitempty"`
+	PackCount    *int           `json:"packCount,omitempty"`
+	BackPhotoURL string         `json:"back_photo_url,omitempty"`
+	Compliance   *complianceDoc `json:"compliance,omitempty"`
 }
 
 // catalogResponse is the whole overlay: a map of baseline-SKU overrides keyed by
@@ -241,6 +275,16 @@ func additionViewFromDoc(d catalogDoc) additionView {
 		InStock:      d.InStock == nil || *d.InStock, // default in-stock
 		Variants:     d.Variants,
 		Physical:     d.Physical,
+		MRP:          d.MRP,
+		Unit:         d.Unit,
+		Tag:          d.Tag,
+		Rating:       d.Rating,
+		RatingCount:  d.RatingCount,
+		MostOrdered:  d.MostOrdered != nil && *d.MostOrdered,
+		PackCount:    d.PackCount,
+		BackPhotoURL: d.BackPhotoURL,
+		Compliance:   d.Compliance,
+		// StockCount deliberately omitted — never projected to the consumer.
 	}
 }
 
@@ -682,7 +726,7 @@ func (r *repository) listOverridesAndAdditions(ctx context.Context, storeID stri
 // oldest→newest so a later write wins on any (rare) cross-store sku collision,
 // and the max updated_at becomes the cache version. Hidden additions are omitted
 // (a hidden store SKU should not surface to shoppers at all).
-func (r *repository) catalogView(ctx context.Context) (*catalogResponse, error) {
+func (r *repository) catalogView(ctx context.Context, serveSeeded bool) (*catalogResponse, error) {
 	cur, err := r.catalog.Find(ctx, bson.D{}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: 1}}))
 	if err != nil {
 		return nil, errInternal("catalog view failed")
@@ -694,12 +738,17 @@ func (r *repository) catalogView(ctx context.Context) (*catalogResponse, error) 
 	resp := &catalogResponse{Overrides: map[string]overrideView{}, Additions: []additionView{}}
 	var maxT time.Time
 	for _, d := range docs {
+		// Seeded baseline products are inert until CONSUMER_CATALOG_SEED_SERVE is on:
+		// skip them BEFORE the version stamp so the response stays byte-identical.
+		if d.Kind == catalogKindProduct && !serveSeeded {
+			continue
+		}
 		if d.UpdatedAt.After(maxT) {
 			maxT = d.UpdatedAt
 		}
-		if d.Kind == catalogKindAddition {
+		if d.Kind == catalogKindAddition || d.Kind == catalogKindProduct {
 			if d.Hidden != nil && *d.Hidden {
-				continue // a hidden addition is not shown to shoppers
+				continue // a hidden addition/product is not shown to shoppers
 			}
 			resp.Additions = append(resp.Additions, additionViewFromDoc(d))
 			continue
@@ -724,7 +773,7 @@ func valOrZero(p *float64) float64 {
 // consumerCatalog builds the consumer-facing overlay (app-key gated at the
 // handler).
 func (s *service) consumerCatalog(ctx context.Context) (*catalogResponse, error) {
-	return s.repo.catalogView(ctx)
+	return s.repo.catalogView(ctx, s.catalogServeSeeded)
 }
 
 // storeSkus returns the store console's view: baseline + this store's overrides

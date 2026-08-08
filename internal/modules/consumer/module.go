@@ -77,6 +77,14 @@ func Register(r chi.Router, d *deps.Deps) {
 		// merges onto its shipped milk baseline (catalog.go).
 		cr.Get("/catalog", h.getCatalog)
 
+		// Catalog product images — PUBLIC, read-only proxy over the PRIVATE B2
+		// media bucket, hard-scoped to the catalog/ prefix (catalog_images.go).
+		// Unauthenticated by necessity (<Image uri> sends no headers); 302s to a
+		// fresh short-lived, prefix-scoped B2 download URL so it can serve product
+		// art and never KYC/profile files. The seed stores stable paths that
+		// resolve here (photo_url = "catalog/img/<file>").
+		cr.Get("/catalog/img/*", h.catalogImage)
+
 		// Geofence serviceability — consumer-app-gated (same X-Parag-App-Key).
 		// The app asks "can we deliver here, how fast?" before checkout, and lets
 		// an out-of-area shopper join the waitlist (upsert by phone). (geofence.go)

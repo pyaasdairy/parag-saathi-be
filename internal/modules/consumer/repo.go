@@ -13,23 +13,23 @@ import (
 )
 
 type repository struct {
-	accounts   *mongo.Collection
-	otp        *mongo.Collection
-	refresh    *mongo.Collection
-	addresses  *mongo.Collection
-	wallets    *mongo.Collection
-	walletTxns *mongo.Collection
-	consents   *mongo.Collection
-	payOrders  *mongo.Collection
+	accounts      *mongo.Collection
+	otp           *mongo.Collection
+	refresh       *mongo.Collection
+	addresses     *mongo.Collection
+	wallets       *mongo.Collection
+	walletTxns    *mongo.Collection
+	consents      *mongo.Collection
+	payOrders     *mongo.Collection
 	mandates      *mongo.Collection
 	subscriptions *mongo.Collection
 	trials        *mongo.Collection
 	orders        *mongo.Collection
 	deliveries    *mongo.Collection
 	riderPresence *mongo.Collection
-	catalog    *mongo.Collection
-	storeZones *mongo.Collection
-	waitlist   *mongo.Collection
+	catalog       *mongo.Collection
+	storeZones    *mongo.Collection
+	waitlist      *mongo.Collection
 	// Operator collections — READ-mostly for the delivery flow (store/rider
 	// resolution). Deliveries are consumer_*; these are shared Saathi identity.
 	orgUnits        *mongo.Collection
@@ -103,6 +103,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	}
 	if err := r.ensureCatalogIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer catalog indexes: %w", err)
+	}
+	if err := r.seedConsumerProducts(ctx); err != nil {
+		return fmt.Errorf("consumer product seed: %w", err)
 	}
 	if err := r.ensureGeoIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer geofence indexes: %w", err)
