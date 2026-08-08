@@ -12,17 +12,18 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// SUBSCRIPTION TRIAL ENGINE — "3 PAID then 3 FREE" welcome trial.
+// SUBSCRIPTION TRIAL ENGINE — the "2+2" welcome trial (2 PAID then 2 FREE).
 //
-// Replaces the old 2-day free-pack funnel. A new shopper's subscription pays for
-// its FIRST 3 delivered days at full price, then the NEXT 3 delivered days are on
-// us (charged 0), and from the 7th delivered day onward it charges normally.
+// The free-pack funnel: a new shopper's gold-500ml (Gold full-cream) daily
+// subscription pays for its FIRST 2 delivered days at full price, then the NEXT
+// 2 delivered days are on us (charged 0), and from the 5th delivered day onward
+// it charges normally.
 //
 // The window is measured in DELIVERED DAYS, never calendar days. A pause, a
 // skipped day, or an out-of-stock morning does NOT burn a free day — the free
-// window only opens after 3 REAL paid deliveries land, and only advances when a
+// window only opens after 2 REAL paid deliveries land, and only advances when a
 // delivery actually completes. This is what makes the promise honest: the shopper
-// always gets 3 paid + 3 free real deliveries regardless of how the calendar falls.
+// always gets 2 paid + 2 free real deliveries regardless of how the calendar falls.
 //
 // Money is still gated by the wallet's exactly-once ref (delivery:<orderId>); the
 // trial ledger is a SEPARATE per-shopper counter, independently idempotent by the
@@ -31,11 +32,11 @@ import (
 const collConsumerTrials = "consumer_trials"
 
 const (
-	trialPaidDays = 2 // full-price delivered days at the start of the trial (PYAAS Taaza)
+	trialPaidDays = 2 // full-price delivered days at the start of the trial (gold-500ml)
 	trialFreeDays = 2 // free (charged 0) delivered days that follow
 
-	trialPhasePaid = "paid" // still inside the first 3 full-price days
-	trialPhaseFree = "free" // inside the 3 free days (charge 0)
+	trialPhasePaid = "paid" // still inside the first 2 full-price days
+	trialPhaseFree = "free" // inside the 2 free days (charge 0)
 	trialPhaseDone = "done" // trial exhausted — charge normally
 )
 
