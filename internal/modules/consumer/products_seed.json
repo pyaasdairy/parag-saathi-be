@@ -20,18 +20,18 @@
     "back_image_asset": "taaza-back.png",
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "500 ml",
+      "gstRate": 0,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -55,18 +55,18 @@
     "back_image_asset": "taaza-back.png",
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "1 L",
+      "gstRate": 0,
+      "netQuantity": "1 L",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -90,18 +90,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "500 ml",
+      "gstRate": 0,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -125,18 +125,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "1 L",
+      "gstRate": 0,
+      "netQuantity": "1 L",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -160,18 +160,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "500 ml",
+      "gstRate": 0,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "Fat min 4.5%, SNF min 8.5% (per pack).",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -195,18 +195,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "1 L",
+      "gstRate": 0,
+      "netQuantity": "1 L",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "Fat min 4.5%, SNF min 8.5% (per pack).",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -230,18 +230,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "500 ml",
+      "gstRate": 0,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "Fat min 4.5%, SNF min 8.6% (per pack).",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -265,18 +265,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "90 g",
+      "gstRate": 5,
+      "netQuantity": "90 g",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -300,18 +300,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "200 g",
+      "gstRate": 5,
+      "netQuantity": "200 g",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -335,18 +335,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "90 g",
+      "gstRate": 5,
+      "netQuantity": "90 g",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -370,18 +370,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "200 g",
+      "gstRate": 5,
+      "netQuantity": "200 g",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -405,18 +405,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "400 g",
+      "gstRate": 5,
+      "netQuantity": "400 g",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -440,18 +440,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "5 kg",
+      "gstRate": 5,
+      "netQuantity": "5 kg",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -475,18 +475,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "15 kg",
+      "gstRate": 5,
+      "netQuantity": "15 kg",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -510,18 +510,18 @@
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "400 g",
+      "gstRate": 5,
+      "netQuantity": "400 g",
       "veg": true,
       "ingredients": "Pasteurised toned milk, active lactic cultures.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -545,18 +545,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0406",
-      "gst_rate": 5,
-      "net_quantity": "1 kg",
+      "gstRate": 5,
+      "netQuantity": "1 kg",
       "veg": true,
       "ingredients": "Milk, milk solids, acidulant (citric acid).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -580,18 +580,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0406",
-      "gst_rate": 5,
-      "net_quantity": "100 g",
+      "gstRate": 5,
+      "netQuantity": "100 g",
       "veg": true,
       "ingredients": "Milk, milk solids, acidulant (citric acid).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -615,18 +615,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0406",
-      "gst_rate": 5,
-      "net_quantity": "200 g",
+      "gstRate": 5,
+      "netQuantity": "200 g",
       "veg": true,
       "ingredients": "Milk, milk solids, acidulant (citric acid).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -650,18 +650,18 @@
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
       "hsn": "0405",
-      "gst_rate": 12,
-      "net_quantity": "200 ml",
+      "gstRate": 12,
+      "netQuantity": "200 ml",
       "veg": true,
       "ingredients": "Cow / buffalo milk fat (ghee).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "9 months from packaging.",
+      "shelfLife": "9 months from packaging.",
       "storage": "Store in a cool, dry place away from sunlight.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -685,18 +685,18 @@
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
       "hsn": "0405",
-      "gst_rate": 12,
-      "net_quantity": "500 ml",
+      "gstRate": 12,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Cow / buffalo milk fat (ghee).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "9 months from packaging.",
+      "shelfLife": "9 months from packaging.",
       "storage": "Store in a cool, dry place away from sunlight.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -720,18 +720,18 @@
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
       "hsn": "0405",
-      "gst_rate": 12,
-      "net_quantity": "1000 ml",
+      "gstRate": 12,
+      "netQuantity": "1000 ml",
       "veg": true,
       "ingredients": "Cow / buffalo milk fat (ghee).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "9 months from packaging.",
+      "shelfLife": "9 months from packaging.",
       "storage": "Store in a cool, dry place away from sunlight.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -755,18 +755,18 @@
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
       "hsn": "0405",
-      "gst_rate": 12,
-      "net_quantity": "500 ml",
+      "gstRate": 12,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Cow / buffalo milk fat (ghee).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "9 months from packaging.",
+      "shelfLife": "9 months from packaging.",
       "storage": "Store in a cool, dry place away from sunlight.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -790,18 +790,18 @@
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
       "hsn": "0405",
-      "gst_rate": 12,
-      "net_quantity": "1000 ml",
+      "gstRate": 12,
+      "netQuantity": "1000 ml",
       "veg": true,
       "ingredients": "Cow / buffalo milk fat (ghee).",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "9 months from packaging.",
+      "shelfLife": "9 months from packaging.",
       "storage": "Store in a cool, dry place away from sunlight.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -825,18 +825,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0405",
-      "gst_rate": 12,
-      "net_quantity": "100 g",
+      "gstRate": 12,
+      "netQuantity": "100 g",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -860,18 +860,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0405",
-      "gst_rate": 12,
-      "net_quantity": "500 g",
+      "gstRate": 12,
+      "netQuantity": "500 g",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -895,18 +895,18 @@
     "back_image_asset": "chaach-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "500 ml",
+      "gstRate": 5,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -930,18 +930,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2202",
-      "gst_rate": 12,
-      "net_quantity": "200 ml",
+      "gstRate": 12,
+      "netQuantity": "200 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -965,18 +965,18 @@
     "back_image_asset": "chaach-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "200 ml",
+      "gstRate": 5,
+      "netQuantity": "200 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1000,18 +1000,18 @@
     "back_image_asset": "chaach-back.jpg",
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "200 ml",
+      "gstRate": 5,
+      "netQuantity": "200 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1035,18 +1035,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0406",
-      "gst_rate": 5,
-      "net_quantity": "250 g",
+      "gstRate": 5,
+      "netQuantity": "250 g",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1070,18 +1070,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0406",
-      "gst_rate": 5,
-      "net_quantity": "500 g",
+      "gstRate": 5,
+      "netQuantity": "500 g",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1105,18 +1105,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0406",
-      "gst_rate": 5,
-      "net_quantity": "1 kg",
+      "gstRate": 5,
+      "netQuantity": "1 kg",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 4 days from packaging when refrigerated.",
+      "shelfLife": "3 to 4 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1140,18 +1140,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "200 g",
+      "gstRate": 5,
+      "netQuantity": "200 g",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1175,18 +1175,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0403",
-      "gst_rate": 5,
-      "net_quantity": "160 ml",
+      "gstRate": 5,
+      "netQuantity": "160 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1210,18 +1210,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "250 g",
+      "gstRate": 5,
+      "netQuantity": "250 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1245,18 +1245,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "100 g",
+      "gstRate": 5,
+      "netQuantity": "100 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1280,18 +1280,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "250 g",
+      "gstRate": 5,
+      "netQuantity": "250 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1315,18 +1315,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "250 g",
+      "gstRate": 5,
+      "netQuantity": "250 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1350,18 +1350,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "200 g",
+      "gstRate": 5,
+      "netQuantity": "200 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1385,18 +1385,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "500 g",
+      "gstRate": 5,
+      "netQuantity": "500 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1420,18 +1420,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "200 g",
+      "gstRate": 5,
+      "netQuantity": "200 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1455,18 +1455,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "500 g",
+      "gstRate": 5,
+      "netQuantity": "500 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1490,18 +1490,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "100 ml",
+      "gstRate": 5,
+      "netQuantity": "100 ml",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1525,18 +1525,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "2106",
-      "gst_rate": 5,
-      "net_quantity": "100 g",
+      "gstRate": 5,
+      "netQuantity": "100 g",
       "veg": true,
       "ingredients": "Milk solids, sugar, edible dairy ingredients.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "3 to 5 days when refrigerated.",
+      "shelfLife": "3 to 5 days when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "12722999000171",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "12722999000171",
       "manufacturer": "PYAAS Dairy Private Limited",
-      "manufacturer_address": "PYAAS Dairy, Lucknow, Uttar Pradesh"
+      "manufacturerAddress": "PYAAS Dairy, Lucknow, Uttar Pradesh"
     }
   },
   {
@@ -1560,18 +1560,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "1 L",
+      "gstRate": 0,
+      "netQuantity": "1 L",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "Declared at launch",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "Declared at launch",
       "manufacturer": "PYAAS (Pyaas Dairy)",
-      "manufacturer_address": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
+      "manufacturerAddress": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
     }
   },
   {
@@ -1595,18 +1595,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "500 ml",
+      "gstRate": 0,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "Declared at launch",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "Declared at launch",
       "manufacturer": "PYAAS (Pyaas Dairy)",
-      "manufacturer_address": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
+      "manufacturerAddress": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
     }
   },
   {
@@ -1630,18 +1630,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "1 L",
+      "gstRate": 0,
+      "netQuantity": "1 L",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "Declared at launch",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "Declared at launch",
       "manufacturer": "PYAAS (Pyaas Dairy)",
-      "manufacturer_address": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
+      "manufacturerAddress": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
     }
   },
   {
@@ -1665,18 +1665,18 @@
     "back_image_asset": null,
     "compliance": {
       "hsn": "0401",
-      "gst_rate": 0,
-      "net_quantity": "500 ml",
+      "gstRate": 0,
+      "netQuantity": "500 ml",
       "veg": true,
       "ingredients": "Pasteurised milk.",
       "nutrition": "",
       "allergens": "Contains milk.",
-      "shelf_life": "2 days from packaging when refrigerated.",
+      "shelfLife": "2 days from packaging when refrigerated.",
       "storage": "Keep refrigerated at 4 degrees C or below.",
-      "country_of_origin": "India",
-      "fssai_license": "Declared at launch",
+      "countryOfOrigin": "India",
+      "fssaiLicense": "Declared at launch",
       "manufacturer": "PYAAS (Pyaas Dairy)",
-      "manufacturer_address": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
+      "manufacturerAddress": "Pyaas Dairy, Lucknow, Uttar Pradesh (full address declared at launch)"
     }
   }
 ]
