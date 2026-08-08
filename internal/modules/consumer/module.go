@@ -200,6 +200,7 @@ func Register(r chi.Router, d *deps.Deps) {
 				// baseline + this store's overrides/additions, override a SKU's
 				// price/stock/visibility, and add or remove store SKUs.
 				sm.Get("/stores/{storeId}/skus", h.listSkus)
+				sm.Get("/stores/{storeId}/stock", h.storeStock)
 				sm.Post("/stores/{storeId}/skus", h.addSku)
 				sm.Patch("/stores/{storeId}/skus/{skuId}", h.patchSku)
 				sm.Delete("/stores/{storeId}/skus/{skuId}", h.deleteSkuHandler)

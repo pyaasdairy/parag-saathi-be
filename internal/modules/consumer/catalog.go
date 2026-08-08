@@ -315,6 +315,23 @@ type storeCatalogResponse struct {
 	Additions []storeAdditionView `json:"additions"`
 }
 
+// storeStockView is one seeded product's on-hand stock as the STORE CONSOLE sees
+// it. stock_count is store-console-only (deliberately absent from additionView /
+// the consumer catalog) — shoppers never see inventory counts.
+type storeStockView struct {
+	SkuID      string `json:"sku_id"`
+	Name       string `json:"name"`
+	Category   string `json:"category"`
+	Variant    string `json:"variant,omitempty"`
+	StockCount int    `json:"stock_count"`
+	InStock    bool   `json:"in_stock"`
+}
+
+type storeStockResponse struct {
+	StoreID string           `json:"store_id"`
+	Items   []storeStockView `json:"items"`
+}
+
 // ── Request bodies ──────────────────────────────────────────────────────────
 
 // variantInput is a variant on the wire (POST base+variants, POST variant-to-base,
@@ -720,6 +737,23 @@ func (r *repository) listOverridesAndAdditions(ctx context.Context, storeID stri
 	return out, nil
 }
 
+// seededStock returns the global seeded baseline products (kind=product) so the
+// store console can read their on-hand stock_count. Store-console-only — the
+// stock number is NEVER in the consumer-facing catalogView.
+func (r *repository) seededStock(ctx context.Context) ([]catalogDoc, error) {
+	cur, err := r.catalog.Find(ctx,
+		bson.D{{Key: "store_id", Value: globalCatalogStore}, {Key: "kind", Value: catalogKindProduct}},
+		options.Find().SetSort(bson.D{{Key: "category", Value: 1}, {Key: "name", Value: 1}}))
+	if err != nil {
+		return nil, errInternal("stock list failed")
+	}
+	out := []catalogDoc{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("stock decode failed")
+	}
+	return out, nil
+}
+
 // catalogView projects the whole overlay (across every store — the pilot is
 // single-store, and the consumer app has no store context at read time) into
 // the consumer-facing overrides map + additions list + version. Rows are read
@@ -807,6 +841,36 @@ func (s *service) storeSkus(ctx context.Context, actor auth.Actor, storeID strin
 		})
 	}
 	return resp, nil
+}
+
+// storeStock returns the seeded products' on-hand stock for the store console
+// (STORE_MANAGER, guarded to a store the actor manages). Read-only, additive:
+// it never changes the existing skus/overrides endpoints. The default stock_count
+// is store-editable and never re-seeded over (catalog_seed.go).
+func (s *service) storeStock(ctx context.Context, actor auth.Actor, storeID string) (*storeStockResponse, error) {
+	if err := s.assertStore(ctx, actor, storeID); err != nil {
+		return nil, err
+	}
+	docs, err := s.repo.seededStock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]storeStockView, 0, len(docs))
+	for _, d := range docs {
+		count := 0
+		if d.StockCount != nil {
+			count = *d.StockCount
+		}
+		items = append(items, storeStockView{
+			SkuID:      d.SkuID,
+			Name:       d.Name,
+			Category:   d.Category,
+			Variant:    d.Variant,
+			StockCount: count,
+			InStock:    d.InStock == nil || *d.InStock,
+		})
+	}
+	return &storeStockResponse{StoreID: storeID, Items: items}, nil
 }
 
 // addStoreSku handles both POST shapes (see addSkuRequest). With base_id set it
@@ -1069,6 +1133,18 @@ func (h *handler) getCatalog(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listSkus(w http.ResponseWriter, r *http.Request) {
 	actor, _ := operatorActor(r)
 	resp, err := h.svc.storeSkus(r.Context(), actor, chi.URLParam(r, "storeId"))
+	if err != nil {
+		httpx.Error(w, r, toHTTPErr(err))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
+// storeStock — GET /consumer/stores/{storeId}/stock (STORE_MANAGER). The seeded
+// products' backend-owned on-hand counts (consumer never sees these).
+func (h *handler) storeStock(w http.ResponseWriter, r *http.Request) {
+	actor, _ := operatorActor(r)
+	resp, err := h.svc.storeStock(r.Context(), actor, chi.URLParam(r, "storeId"))
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
