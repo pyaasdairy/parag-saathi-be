@@ -47,12 +47,12 @@ type baselineSku struct {
 }
 
 var consumerBaseline = []baselineSku{
-	{ID: "taaza-500ml", Name: "Toned Milk - PYAAS Taaza", Category: "milk", Variant: "500ml Pouch", Price: 29},
-	{ID: "taaza-1l", Name: "Toned Milk - PYAAS Taaza", Category: "milk", Variant: "1L Pouch", Price: 57},
-	{ID: "gold-500ml", Name: "Full Cream Milk - PYAAS Gold", Category: "milk", Variant: "500ml Pouch", Price: 35},
-	{ID: "gold-1l", Name: "Full Cream Milk - PYAAS Gold", Category: "milk", Variant: "1L Pouch", Price: 69},
-	{ID: "shakti-500ml", Name: "Standardised Milk - PYAAS Shakti", Category: "milk", Variant: "500ml Pouch", Price: 32},
-	{ID: "chai-special-500ml", Name: "Chai Special - PYAAS", Category: "super_tea", Variant: "500ml Pouch", Price: 32},
+	{ID: "taaza-500ml", Name: "Toned Milk - Parag Taaza", Category: "milk", Variant: "500ml", Price: 29},
+	{ID: "taaza-1l", Name: "Toned Milk - Parag Taaza", Category: "milk", Variant: "1L", Price: 57},
+	{ID: "gold-500ml", Name: "Full Cream Milk - Parag Gold", Category: "milk", Variant: "500ml", Price: 35},
+	{ID: "gold-1l", Name: "Full Cream Milk - Parag Gold", Category: "milk", Variant: "1L", Price: 69},
+	{ID: "shakti-500ml", Name: "Standardised Milk - Parag Shakti", Category: "milk", Variant: "500ml", Price: 32},
+	{ID: "chai-special-500ml", Name: "Chai Special - Parag", Category: "super_tea", Variant: "500ml", Price: 32},
 	{ID: "dahi-sweet-200g", Name: "Sweet Dahi", Category: "dahi", Variant: "200g Cup", Price: 24},
 	{ID: "paneer-1kg", Name: "Paneer", Category: "paneer", Variant: "1kg", Price: 410},
 }

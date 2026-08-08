@@ -214,7 +214,7 @@ func TestAdditionViewRoundTrip(t *testing.T) {
 		SkuID:    "gold",
 		Kind:     catalogKindAddition,
 		BaseID:   "dolibarr-42",
-		Name:     "Full Cream Milk - PYAAS Gold",
+		Name:     "Full Cream Milk - Parag Gold",
 		Category: "milk",
 		Price:    f64(69),
 		InStock:  bptr(true),
