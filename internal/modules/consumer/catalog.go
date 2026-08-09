@@ -44,6 +44,10 @@ type baselineSku struct {
 	Category string  `json:"category"`
 	Variant  string  `json:"variant"`
 	Price    float64 `json:"price"`
+	// InStock lets the store console reflect the seeded product's stock (the same
+	// in_stock the consumer sees). Nil (omitted) → the console defaults to in
+	// stock (the small hardcoded consumerBaseline fallback keeps its old behaviour).
+	InStock *bool `json:"in_stock,omitempty"`
 }
 
 var consumerBaseline = []baselineSku{
@@ -820,9 +824,33 @@ func (s *service) storeSkus(ctx context.Context, actor auth.Actor, storeID strin
 	if err != nil {
 		return nil, err
 	}
+	// The store console shows the SAME catalog + stock the consumer sees: the
+	// seeded products (kind=product) carry their own in_stock, so a SKU the seed
+	// marks out of stock reads out of stock in the console too. Falls back to the
+	// small hardcoded consumerBaseline only when the seed hasn't run yet.
+	baseline := consumerBaseline
+	if seeded, serr := s.repo.seededStock(ctx); serr == nil && len(seeded) > 0 {
+		baseline = make([]baselineSku, 0, len(seeded))
+		for i := range seeded {
+			d := seeded[i]
+			inStock := d.InStock == nil || *d.InStock
+			var price float64
+			if d.Price != nil {
+				price = *d.Price
+			}
+			baseline = append(baseline, baselineSku{
+				ID:       d.SkuID,
+				Name:     d.Name,
+				Category: d.Category,
+				Variant:  d.Variant,
+				Price:    price,
+				InStock:  &inStock,
+			})
+		}
+	}
 	resp := &storeCatalogResponse{
 		StoreID:   storeID,
-		Baseline:  consumerBaseline,
+		Baseline:  baseline,
 		Overrides: []storeOverrideView{},
 		Additions: []storeAdditionView{},
 	}
