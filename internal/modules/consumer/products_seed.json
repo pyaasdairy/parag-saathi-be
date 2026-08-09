@@ -50,7 +50,7 @@
     "rating_count": 3860,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "taaza.png",
     "back_image_asset": "taaza-back.png",
     "compliance": {
@@ -120,7 +120,7 @@
     "rating_count": 2670,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "gold.png",
     "back_image_asset": null,
     "compliance": {
@@ -155,7 +155,7 @@
     "rating_count": 690,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "shakti.png",
     "back_image_asset": null,
     "compliance": {
@@ -190,7 +190,7 @@
     "rating_count": 980,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "shakti.png",
     "back_image_asset": null,
     "compliance": {
@@ -225,7 +225,7 @@
     "rating_count": 540,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "chai-special.png",
     "back_image_asset": null,
     "compliance": {
@@ -260,7 +260,7 @@
     "rating_count": 760,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-cup.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -295,7 +295,7 @@
     "rating_count": 1120,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-cup.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -330,7 +330,7 @@
     "rating_count": 480,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-pouch.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -365,7 +365,7 @@
     "rating_count": 1740,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-pouch.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -400,7 +400,7 @@
     "rating_count": 910,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-pouch.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -435,7 +435,7 @@
     "rating_count": 168,
     "most_ordered": false,
     "pack_count": 2,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-bucket.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -470,7 +470,7 @@
     "rating_count": 74,
     "most_ordered": false,
     "pack_count": 3,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-bucket.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -505,7 +505,7 @@
     "rating_count": 620,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "dahi-pouch.png",
     "back_image_asset": "dahi-back.jpg",
     "compliance": {
@@ -540,7 +540,7 @@
     "rating_count": 540,
     "most_ordered": false,
     "pack_count": 2,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "paneer.png",
     "back_image_asset": null,
     "compliance": {
@@ -575,7 +575,7 @@
     "rating_count": 880,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "paneer.png",
     "back_image_asset": null,
     "compliance": {
@@ -610,7 +610,7 @@
     "rating_count": 1460,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "paneer.png",
     "back_image_asset": null,
     "compliance": {
@@ -645,7 +645,7 @@
     "rating_count": 730,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "ghee.png",
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
@@ -680,7 +680,7 @@
     "rating_count": 1980,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "ghee.png",
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
@@ -715,7 +715,7 @@
     "rating_count": 1240,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "ghee.png",
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
@@ -750,7 +750,7 @@
     "rating_count": 410,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "ghee.png",
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
@@ -785,7 +785,7 @@
     "rating_count": 360,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "ghee.png",
     "back_image_asset": "ghee-back.jpg",
     "compliance": {
@@ -820,7 +820,7 @@
     "rating_count": 690,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "butter.png",
     "back_image_asset": null,
     "compliance": {
@@ -855,7 +855,7 @@
     "rating_count": 520,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "butter.png",
     "back_image_asset": null,
     "compliance": {
@@ -890,7 +890,7 @@
     "rating_count": 1180,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "chaach.png",
     "back_image_asset": "chaach-back.jpg",
     "compliance": {
@@ -925,7 +925,7 @@
     "rating_count": 960,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "flavoured-milk.png",
     "back_image_asset": null,
     "compliance": {
@@ -960,7 +960,7 @@
     "rating_count": 430,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "mattha.png",
     "back_image_asset": "chaach-back.jpg",
     "compliance": {
@@ -995,7 +995,7 @@
     "rating_count": 380,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "masala-mattha.png",
     "back_image_asset": "chaach-back.jpg",
     "compliance": {
@@ -1030,7 +1030,7 @@
     "rating_count": 240,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "khoya.png",
     "back_image_asset": null,
     "compliance": {
@@ -1065,7 +1065,7 @@
     "rating_count": 190,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "khoya.png",
     "back_image_asset": null,
     "compliance": {
@@ -1100,7 +1100,7 @@
     "rating_count": 96,
     "most_ordered": false,
     "pack_count": 2,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "khoya.png",
     "back_image_asset": null,
     "compliance": {
@@ -1135,7 +1135,7 @@
     "rating_count": 1040,
     "most_ordered": true,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "lassi.png",
     "back_image_asset": null,
     "compliance": {
@@ -1170,7 +1170,7 @@
     "rating_count": 720,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "lassi-cup.png",
     "back_image_asset": null,
     "compliance": {
@@ -1205,7 +1205,7 @@
     "rating_count": 360,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "besan-ladoo.png",
     "back_image_asset": null,
     "compliance": {
@@ -1240,7 +1240,7 @@
     "rating_count": 280,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "chhena-kheer.png",
     "back_image_asset": null,
     "compliance": {
@@ -1275,7 +1275,7 @@
     "rating_count": 410,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "peda.png",
     "back_image_asset": null,
     "compliance": {
@@ -1310,7 +1310,7 @@
     "rating_count": 330,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "milk-cake.png",
     "back_image_asset": null,
     "compliance": {
@@ -1345,7 +1345,7 @@
     "rating_count": 520,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "rasgolla.png",
     "back_image_asset": null,
     "compliance": {
@@ -1380,7 +1380,7 @@
     "rating_count": 300,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "rasgolla.png",
     "back_image_asset": null,
     "compliance": {
@@ -1415,7 +1415,7 @@
     "rating_count": 640,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "gulab-jamun.png",
     "back_image_asset": null,
     "compliance": {
@@ -1450,7 +1450,7 @@
     "rating_count": 380,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "gulab-jamun.png",
     "back_image_asset": null,
     "compliance": {
@@ -1485,7 +1485,7 @@
     "rating_count": 260,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "rice-kheer.png",
     "back_image_asset": null,
     "compliance": {
@@ -1520,7 +1520,7 @@
     "rating_count": 340,
     "most_ordered": false,
     "pack_count": null,
-    "out_of_stock": false,
+    "out_of_stock": true,
     "image_asset": "shri-khand.png",
     "back_image_asset": null,
     "compliance": {
