@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"encoding/json"
+	"sort"
 	"testing"
 )
 
@@ -268,5 +269,57 @@ func TestAdditionViewRoundTrip(t *testing.T) {
 	}
 	if wire.Physical.WeightG != 1030 {
 		t.Errorf("wire physical.weightG = %v, want 1030", wire.Physical.WeightG)
+	}
+}
+
+// TestEffectiveInStock pins the per-store override precedence used to sort the
+// store console: an override wins over the seeded flag; nil seeded = in stock.
+func TestEffectiveInStock(t *testing.T) {
+	ov := map[string]bool{"gold-500ml": false, "taaza-1l": true}
+	cases := []struct {
+		id     string
+		seeded *bool
+		want   bool
+	}{
+		{"gold-500ml", bptr(true), false}, // override forces OOS despite seeded in-stock
+		{"taaza-1l", bptr(false), true},   // override forces in-stock despite seeded OOS
+		{"gold-1l", bptr(false), false},   // no override → seeded OOS
+		{"taaza-500ml", bptr(true), true}, // no override → seeded in-stock
+		{"paneer-1kg", nil, true},         // nil seeded → in stock
+	}
+	for _, c := range cases {
+		if got := effectiveInStock(c.id, c.seeded, ov); got != c.want {
+			t.Errorf("effectiveInStock(%q, %v) = %v, want %v", c.id, c.seeded, got, c.want)
+		}
+	}
+}
+
+// TestBaselineStockSortStable pins the console ordering: in stock on top, out of
+// stock at the bottom, and the seeded order preserved WITHIN each group. It runs
+// the exact comparator storeSkus uses (effective stock, override wins).
+func TestBaselineStockSortStable(t *testing.T) {
+	ov := map[string]bool{"a-in": false} // a-in is forced OOS by a store override
+	rows := []baselineSku{
+		{ID: "a-in", InStock: bptr(true)},   // → OOS via override
+		{ID: "b-out", InStock: bptr(false)}, // OOS
+		{ID: "c-in", InStock: bptr(true)},   // in stock
+		{ID: "d-out", InStock: bptr(false)}, // OOS
+		{ID: "e-in", InStock: nil},          // nil → in stock
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		return effectiveInStock(rows[i].ID, rows[i].InStock, ov) &&
+			!effectiveInStock(rows[j].ID, rows[j].InStock, ov)
+	})
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = r.ID
+	}
+	// in-stock (c-in, e-in) keep their relative order and lead; OOS (a-in, b-out,
+	// d-out) follow, also in original relative order.
+	want := []string{"c-in", "e-in", "a-in", "b-out", "d-out"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted order = %v, want %v", got, want)
+		}
 	}
 }

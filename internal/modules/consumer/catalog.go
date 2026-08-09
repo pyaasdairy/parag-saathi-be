@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -59,6 +60,15 @@ var consumerBaseline = []baselineSku{
 	{ID: "chai-special-500ml", Name: "Chai Special - Parag", Category: "super_tea", Variant: "500ml", Price: 32},
 	{ID: "dahi-sweet-200g", Name: "Sweet Dahi", Category: "dahi", Variant: "200g Cup", Price: 24},
 	{ID: "paneer-1kg", Name: "Paneer", Category: "paneer", Variant: "1kg", Price: 410},
+}
+
+// effectiveInStock is a SKU's stock as this store actually sees it: a per-store
+// override (ov) wins over the seeded default; a nil seeded flag means in stock.
+func effectiveInStock(id string, seeded *bool, ov map[string]bool) bool {
+	if v, ok := ov[id]; ok {
+		return v
+	}
+	return seeded == nil || *seeded
 }
 
 // baselineIDs is the set of baseline sku ids — an ADD must not shadow one (that
@@ -334,6 +344,9 @@ type storeStockView struct {
 type storeStockResponse struct {
 	StoreID string           `json:"store_id"`
 	Items   []storeStockView `json:"items"`
+	// TotalStock is the sum of on-hand stock_count across in-stock products —
+	// the console's headline "total stock" number.
+	TotalStock int `json:"total_stock"`
 }
 
 // ── Request bodies ──────────────────────────────────────────────────────────
@@ -824,6 +837,14 @@ func (s *service) storeSkus(ctx context.Context, actor auth.Actor, storeID strin
 	if err != nil {
 		return nil, err
 	}
+	// Per-store stock overrides, so the console can sort by EFFECTIVE stock: a
+	// store manager's own toggle wins over the seeded default.
+	ovStock := map[string]bool{}
+	for _, d := range docs {
+		if d.Kind != catalogKindAddition && d.InStock != nil {
+			ovStock[d.SkuID] = *d.InStock
+		}
+	}
 	// The store console shows the SAME catalog + stock the consumer sees: the
 	// seeded products (kind=product) carry their own in_stock, so a SKU the seed
 	// marks out of stock reads out of stock in the console too. Falls back to the
@@ -847,6 +868,13 @@ func (s *service) storeSkus(ctx context.Context, actor auth.Actor, storeID strin
 				InStock:  &inStock,
 			})
 		}
+		// In stock on top, out of stock at the bottom — by EFFECTIVE stock (a
+		// per-store override wins). Stable, so the seeded category/name order is
+		// preserved within the in-stock and out-of-stock groups.
+		sort.SliceStable(baseline, func(i, j int) bool {
+			return effectiveInStock(baseline[i].ID, baseline[i].InStock, ovStock) &&
+				!effectiveInStock(baseline[j].ID, baseline[j].InStock, ovStock)
+		})
 	}
 	resp := &storeCatalogResponse{
 		StoreID:   storeID,
@@ -884,10 +912,15 @@ func (s *service) storeStock(ctx context.Context, actor auth.Actor, storeID stri
 		return nil, err
 	}
 	items := make([]storeStockView, 0, len(docs))
+	total := 0
 	for _, d := range docs {
 		count := 0
 		if d.StockCount != nil {
 			count = *d.StockCount
+		}
+		inStock := d.InStock == nil || *d.InStock
+		if inStock {
+			total += count
 		}
 		items = append(items, storeStockView{
 			SkuID:      d.SkuID,
@@ -895,10 +928,15 @@ func (s *service) storeStock(ctx context.Context, actor auth.Actor, storeID stri
 			Category:   d.Category,
 			Variant:    d.Variant,
 			StockCount: count,
-			InStock:    d.InStock == nil || *d.InStock,
+			InStock:    inStock,
 		})
 	}
-	return &storeStockResponse{StoreID: storeID, Items: items}, nil
+	// In stock on top, out of stock at the bottom. Stable, so the seeded
+	// category/name order is preserved within each group.
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].InStock && !items[j].InStock
+	})
+	return &storeStockResponse{StoreID: storeID, Items: items, TotalStock: total}, nil
 }
 
 // addStoreSku handles both POST shapes (see addSkuRequest). With base_id set it
