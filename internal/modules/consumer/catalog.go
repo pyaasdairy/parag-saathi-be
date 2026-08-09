@@ -911,6 +911,20 @@ func (s *service) storeStock(ctx context.Context, actor auth.Actor, storeID stri
 	if err != nil {
 		return nil, err
 	}
+	// Per-store in_stock overrides, so the inventory view matches the Catalog tab
+	// (storeSkus): a store manager's own toggle wins over the seeded default.
+	// stock_count itself is global (no per-store override exists), so it stays as
+	// seeded; only the in_stock flag — hence the sort and the total — is effective.
+	ovDocs, err := s.repo.listOverridesAndAdditions(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	ovStock := map[string]bool{}
+	for _, d := range ovDocs {
+		if d.Kind != catalogKindAddition && d.InStock != nil {
+			ovStock[d.SkuID] = *d.InStock
+		}
+	}
 	items := make([]storeStockView, 0, len(docs))
 	total := 0
 	for _, d := range docs {
@@ -918,7 +932,7 @@ func (s *service) storeStock(ctx context.Context, actor auth.Actor, storeID stri
 		if d.StockCount != nil {
 			count = *d.StockCount
 		}
-		inStock := d.InStock == nil || *d.InStock
+		inStock := effectiveInStock(d.SkuID, d.InStock, ovStock)
 		if inStock {
 			total += count
 		}
