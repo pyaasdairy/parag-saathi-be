@@ -90,7 +90,7 @@ type subscription struct {
 	UnitPrice      float64            `bson:"unit_price"               json:"unit_price"`
 	Frequency      string             `bson:"frequency"                json:"frequency"` // daily|alternate|weekly
 	DeliverySlot   string             `bson:"delivery_slot,omitempty"  json:"delivery_slot,omitempty"`
-	Status         string             `bson:"status"                   json:"status"`     // active|paused|cancelled
+	Status         string             `bson:"status"                   json:"status"` // active|paused|cancelled
 	StartDate      string             `bson:"start_date"               json:"start_date"` // YYYY-MM-DD (IST)
 	Vacations      []vacationRange    `bson:"vacations,omitempty"      json:"vacations,omitempty"`
 	// LastOrderDate is the exactly-once day claim (YYYY-MM-DD IST) — the worker
@@ -585,28 +585,6 @@ func (s *service) refreshSubOrder(ctx context.Context, o *order, sub *subscripti
 // 13:00 IST), and reconcile tomorrow's previews against subscription edits.
 // Exactly-once per (subscription, day) via the claim; returns how many orders
 // went LIVE (locked) this tick.
-// subOrderFloor is the wallet balance a subscription order must clear before it
-// locks and its store delivery task is created. Normally the full order total —
-// BUT on a trial (gold-*) FREE day the delivery charges 0 (trialChargeFor zeroes
-// it), so the order must be placeable even with an empty wallet, else the
-// promised free milk never ships. Paid days (phase "paid"/"done") still require
-// full funds, so money safety on chargeable days is unchanged. Peeking the trial
-// ledger never advances it (the counter only moves at delivery), so this is
-// race-safe and side-effect-free beyond lazily creating an empty ledger.
-func (s *service) subOrderFloor(ctx context.Context, sub *subscription, total float64) float64 {
-	if !isTrialProduct(sub.ProductID) {
-		return total
-	}
-	t, err := s.repo.getOrCreateTrial(ctx, sub.ConsumerID)
-	if err != nil {
-		return total // can't tell → require funds (safe default)
-	}
-	if trialPhaseFor(t.DeliveredPaid, t.DeliveredFree) == trialPhaseFree {
-		return 0 // a free day costs nothing to deliver
-	}
-	return total
-}
-
 func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) int {
 	nowIST := now.In(istZone)
 	today := istToday(now)
@@ -635,7 +613,7 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 				continue
 			}
 			o = s.refreshSubOrder(ctx, o, sub)
-			if wv, werr := s.wallet(ctx, sub.ConsumerID); werr != nil || wv.Available < s.subOrderFloor(ctx, sub, o.Total) {
+			if wv, werr := s.wallet(ctx, sub.ConsumerID); werr != nil || wv.Available < o.Total {
 				continue
 			}
 			upd, uerr := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
@@ -664,7 +642,7 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 		if sub.LastOrderDate != today && subscriptionDueOn(sub, today) {
 			if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
 				lineTotal := round2(sub.UnitPrice * float64(sub.Qty))
-				cost := s.subOrderFloor(ctx, sub, lineTotal+deliveryFeeFor(lineTotal))
+				cost := lineTotal + deliveryFeeFor(lineTotal)
 				if wv, werr := s.wallet(ctx, sub.ConsumerID); werr == nil && wv.Available >= cost {
 					if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, today); won {
 						if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, today, true, now); oerr == nil {
