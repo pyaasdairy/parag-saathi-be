@@ -90,7 +90,7 @@ type subscription struct {
 	UnitPrice      float64            `bson:"unit_price"               json:"unit_price"`
 	Frequency      string             `bson:"frequency"                json:"frequency"` // daily|alternate|weekly
 	DeliverySlot   string             `bson:"delivery_slot,omitempty"  json:"delivery_slot,omitempty"`
-	Status         string             `bson:"status"                   json:"status"` // active|paused|cancelled
+	Status         string             `bson:"status"                   json:"status"`     // active|paused|cancelled
 	StartDate      string             `bson:"start_date"               json:"start_date"` // YYYY-MM-DD (IST)
 	Vacations      []vacationRange    `bson:"vacations,omitempty"      json:"vacations,omitempty"`
 	// LastOrderDate is the exactly-once day claim (YYYY-MM-DD IST) — the worker
@@ -528,6 +528,15 @@ func (s *service) insertSubscriptionOrder(ctx context.Context, sub *subscription
 		ConsumerName: name, Phone: phone, Geo: &geoPoint{Lat: *addr.Lat, Lng: *addr.Lng},
 		CreatedAt: now, UpdatedAt: now,
 		SubscriptionID: sub.SubscriptionID, ScheduledFor: day,
+	}
+	// Flag a free-day trial delivery for DISPLAY + ANALYTICS (badge "FREE" in the
+	// app, count free milk in reporting). Peeking the trial ledger never advances
+	// it and never gates the wallet/hold — the order is still placed only when
+	// funded (unchanged); the actual 0 charge is applied at delivery.
+	if isTrialProduct(sub.ProductID) {
+		if t, terr := s.repo.getOrCreateTrial(ctx, sub.ConsumerID); terr == nil && trialPhaseFor(t.DeliveredPaid, t.DeliveredFree) == trialPhaseFree {
+			o.TrialFree = true
+		}
 	}
 	if locked {
 		o.SubLockedAt = now.Format(time.RFC3339)

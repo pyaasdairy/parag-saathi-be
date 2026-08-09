@@ -95,10 +95,15 @@ type order struct {
 	DeliveryWindow string             `bson:"delivery_window,omitempty" json:"delivery_window,omitempty"`
 	ProofPhotoURL  string             `bson:"proof_photo_url,omitempty" json:"proof_photo_url,omitempty"`
 	Lane           string             `bson:"lane"                    json:"lane,omitempty"`
-	Items          []orderItem        `bson:"order_items"             json:"order_items"`
-	Rider          *rider             `bson:"riders,omitempty"        json:"riders"`
-	CanReview      bool               `bson:"can_review"              json:"can_review"`
-	Review         *orderReview       `bson:"review,omitempty"        json:"review"`
+	// TrialFree marks a 2+2 free-day subscription delivery: the sticker Total
+	// stands, but the wallet charge at delivery is 0 (trialChargeFor). Set at
+	// creation from the trial phase — DISPLAY + ANALYTICS only, it never gates the
+	// wallet or the hold. Absent (omitempty) on every normal order.
+	TrialFree bool         `bson:"trial_free,omitempty"    json:"trial_free,omitempty"`
+	Items     []orderItem  `bson:"order_items"             json:"order_items"`
+	Rider     *rider       `bson:"riders,omitempty"        json:"riders"`
+	CanReview bool         `bson:"can_review"              json:"can_review"`
+	Review    *orderReview `bson:"review,omitempty"        json:"review"`
 	// Owner-facing / delivery metadata — never sent back to the shopper client.
 	ConsumerName string    `bson:"consumer_name,omitempty" json:"-"`
 	Phone        string    `bson:"phone,omitempty"         json:"-"`
