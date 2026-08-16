@@ -945,6 +945,31 @@ func (s *service) storeStock(ctx context.Context, actor auth.Actor, storeID stri
 			InStock:    inStock,
 		})
 	}
+	// Store ADDITIONS (manager-added and Dolibarr-synced SKUs) belong in the
+	// inventory view too — otherwise an ERP-sourced product would be manageable
+	// in the Catalog tab but invisible here (and missed by the low-stock
+	// derivation). Hidden additions stay out: a hidden SKU surfaces nowhere.
+	for _, d := range ovDocs {
+		if d.Kind != catalogKindAddition || (d.Hidden != nil && *d.Hidden) {
+			continue
+		}
+		count := 0
+		if d.StockCount != nil {
+			count = *d.StockCount
+		}
+		inStock := d.InStock == nil || *d.InStock
+		if inStock {
+			total += count
+		}
+		items = append(items, storeStockView{
+			SkuID:      d.SkuID,
+			Name:       d.Name,
+			Category:   d.Category,
+			Variant:    d.Variant,
+			StockCount: count,
+			InStock:    inStock,
+		})
+	}
 	// In stock on top, out of stock at the bottom. Stable, so the seeded
 	// category/name order is preserved within each group.
 	sort.SliceStable(items, func(i, j int) bool {
