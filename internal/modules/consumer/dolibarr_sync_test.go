@@ -152,6 +152,35 @@ func TestDolibarrEffectiveMin(t *testing.T) {
 	}
 }
 
+// Every fallback target must exist in the seed (and carry a photo), or an ERP
+// addition would silently fall back to nothing.
+func TestDolibarrFallbackMapTargetsExistInSeed(t *testing.T) {
+	var seed []seedProduct
+	if err := json.Unmarshal(embeddedProductsSeed, &seed); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]seedProduct{}
+	for _, p := range seed {
+		byID[p.ID] = p
+	}
+	for seg, sku := range dolibarrFallbackSeedSku {
+		p, ok := byID[sku]
+		if !ok {
+			t.Errorf("fallback %s → %q: sku not in products_seed.json", seg, sku)
+			continue
+		}
+		if p.ImageAsset == "" {
+			t.Errorf("fallback %s → %q: seeded product has no image asset", seg, sku)
+		}
+	}
+	// every category segment has a fallback (no family renders empty)
+	for seg := range dolibarrCategoryBySegment {
+		if _, ok := dolibarrFallbackSeedSku[seg]; !ok {
+			t.Errorf("segment %s has a category but no photo fallback", seg)
+		}
+	}
+}
+
 func TestDolibarrAdditionSkuAndImagePath(t *testing.T) {
 	if got := dolibarrAdditionSku("PRG-KALAKAND-1KG"); got != "dol-prg-kalakand-1kg" {
 		t.Fatalf("sku: %q", got)

@@ -113,6 +113,21 @@ var dolibarrCategoryBySegment = map[string]string{
 // they can never duplicate a product in the app.
 var dolibarrRefPattern = regexp.MustCompile(`^PRG-[A-Z0-9-]+$`)
 
+// dolibarrFallbackSeedSku maps a PRG-<CAT> segment to the seeded product whose
+// photos stand in for an ERP addition that has NO image of its own — image
+// policy: an ERP-uploaded image always wins; otherwise the card reuses the art
+// we already have for that family instead of rendering empty.
+var dolibarrFallbackSeedSku = map[string]string{
+	"TONED": "taaza-500ml", "FCM": "gold-500ml", "STD": "shakti-500ml",
+	"TEA": "chai-special-500ml", "FLAVMILK": "flavoured-milk-200ml",
+	"GHEE": "ghee-poly-500ml", "BUTTER": "butter-100g", "DAHI": "dahi-plain-200g",
+	"PANEER": "paneer-vac-200g", "KHOYA": "khoya-500g", "LASSI": "lassi-200g",
+	"MATTHA": "mattha-200ml", "CHHACH": "chaach-500ml",
+	"PEDA": "peda-250g", "MILKCAKE": "milk-cake-250g", "KALAKAND": "milk-cake-250g",
+	"GULABJAMUN": "gulab-jamun-200g", "RASGOLLA": "rasgolla-200g",
+	"LADDOO": "ladoo-besan-250g", "KHEER": "kheer-chhena-100g", "SHREEKHAND": "shree-khand-100g",
+}
+
 // dolibarrVATSuffix extracts the GST %% from a Dolibarr vat code like "C+S-5"
 // or "C+S-00" — the instance stores prices ex-GST (price_base_type=HT) with
 // tva_tx unset, so the consumer price is price × (1 + rate/100).
@@ -194,7 +209,7 @@ func dolibarrImagePath(folder, file string) string {
 // name/variant split, back covers). A state row with an older v forces one
 // re-patch of its catalog row, so schema migrations ship with the code — no
 // manual database edits ever.
-const dolibarrSyncSchemaV = 2
+const dolibarrSyncSchemaV = 3 // v3: family-fallback photos for additions without ERP images
 
 // dolibarrSyncState is one ref's sync bookkeeping row (collection dolibarr_sync).
 type dolibarrSyncState struct {
@@ -362,7 +377,14 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	cfg := s.deps.Cfg
 	sku := dolibarrAdditionSku(ref)
 	name, variant := dolibarrSplitLabel(p.Label)
-	front, back := s.dolibarrPickPhotos(ctx, cli, ref, st)
+	// Image policy: an ERP-uploaded image ALWAYS wins; a photo already on the
+	// row (manager-set or earlier) is respected; only a photo-less card falls
+	// back to our own family art so nothing ever renders empty.
+	erpFront, erpBack := s.dolibarrPickPhotos(ctx, cli, ref, st)
+	front, back := erpFront, erpBack
+	if front == "" && s.currentAdditionPhoto(ctx, sku) == "" {
+		front, back = s.dolibarrFallbackPhotos(ctx, ref)
+	}
 
 	if st.Mode != "addition" { // first sight → create
 		subscribable := false
@@ -399,7 +421,7 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	}
 
 	if st.Mode == "addition" && st.Price == price && st.Name == p.Label &&
-		(front == "" || front == st.PhotoURL) && !st.HiddenBySync && st.SchemaV >= dolibarrSyncSchemaV {
+		(erpFront == "" || erpFront == st.PhotoURL) && !st.HiddenBySync && st.SchemaV >= dolibarrSyncSchemaV {
 		return // unchanged (and already written in the current schema shape)
 	}
 	set := bson.D{
@@ -428,9 +450,48 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	}
 	s.saveDolibarrState(ctx, dolibarrSyncState{
 		Ref: ref, DolibarrID: p.ID.Int(), SkuID: sku, Mode: "addition",
-		Price: price, Name: p.Label, PhotoURL: front,
+		Price: price, Name: p.Label, PhotoURL: erpFront,
 	})
 	s.log.Info("dolibarr product updated", "ref", ref, "sku", sku, "price", price)
+}
+
+// currentAdditionPhoto reads the photo the addition row carries right now —
+// a manager-set (or previously applied) photo must never be clobbered by a
+// family fallback. "" when the row does not exist yet or has no photo.
+func (s *service) currentAdditionPhoto(ctx context.Context, sku string) string {
+	var row struct {
+		PhotoURL string `bson:"photo_url"`
+	}
+	_ = s.deps.DB.Collection(collCatalog).FindOne(ctx, bson.D{
+		{Key: "store_id", Value: s.deps.Cfg.DolibarrStoreID},
+		{Key: "sku_id", Value: sku},
+	}).Decode(&row)
+	return row.PhotoURL
+}
+
+// dolibarrFallbackPhotos returns the seeded family art (front, back) for an ERP
+// ref with no image of its own; ("","") when the family has no seeded stand-in.
+func (s *service) dolibarrFallbackPhotos(ctx context.Context, ref string) (string, string) {
+	parts := strings.Split(ref, "-")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	seedSku, ok := dolibarrFallbackSeedSku[parts[1]]
+	if !ok {
+		return "", ""
+	}
+	var row struct {
+		PhotoURL     string `bson:"photo_url"`
+		BackPhotoURL string `bson:"back_photo_url"`
+	}
+	if err := s.deps.DB.Collection(collCatalog).FindOne(ctx, bson.D{
+		{Key: "store_id", Value: globalCatalogStore},
+		{Key: "sku_id", Value: seedSku},
+		{Key: "kind", Value: catalogKindProduct},
+	}).Decode(&row); err != nil {
+		return "", ""
+	}
+	return row.PhotoURL, row.BackPhotoURL
 }
 
 // dolibarrPickPhotos returns proxy paths for the product's cover images: the
