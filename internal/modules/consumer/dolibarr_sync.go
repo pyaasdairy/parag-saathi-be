@@ -651,7 +651,7 @@ func (s *service) runDolibarrStockOut(ctx context.Context, cli *dolibarr.Client)
 			Qty:         r.Qty,
 			Code:        fmt.Sprintf("SAATHI-STKOUT-%s-%s", date, st.Ref),
 			Label:       "Daily net consumer delivery " + date,
-			Datem:       dayEnd.Add(-30 * time.Minute).UTC().Format("2006-01-02 15:04:05"),
+			Datem:       date, // live 23.0.3 validates datem as date-only (YYYY-MM-DD)
 		}
 		if !cfg.DolibarrPostStockOut {
 			s.log.Info("dolibarr stock-out DRY-RUN", "code", m.Code, "product_id", m.ProductID, "qty", -m.Qty)

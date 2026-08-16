@@ -160,7 +160,7 @@ type StockOut struct {
 	Qty         int64  // POSITIVE net units delivered; posted as -Qty (output)
 	Code        string // movementcode, e.g. SAATHI-STKOUT-2026-08-15-Parag_Gold
 	Label       string // human label, e.g. "Daily net consumer delivery 2026-08-15"
-	Datem       string // "YYYY-MM-DD HH:MM:SS" movement datetime
+	Datem       string // "YYYY-MM-DD" — live 23.0.3 rejects datetime here
 }
 
 // PostStockOut books m as an OUTPUT movement — after re-checking the
