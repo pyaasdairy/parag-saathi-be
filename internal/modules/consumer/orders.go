@@ -236,25 +236,37 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	if len(in.Items) == 0 {
 		return nil, errBadRequest("an order needs at least one item")
 	}
-	// Money is recomputed SERVER-SIDE from the items; the client-supplied `total`
-	// is IGNORED (an authoritative total = subtotal + fee). A client cannot deflate
-	// or inflate the bill. NOTE: unit prices are still taken from the item lines
-	// pending a server-side product catalogue (a follow-up) — until then a coupon
-	// discount is not applied server-side, so total = gross.
+	// Money is recomputed SERVER-SIDE: the client-supplied `total` is ignored
+	// AND every unit price comes from the server's own catalog
+	// (catalog_price.go) — a tampered client can neither deflate nor inflate a
+	// line ("₹0 milk" closed). Unknown or hidden products are rejected, never
+	// guessed.
+	priceIx, err := s.loadPriceIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var subtotal float64
 	var units int
 	items := make([]orderItem, 0, len(in.Items))
 	for _, it := range in.Items {
-		if it.Qty <= 0 || it.Price < 0 {
+		if it.Qty <= 0 {
 			return nil, errBadRequest("invalid order item")
 		}
 		if it.Qty > maxQtyPerProduct {
 			return nil, errBadRequest("quantity per item exceeds the limit")
 		}
+		price, ok := priceIx.priceFor(it.ProductID, it.Variant)
+		if !ok {
+			return nil, errBadRequest("unknown product in order: " + it.ProductID)
+		}
+		name := priceIx.nameFor(it.ProductID)
+		if name == "" {
+			name = it.Name // catalog rows without a name keep the client label
+		}
 		units += it.Qty
-		subtotal += it.Price * float64(it.Qty)
+		subtotal += price * float64(it.Qty)
 		items = append(items, orderItem{
-			ID: newItemID(), ProductID: it.ProductID, Name: it.Name, Variant: it.Variant, Price: round2(it.Price), Qty: it.Qty,
+			ID: newItemID(), ProductID: it.ProductID, Name: name, Variant: it.Variant, Price: round2(price), Qty: it.Qty,
 		})
 	}
 	if units > maxItemsPerOrder {

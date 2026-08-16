@@ -37,6 +37,16 @@ const (
 	reviewWalletFloor = 500.0        // ₹ kept available on every review login
 )
 
+// reviewLoginEnabled gates the Play-review bypass. The phone + OTP constants
+// above live in a public repo, and the review account tops its wallet up to a
+// spendable floor — left always-on in production that is a money mint anyone
+// can operate. It now runs ONLY when REVIEW_LOGIN_ENABLED=true is set (flip it
+// on for a Play-review window, off again after) or in OTP dev mode. Disabled,
+// the review number behaves like any other phone (normal OTP-over-SMS).
+func (s *service) reviewLoginEnabled() bool {
+	return os.Getenv("REVIEW_LOGIN_ENABLED") == "true" || s.deps.Cfg.OTPDevMode
+}
+
 var phoneRe = regexp.MustCompile(`^[6-9]\d{9}$`)
 
 type service struct {
@@ -109,7 +119,7 @@ func (s *service) requestOTP(ctx context.Context, phone string) (string, time.Ti
 	// Google Play review number: never mint or send a code — the OTP is the fixed
 	// reviewOTP constant, verified in verifyOTP. Return success (before the MSG91
 	// call) so the app advances to the code screen; no SMS, works from any country.
-	if phone == reviewPhone {
+	if phone == reviewPhone && s.reviewLoginEnabled() {
 		return "", now.Add(s.deps.Cfg.OTPTTL), nil
 	}
 	code, err := auth.GenerateNumericOTP(otpLength)
@@ -155,7 +165,7 @@ func (s *service) verifyOTP(ctx context.Context, phone, code string) (*tokenPair
 	// (so it never expires and needs no prior /request), then ensure the
 	// self-healing review account (wallet floor + Lucknow address) before issuing
 	// tokens. Gated to reviewPhone + reviewOTP, so no real shopper is affected.
-	if phone == reviewPhone && code == reviewOTP {
+	if phone == reviewPhone && code == reviewOTP && s.reviewLoginEnabled() {
 		now := time.Now().UTC()
 		acct, err := s.ensureReviewAccount(ctx, now)
 		if err != nil {

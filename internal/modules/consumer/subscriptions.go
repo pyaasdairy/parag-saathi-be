@@ -335,11 +335,19 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 	if in.Qty <= 0 || in.Qty > maxQtyPerProduct {
 		return nil, errBadRequest("qty must be between 1 and 10")
 	}
-	if in.UnitPrice <= 0 {
-		return nil, errBadRequest("unit_price must be positive")
-	}
 	if !subscriptionFrequencies[in.Frequency] {
 		return nil, errBadRequest("frequency must be one of: daily, alternate, weekly")
+	}
+	// The unit price is resolved SERVER-SIDE from the catalog (catalog_price.go)
+	// — the client-sent unit_price is ignored, so a tampered app cannot start a
+	// ₹0 (or inflated) daily plan. Unknown/hidden products are rejected.
+	priceIx, err := s.loadPriceIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	unitPrice, ok := priceIx.priceFor(in.ProductID, in.Variant)
+	if !ok {
+		return nil, errBadRequest("unknown product: " + in.ProductID)
 	}
 	now := time.Now().UTC()
 	start := in.StartDate
@@ -361,7 +369,7 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 	}
 	sub := &subscription{
 		MongoID: primitive.NewObjectID(), SubscriptionID: newSubscriptionID(), ConsumerID: consumerID,
-		ProductID: in.ProductID, Name: name, Variant: in.Variant, Qty: in.Qty, UnitPrice: round2(in.UnitPrice),
+		ProductID: in.ProductID, Name: name, Variant: in.Variant, Qty: in.Qty, UnitPrice: round2(unitPrice),
 		Frequency: in.Frequency, DeliverySlot: in.DeliverySlot, Status: "active", StartDate: start,
 		Vacations: in.Vacations, CreatedAt: now, UpdatedAt: now,
 	}

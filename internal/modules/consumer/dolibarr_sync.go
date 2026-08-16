@@ -209,7 +209,7 @@ func dolibarrImagePath(folder, file string) string {
 // name/variant split, back covers). A state row with an older v forces one
 // re-patch of its catalog row, so schema migrations ship with the code — no
 // manual database edits ever.
-const dolibarrSyncSchemaV = 3 // v3: family-fallback photos for additions without ERP images
+const dolibarrSyncSchemaV = 4 // v4: ERP on-hand mirrored into inventory stock_count
 
 // dolibarrSyncState is one ref's sync bookkeeping row (collection dolibarr_sync).
 type dolibarrSyncState struct {
@@ -221,6 +221,7 @@ type dolibarrSyncState struct {
 	Name         string    `bson:"name"`
 	PhotoURL     string    `bson:"photo_url,omitempty"`
 	HiddenBySync bool      `bson:"hidden_by_sync,omitempty"`
+	Stock        int64     `bson:"stock,omitempty"` // last ERP on-hand mirrored to inventory
 	SchemaV      int       `bson:"schema_v,omitempty"`
 	UpdatedAt    time.Time `bson:"updated_at"`
 }
@@ -341,9 +342,16 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 // override — price ONLY. Name/photo/category of seeded products belong to the
 // app and are never touched (that is what "must not affect anything" means).
 func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, ref, seedSku string, price float64, p dolibarr.Product, st *dolibarrSyncState) {
-	if st.Mode == "baseline" && st.Price == price && !st.HiddenBySync {
+	stock := p.StockReel.Int()
+	if st.Mode == "baseline" && st.Price == price && !st.HiddenBySync &&
+		st.Stock == stock && st.SchemaV >= dolibarrSyncSchemaV {
 		return // unchanged
 	}
+	// REAL inventory: the ERP's on-hand (GRN-in via the Dolibarr UI, minus our
+	// nightly delivery-outs) IS the store's stock number — mirror it onto the
+	// seeded row so the store console and low-stock alerts run on ERP truth.
+	// The manager keeps the in/out-of-stock SWITCH; the COUNT is the ledger's.
+	s.setSeededStockCount(ctx, seedSku, stock)
 	set := bson.D{{Key: "price", Value: &price}}
 	if st.HiddenBySync { // ERP put it back ON sale → restore availability
 		on := true
@@ -356,9 +364,9 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 	}
 	s.saveDolibarrState(ctx, dolibarrSyncState{
 		Ref: ref, DolibarrID: p.ID.Int(), SkuID: seedSku, Mode: "baseline",
-		Price: price, Name: p.Label,
+		Price: price, Name: p.Label, Stock: stock,
 	})
-	s.log.Info("dolibarr price → baseline", "ref", ref, "sku", seedSku, "price", price)
+	s.log.Info("dolibarr → baseline", "ref", ref, "sku", seedSku, "price", price, "stock", stock)
 }
 
 // syncAddition upserts an ERP-only product as a store addition. On INSERT the
@@ -377,6 +385,7 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	cfg := s.deps.Cfg
 	sku := dolibarrAdditionSku(ref)
 	name, variant := dolibarrSplitLabel(p.Label)
+	stock := p.StockReel.Int()
 	// Image policy: an ERP-uploaded image ALWAYS wins; a photo already on the
 	// row (manager-set or earlier) is respected; only a photo-less card falls
 	// back to our own family art so nothing ever renders empty.
@@ -407,6 +416,8 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 		if ml := p.VolumeMl(); ml > 0 {
 			doc.Physical = &physicalDoc{VolumeMl: ml}
 		}
+		sc := int(stock)
+		doc.StockCount = &sc
 		if err := s.repo.insertAddition(ctx, doc); err != nil {
 			// duplicate (row already there from a lost state db) → fall through to patch
 			s.log.Debug("dolibarr insertAddition", "ref", ref, "err", err)
@@ -421,15 +432,18 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	}
 
 	if st.Mode == "addition" && st.Price == price && st.Name == p.Label &&
-		(erpFront == "" || erpFront == st.PhotoURL) && !st.HiddenBySync && st.SchemaV >= dolibarrSyncSchemaV {
+		(erpFront == "" || erpFront == st.PhotoURL) && !st.HiddenBySync &&
+		st.Stock == stock && st.SchemaV >= dolibarrSyncSchemaV {
 		return // unchanged (and already written in the current schema shape)
 	}
+	sc := int(stock)
 	set := bson.D{
 		{Key: "name", Value: name},
 		{Key: "variant", Value: variant},
 		{Key: "unit", Value: variant},
 		{Key: "description", Value: p.Description},
 		{Key: "price", Value: &price},
+		{Key: "stock_count", Value: &sc}, // ERP on-hand = inventory truth
 	}
 	if mrp := dolibarrEffectiveMin(p); mrp > 0 && mrp >= price {
 		set = append(set, bson.E{Key: "mrp", Value: &mrp})
@@ -450,9 +464,9 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	}
 	s.saveDolibarrState(ctx, dolibarrSyncState{
 		Ref: ref, DolibarrID: p.ID.Int(), SkuID: sku, Mode: "addition",
-		Price: price, Name: p.Label, PhotoURL: erpFront,
+		Price: price, Name: p.Label, PhotoURL: erpFront, Stock: stock,
 	})
-	s.log.Info("dolibarr product updated", "ref", ref, "sku", sku, "price", price)
+	s.log.Info("dolibarr product updated", "ref", ref, "sku", sku, "price", price, "stock", stock)
 }
 
 // currentAdditionPhoto reads the photo the addition row carries right now —
@@ -515,6 +529,22 @@ func (s *service) dolibarrPickPhotos(ctx context.Context, cli *dolibarr.Client, 
 		return imgs[0], ""
 	default:
 		return imgs[0], imgs[1]
+	}
+}
+
+// setSeededStockCount mirrors the ERP on-hand onto a seeded product's
+// stock_count (the number the store console's inventory/low-stock run on).
+// Count = ledger truth; the manager's in/out-of-stock switch stays untouched.
+func (s *service) setSeededStockCount(ctx context.Context, sku string, stock int64) {
+	_, err := s.deps.DB.Collection(collCatalog).UpdateOne(ctx,
+		bson.D{{Key: "store_id", Value: globalCatalogStore}, {Key: "sku_id", Value: sku}, {Key: "kind", Value: catalogKindProduct}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "stock_count", Value: int(stock)},
+			{Key: "updated_by", Value: dolibarrUpdatedBy},
+			{Key: "updated_at", Value: time.Now().UTC()},
+		}}})
+	if err != nil {
+		s.log.Warn("dolibarr seeded stock mirror failed", "sku", sku, "err", err)
 	}
 }
 
