@@ -64,6 +64,10 @@ func Register(r chi.Router, d *deps.Deps) {
 		go svc.dolibarrWorkers(context.Background())
 	}
 
+	// Subscription auto-renewal (mandate_worker.go): charges due ACTIVE
+	// mandates through the same idempotent money gate as the manual/dev path.
+	go svc.mandateAutoRenewalWorker(context.Background())
+
 	r.Route("/consumer", func(cr chi.Router) {
 		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
 		// operator envelope, on unknown consumer routes.
