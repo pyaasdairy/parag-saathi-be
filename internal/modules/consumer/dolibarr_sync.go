@@ -384,15 +384,24 @@ func (s *service) saveDolibarrState(ctx context.Context, st dolibarrSyncState) {
 // (istZone — IST as a fixed offset — is shared from trial.go)
 
 func (s *service) dolibarrStockOutLoop(ctx context.Context, cli *dolibarr.Client) {
-	var lastRun string // IST date the job last ran for
+	// boot delay: never race the DB/HTTP startup (same guard as the catalog loop)
+	select {
+	case <-time.After(30 * time.Second):
+	case <-ctx.Done():
+		return
+	}
+	var lastRun string // IST date the job last SUCCEEDED for
 	for {
 		now := time.Now().In(istZone)
 		today := now.Format("2006-01-02")
 		if now.Hour() == s.deps.Cfg.DolibarrStockOutHourIST && lastRun != today {
 			if err := s.runDolibarrStockOut(ctx, cli); err != nil {
-				s.log.Warn("dolibarr stock-out failed", "err", err)
+				// failure does NOT mark the day done — the 10-min tick retries
+				// within the hour window (the job is idempotent end to end)
+				s.log.Warn("dolibarr stock-out failed (will retry)", "err", err)
+			} else {
+				lastRun = today
 			}
-			lastRun = today
 		}
 		select {
 		case <-time.After(10 * time.Minute):
