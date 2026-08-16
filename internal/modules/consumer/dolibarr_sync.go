@@ -250,9 +250,13 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 		synced++
 	}
 
-	// ERP rows that vanished (or went off-sale): hide ONLY additions this sync
-	// created — seeded baseline products are the app's own and are never hidden.
-	cur, err := stateCol.Find(ctx, bson.D{{Key: "mode", Value: "addition"}})
+	// ERP rows that vanished or went "Not for sale" (mode=1 pull excludes them):
+	// the ERP is the master, so the app follows automatically —
+	//   * additions this sync created → HIDDEN (gone from the consumer feed);
+	//   * baseline-mapped seeded SKUs → in_stock=false override (auto out-of-
+	//     stock; the seeded product itself stays, and comes back in stock the
+	//     moment the ERP puts it back on sale — see syncBaselinePrice).
+	cur, err := stateCol.Find(ctx, bson.D{})
 	if err == nil {
 		var all []dolibarrSyncState
 		_ = cur.All(ctx, &all)
@@ -260,13 +264,26 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 			if seen[st.Ref] || st.HiddenBySync {
 				continue
 			}
-			hidden := true
-			if _, err := s.repo.patchExisting(ctx, cfg.DolibarrStoreID, st.SkuID,
-				bson.D{{Key: "hidden", Value: &hidden}}, dolibarrUpdatedBy); err == nil {
-				_, _ = stateCol.UpdateByID(ctx, st.Ref, bson.D{{Key: "$set", Value: bson.D{
-					{Key: "hidden_by_sync", Value: true}, {Key: "updated_at", Value: time.Now().UTC()}}}})
-				s.log.Info("dolibarr addition hidden (gone from ERP)", "ref", st.Ref, "sku", st.SkuID)
+			switch st.Mode {
+			case "addition":
+				hidden := true
+				if _, err := s.repo.patchExisting(ctx, cfg.DolibarrStoreID, st.SkuID,
+					bson.D{{Key: "hidden", Value: &hidden}}, dolibarrUpdatedBy); err != nil {
+					continue
+				}
+				s.log.Info("dolibarr addition hidden (off-sale/gone in ERP)", "ref", st.Ref, "sku", st.SkuID)
+			case "baseline":
+				off := false
+				if _, err := s.repo.upsertOverride(ctx, cfg.DolibarrStoreID, st.SkuID,
+					bson.D{{Key: "in_stock", Value: &off}}, dolibarrUpdatedBy); err != nil {
+					continue
+				}
+				s.log.Info("dolibarr baseline auto out-of-stock (off-sale in ERP)", "ref", st.Ref, "sku", st.SkuID)
+			default:
+				continue
 			}
+			_, _ = stateCol.UpdateByID(ctx, st.Ref, bson.D{{Key: "$set", Value: bson.D{
+				{Key: "hidden_by_sync", Value: true}, {Key: "updated_at", Value: time.Now().UTC()}}}})
 		}
 	}
 	s.log.Info("dolibarr catalog sync done", "erp_products", len(products), "synced", synced, "legacy_skipped", skipped)
@@ -277,10 +294,15 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 // override — price ONLY. Name/photo/category of seeded products belong to the
 // app and are never touched (that is what "must not affect anything" means).
 func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, ref, seedSku string, price float64, p dolibarr.Product, st *dolibarrSyncState) {
-	if st.Mode == "baseline" && st.Price == price {
+	if st.Mode == "baseline" && st.Price == price && !st.HiddenBySync {
 		return // unchanged
 	}
 	set := bson.D{{Key: "price", Value: &price}}
+	if st.HiddenBySync { // ERP put it back ON sale → restore availability
+		on := true
+		set = append(set, bson.E{Key: "in_stock", Value: &on})
+		s.log.Info("dolibarr baseline back in stock (on sale again in ERP)", "ref", ref, "sku", seedSku)
+	}
 	if _, err := s.repo.upsertOverride(ctx, s.deps.Cfg.DolibarrStoreID, seedSku, set, dolibarrUpdatedBy); err != nil {
 		s.log.Warn("dolibarr baseline override failed", "ref", ref, "sku", seedSku, "err", err)
 		return
