@@ -57,6 +57,13 @@ func Register(r chi.Router, d *deps.Deps) {
 	// (subscription, IST day); money still settles on delivery.
 	go svc.subscriptionOrderWorker(context.Background())
 
+	// Dolibarr ERP integration (dolibarr_sync.go): inbound catalog mirror +
+	// nightly net stock-out. Fully OFF unless DOLIBARR_URL/API_KEY are set —
+	// the guard means zero impact on every existing flow.
+	if d.Cfg.DolibarrEnabled() {
+		go svc.dolibarrWorkers(context.Background())
+	}
+
 	r.Route("/consumer", func(cr chi.Router) {
 		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
 		// operator envelope, on unknown consumer routes.
@@ -95,6 +102,12 @@ func Register(r chi.Router, d *deps.Deps) {
 		// art and never KYC/profile files. The seed stores stable paths that
 		// resolve here (photo_url = "catalog/img/<file>").
 		cr.Get("/catalog/img/*", h.catalogImage)
+
+		// Dolibarr product photos — PUBLIC read-only proxy over the ERP's
+		// document store, scoped to product images (dolibarr_sync.go). Serves
+		// 404 when the integration is off; photo_url values of ERP-synced
+		// additions resolve here ("catalog/dolimg/<ref>/<file>").
+		cr.Get("/catalog/dolimg/*", h.dolibarrImage)
 
 		// Geofence serviceability — consumer-app-gated (same X-Parag-App-Key).
 		// The app asks "can we deliver here, how fast?" before checkout, and lets
