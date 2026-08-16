@@ -84,13 +84,15 @@ func TestActionTargetsAreReachable(t *testing.T) {
 }
 
 // TestMandateChargeRefIdempotencyKey pins the exactly-once execution key: it is
-// STABLE for a given (mandate, UTC day) — so two ticks on the same day collapse
-// onto one wallet gate row and can't double-charge — and DISTINCT across days
-// and across mandates.
+// STABLE for a given (mandate, IST day) — so two ticks on the same delivery day
+// collapse onto one wallet gate row and can't double-charge — and DISTINCT
+// across days and across mandates. IST, not UTC: the trial ledger and delivery
+// settle key on the consumer's calendar day, and a mandate tick between IST and
+// UTC midnight must land on the same day as the delivery it pays for.
 func TestMandateChargeRefIdempotencyKey(t *testing.T) {
-	// Two instants on the same UTC day → same day key → same ref.
-	morning := time.Date(2026, 7, 29, 5, 30, 0, 0, time.UTC)
-	evening := time.Date(2026, 7, 29, 23, 59, 0, 0, time.UTC)
+	// Two instants on the same IST day → same day key → same ref.
+	morning := time.Date(2026, 7, 29, 5, 30, 0, 0, time.UTC)  // 11:00 IST, 29 Jul
+	evening := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC)  // 23:30 IST, 29 Jul
 	if dayKey(morning) != dayKey(evening) {
 		t.Fatalf("same-day keys differ: %q vs %q", dayKey(morning), dayKey(evening))
 	}
@@ -112,10 +114,14 @@ func TestMandateChargeRefIdempotencyKey(t *testing.T) {
 	if r := mandateChargeRef("mnd_xyz", dayKey(morning)); r == refA {
 		t.Errorf("distinct mandates must not share a ref, got %q for both", r)
 	}
-	// The day key normalises across timezones to the same UTC calendar day.
-	istEarly := time.Date(2026, 7, 29, 2, 0, 0, 0, time.FixedZone("IST", 5*3600+1800))
-	if got := dayKey(istEarly); got != "2026-07-28" {
-		t.Errorf("dayKey must be UTC-normalised; got %q, want 2026-07-28", got)
+	// IST midnight is the boundary, not UTC midnight: 18:29 UTC is 23:59 IST
+	// (still 29 Jul), 18:31 UTC is 00:01 IST (already 30 Jul). Same UTC day,
+	// different charge days — this is precisely the delivery-day alignment.
+	if got := dayKey(time.Date(2026, 7, 29, 18, 29, 0, 0, time.UTC)); got != "2026-07-29" {
+		t.Errorf("pre-IST-midnight key = %q, want 2026-07-29", got)
+	}
+	if got := dayKey(time.Date(2026, 7, 29, 18, 31, 0, 0, time.UTC)); got != "2026-07-30" {
+		t.Errorf("post-IST-midnight key = %q, want 2026-07-30", got)
 	}
 }
 

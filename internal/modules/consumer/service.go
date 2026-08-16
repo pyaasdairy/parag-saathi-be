@@ -49,6 +49,15 @@ func (s *service) reviewLoginEnabled() bool {
 
 var phoneRe = regexp.MustCompile(`^[6-9]\d{9}$`)
 
+// reviewLoginEnabled gates the fixed-OTP Play-review account. It MINTS SPENDABLE
+// WALLET CREDIT (the ₹500 floor refills on every login), so unlike the other dev
+// seams it must never be reachable by default: enable it explicitly with
+// REVIEW_LOGIN_ENABLED=true for the duration of a store review, then turn it
+// off. Default off — a copy-pasted dev .env cannot open it by accident.
+func reviewLoginEnabled() bool {
+	return strings.EqualFold(os.Getenv("REVIEW_LOGIN_ENABLED"), "true")
+}
+
 type service struct {
 	deps *deps.Deps
 	repo *repository

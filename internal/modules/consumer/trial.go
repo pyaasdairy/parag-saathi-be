@@ -12,7 +12,14 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// SUBSCRIPTION TRIAL ENGINE — the "2+2" welcome trial (2 PAID then 2 FREE).
+// SUBSCRIPTION TRIAL ENGINE — the "2+2" welcome trial (2 FREE then 2 PAID).
+//
+// POLARITY IS LOAD-BEARING. The home banners promise "Your first 2 days are
+// completely free" and the consumer app implements free-first. This engine
+// originally charged the first two delivered days and freed days 3-4 — the
+// exact inverse of the marketing, so every trial member was billed for the
+// days the first screen of the app gave away. If you ever change the order
+// here, change the app (lib/trial.ts) and the banner art in the same breath.
 //
 // The free-pack funnel: a new shopper's gold-500ml (Gold full-cream) daily
 // subscription pays for its FIRST 2 delivered days at full price, then the NEXT
@@ -32,11 +39,11 @@ import (
 const collConsumerTrials = "consumer_trials"
 
 const (
-	trialPaidDays = 2 // full-price delivered days at the start of the trial (gold-500ml)
-	trialFreeDays = 2 // free (charged 0) delivered days that follow
+	trialPaidDays = 2 // full-price delivered days AFTER the free window (gold-500ml)
+	trialFreeDays = 2 // free (charged 0) delivered days that OPEN the trial
 
-	trialPhasePaid = "paid" // still inside the first 2 full-price days
-	trialPhaseFree = "free" // inside the 2 free days (charge 0)
+	trialPhasePaid = "paid" // inside the 2 full-price days after the free window
+	trialPhaseFree = "free" // inside the FIRST 2 days (charge 0)
 	trialPhaseDone = "done" // trial exhausted — charge normally
 )
 
@@ -108,24 +115,25 @@ type trialView struct {
 // delivered day will be), given how many paid/free days have already landed.
 func trialPhaseFor(deliveredPaid, deliveredFree int) string {
 	switch {
-	case deliveredPaid < trialPaidDays:
-		return trialPhasePaid
 	case deliveredFree < trialFreeDays:
 		return trialPhaseFree
+	case deliveredPaid < trialPaidDays:
+		return trialPhasePaid
 	default:
 		return trialPhaseDone
 	}
 }
 
 // trialApply computes the effective amount + phase for ONE new distinct delivered
-// day and returns the advanced counts. FIRST 3 → full (paid++); NEXT 3 → 0
-// (free++); after 6 → full ("done"). Pure: the caller owns persistence.
+// day and returns the advanced counts. FIRST 2 delivered days → 0 (free++);
+// NEXT 2 → full (paid++); after 4 → full ("done"). Pure: the caller owns
+// persistence.
 func trialApply(deliveredPaid, deliveredFree int, fullAmount float64) (effective float64, phase string, newPaid, newFree int) {
 	switch {
-	case deliveredPaid < trialPaidDays:
-		return fullAmount, trialPhasePaid, deliveredPaid + 1, deliveredFree
 	case deliveredFree < trialFreeDays:
 		return 0, trialPhaseFree, deliveredPaid, deliveredFree + 1
+	case deliveredPaid < trialPaidDays:
+		return fullAmount, trialPhasePaid, deliveredPaid + 1, deliveredFree
 	default:
 		return fullAmount, trialPhaseDone, deliveredPaid, deliveredFree
 	}
@@ -181,8 +189,8 @@ func (t *consumerTrial) view() trialView {
 		DeliveredFree: t.DeliveredFree,
 		PaidRemaining: max(0, trialPaidDays-t.DeliveredPaid),
 		FreeRemaining: max(0, trialFreeDays-t.DeliveredFree),
-		// Free is "active" only once the paid quota is met and free days remain.
-		FreeActive: t.DeliveredPaid >= trialPaidDays && t.DeliveredFree < trialFreeDays,
+		// Free-first: the free window is active from day one until its quota lands.
+		FreeActive: t.DeliveredFree < trialFreeDays,
 	}
 }
 
@@ -209,7 +217,7 @@ func (r *repository) getOrCreateTrial(ctx context.Context, consumerID primitive.
 			{Key: "consumer_id", Value: consumerID},
 			{Key: "delivered_paid", Value: 0},
 			{Key: "delivered_free", Value: 0},
-			{Key: "phase", Value: trialPhasePaid},
+			{Key: "phase", Value: trialPhaseFree},
 			{Key: "charges", Value: []trialCharge{}},
 			{Key: "seq", Value: int64(0)},
 			{Key: "created_at", Value: now},
@@ -273,8 +281,12 @@ func (s *service) trialChargeFor(ctx context.Context, consumerID primitive.Objec
 		}
 		// Lost the race — the winner may have taken this very key; loop re-reads.
 	}
-	// Exhausted retries: return the recorded decision if the key landed, else fail
-	// closed to the full amount (never accidentally give a free charge).
+	// Exhausted retries: return the recorded decision if the key landed, else
+	// charge what the CURRENT phase says. The old fallback returned the full
+	// amount unconditionally ("never accidentally give a free charge") — which
+	// meant a lost-CAS race on a FREE day billed the member full price for
+	// marketed-free milk, and recorded nothing. Honouring the visible phase is
+	// still safe: the window never advances on this path.
 	t, err := s.repo.getOrCreateTrial(ctx, consumerID)
 	if err != nil {
 		return 0, "", err
@@ -282,7 +294,8 @@ func (s *service) trialChargeFor(ctx context.Context, consumerID primitive.Objec
 	if rec, ok := t.findCharge(deliveryKey); ok {
 		return effectiveForPhase(rec.Phase, full), rec.Phase, nil
 	}
-	return full, trialPhaseFor(t.DeliveredPaid, t.DeliveredFree), nil
+	ph := trialPhaseFor(t.DeliveredPaid, t.DeliveredFree)
+	return effectiveForPhase(ph, full), ph, nil
 }
 
 func (s *service) trialFor(ctx context.Context, consumerID primitive.ObjectID) (trialView, error) {

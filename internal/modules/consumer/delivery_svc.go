@@ -562,7 +562,13 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	// whose parent order was cancelled (a stale task must never debit money or
 	// resurrect a cancelled order to delivered). The parent is kept for the
 	// trial gate below (trial pricing applies only to SUBSCRIPTION deliveries).
-	parent, _ := s.repo.findOrderAnyUser(ctx, d.OrderID)
+	parent, perr := s.repo.findOrderAnyUser(ctx, d.OrderID)
+	if perr != nil {
+		// A transient lookup failure must FAIL the settle, not silently skip the
+		// cancelled-order guard and the trial gate below — skipping the trial
+		// gate bills a FREE day at full price. The rider app retries.
+		return nil, perr
+	}
 	if parent != nil && parent.Status == "cancelled" {
 		_, _ = s.repo.updateDelivery(ctx, d.ID,
 			bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: "Order cancelled by the customer"}, {Key: "updated_at", Value: time.Now().UTC()}},
@@ -588,8 +594,8 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 		}
 		amount := d.Amount
 		// FULL-CREAM SUBSCRIPTION deliveries (the morning run) flow through the
-		// "2 PAID then 2 FREE" welcome trial: the first 2 delivered days pay full,
-		// the next 2 are on us (effective 0), then normal. The window counts
+		// "2 FREE then 2 PAID" welcome trial: the first 2 delivered days are on
+		// us (effective 0), the next 2 pay full, then normal. The window counts
 		// DELIVERED days (dated in IST) and is idempotent by this delivered-day key,
 		// so a settle re-run never double-advances it. Gates: the SKU must be the
 		// offer's full cream (TrialEligible ← isTrialProduct, gold-*) AND the
@@ -603,10 +609,27 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 			}
 			amount = eff
 		}
-		// A free trial day settles to 0 — no wallet movement (debit rejects ≤0).
 		if amount > 0 {
 			if _, e := s.debit(ctx, cid, amount, "delivery:"+d.OrderID, "Delivery "+d.OrderCode); e != nil {
 				return nil, e // INSUFFICIENT_FUNDS etc. surface to the rider app
+			}
+		} else {
+			// FREE trial day: no money moves, but the delivery ref MUST still be
+			// consumed with a zero-amount ledger row. The consumer app runs a
+			// settle sweep that POSTs /wallet/debit with the order's STICKER total
+			// for any delivered order whose ref it cannot see — before this row
+			// existed, every backend-free day was silently back-charged at full
+			// price by the member's own app. The gate row makes any later debit
+			// on this ref dedupe into a no-op, and gives the member a ₹0 "free
+			// day" line in their ledger to boot.
+			gate := walletTxn{
+				ID: primitive.NewObjectID(), ConsumerID: cid,
+				Type: "DEBIT", Bucket: "CASH", Amount: 0, RefType: "order",
+				RefID: "delivery:" + d.OrderID, Status: "SUCCESS",
+				Remark: "Delivery " + d.OrderCode + " (trial free day)", CreatedAt: time.Now().UTC(),
+			}
+			if _, e := s.repo.insertWalletTxnGate(ctx, gate); e != nil {
+				return nil, e // must not deliver without consuming the ref
 			}
 		}
 	}

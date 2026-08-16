@@ -255,6 +255,8 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 		if it.Qty > maxQtyPerProduct {
 			return nil, errBadRequest("quantity per item exceeds the limit")
 		}
+		// SERVER-AUTHORITATIVE PRICE: the catalog's price index is the one billed —
+		// the client's number is display-only, and unknown ids are refused.
 		price, ok := priceIx.priceFor(it.ProductID, it.Variant)
 		if !ok {
 			return nil, errBadRequest("unknown product in order: " + it.ProductID)

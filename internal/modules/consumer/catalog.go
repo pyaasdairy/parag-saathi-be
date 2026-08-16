@@ -821,6 +821,43 @@ func valOrZero(p *float64) float64 {
 
 // ── Service ─────────────────────────────────────────────────────────────────
 
+// serverPriceFor resolves the AUTHORITATIVE rupee price for a product id:
+// store override price first, then a store addition (or one of its variants),
+// then the seeded baseline. ok=false → the server has never heard of this id.
+//
+// This exists because POST /orders and POST /subscriptions used to bill the
+// client-supplied unit price with only a negative-guard: a tampered client
+// ordered any product at ₹0 (which also zeroed the delivery fee and skipped
+// the debit gate entirely) or ran a 1-paisa daily subscription. Client prices
+// are display-only; money is priced here.
+func (s *service) serverPriceFor(ctx context.Context, productID string) (float64, bool) {
+	view, err := s.repo.catalogView(ctx, s.catalogServeSeeded)
+	if err == nil && view != nil {
+		if ov, ok := view.Overrides[productID]; ok && ov.Price != nil {
+			return *ov.Price, true
+		}
+		for _, a := range view.Additions {
+			if a.ID == productID {
+				return a.Price, true
+			}
+			for _, v := range a.Variants {
+				if v.VariantID == productID {
+					if v.Price > 0 {
+						return v.Price, true
+					}
+					return a.Price, true
+				}
+			}
+		}
+	}
+	for _, b := range consumerBaseline {
+		if b.ID == productID {
+			return b.Price, true
+		}
+	}
+	return 0, false
+}
+
 // consumerCatalog builds the consumer-facing overlay (app-key gated at the
 // handler).
 func (s *service) consumerCatalog(ctx context.Context) (*catalogResponse, error) {

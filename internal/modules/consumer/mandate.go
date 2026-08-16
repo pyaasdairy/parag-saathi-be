@@ -19,8 +19,8 @@ import (
 
 // UPI-AUTOPAY / e-MANDATE seam for SUBSCRIPTION AUTO-RENEWAL.
 //
-// The "3+3" trial (3 free mornings, then 3 paid) needs a way to keep charging
-// from day 3 without the shopper re-approving each delivery. A UPI-AutoPay /
+// The "2+2" trial (2 free mornings, then 2 paid) needs a way to keep charging
+// once the paid days open without the shopper re-approving each delivery. A UPI-AutoPay /
 // e-mandate is Razorpay's recurring-payment authorization: the shopper approves
 // ONCE (a max per-debit amount + a cadence), and the merchant may then debit up
 // to that cap on schedule until the mandate is paused or cancelled.
@@ -81,9 +81,12 @@ func mandateActionTarget(action string) (string, bool) {
 	}
 }
 
-// dayKey is the UTC calendar-day idempotency key a mandate charges at most once
-// against (YYYY-MM-DD). Two ticks on the same UTC day collapse to one charge.
-func dayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
+// dayKey is the IST calendar-day idempotency key a mandate charges at most once
+// against (YYYY-MM-DD). IST, not UTC: every other money boundary in this module
+// (the trial day, the morning window) is IST, and the UTC flip lands at 05:30
+// IST — inside the delivery window — so a UTC key would let one IST morning
+// span two "days" and double-charge the day a real scheduler runs this.
+func dayKey(t time.Time) string { return t.In(istZone).Format("2006-01-02") }
 
 // mandateChargeRef is the exactly-once wallet ref for a single day's execution.
 // Stable per (mandateId, day) so a duplicate tick reuses the same gate row and
