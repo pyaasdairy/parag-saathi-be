@@ -178,11 +178,14 @@ func (c *Client) PostStockOut(ctx context.Context, m StockOut) (posted bool, err
 		return false, nil
 	}
 	body := map[string]any{
-		"product_id":    m.ProductID,
-		"warehouse_id":  m.WarehouseID,
-		"qty":           -m.Qty, // negative = stock out
-		"type":          1,      // 1 = output movement
-		"movementcode":  m.Code,
+		"product_id":   m.ProductID,
+		"warehouse_id": m.WarehouseID,
+		"qty":          -m.Qty, // negative = stock out
+		"type":         1,      // 1 = output movement
+		"movementcode": m.Code,
+		// live-verified on 23.0.3: the ledger row's label comes from "label";
+		// "movementlabel" is accepted but not persisted — send both.
+		"label":         m.Label,
 		"movementlabel": m.Label,
 	}
 	if m.Datem != "" {
