@@ -124,7 +124,16 @@ var dolibarrVATSuffix = regexp.MustCompile(`-([0-9]+(?:\.[0-9]+)?)$`)
 // that land within 2 paise of a whole rupee snap to it (float dust from the
 // ERP's 8-decimal storage).
 func dolibarrEffectivePrice(p dolibarr.Product) float64 {
-	base := p.PriceTTC.Float()
+	return dolibarrWithGST(p, p.PriceTTC.Float())
+}
+
+// dolibarrEffectiveMin is the MRP: the ERP's price_min under the same GST rule.
+// 0 when the ERP doesn't declare one.
+func dolibarrEffectiveMin(p dolibarr.Product) float64 {
+	return dolibarrWithGST(p, p.PriceMin.Float())
+}
+
+func dolibarrWithGST(p dolibarr.Product, base float64) float64 {
 	if base <= 0 {
 		return 0
 	}
@@ -158,12 +167,34 @@ func dolibarrCategory(ref, label string) string {
 // dolibarrAdditionSku is the deterministic sku_id for an ERP-only product.
 func dolibarrAdditionSku(ref string) string { return "dol-" + strings.ToLower(ref) }
 
+// dolibarrSizeSuffix matches a trailing pack size in an ERP label ("… 80 GM",
+// "… 1 LTR", "… 500ML", "… 1.5 KG").
+var dolibarrSizeSuffix = regexp.MustCompile(`(?i)\s+(\d+(?:\.\d+)?\s*(?:ml|ltr|l|gm|g|kg))\s*$`)
+
+// dolibarrSplitLabel splits an ERP label into the app's (name, variant) pair —
+// ERP labels embed the pack size ("Parag Dahi (Sada / Plain) 80 GM") while the
+// app's cards group by NAME and select by VARIANT; without the split every size
+// renders as a separate look-alike card (the "repeated 3-4 times" bug).
+func dolibarrSplitLabel(label string) (name, variant string) {
+	label = strings.TrimSpace(label)
+	if m := dolibarrSizeSuffix.FindStringSubmatch(label); m != nil {
+		return strings.TrimSpace(strings.TrimSuffix(label, m[0])), strings.TrimSpace(m[1])
+	}
+	return label, ""
+}
+
 // dolibarrImagePath builds the app-resolvable photo path for an ERP attachment
 // (served by the /catalog/dolimg proxy below; same resolution scheme as
 // catalogImagePath — the FE joins it onto its API base).
 func dolibarrImagePath(folder, file string) string {
 	return "catalog/dolimg/" + url.PathEscape(folder) + "/" + url.PathEscape(file)
 }
+
+// dolibarrSyncSchemaV is bumped when the shape the sync WRITES changes (e.g. the
+// name/variant split, back covers). A state row with an older v forces one
+// re-patch of its catalog row, so schema migrations ship with the code — no
+// manual database edits ever.
+const dolibarrSyncSchemaV = 2
 
 // dolibarrSyncState is one ref's sync bookkeeping row (collection dolibarr_sync).
 type dolibarrSyncState struct {
@@ -175,6 +206,7 @@ type dolibarrSyncState struct {
 	Name         string    `bson:"name"`
 	PhotoURL     string    `bson:"photo_url,omitempty"`
 	HiddenBySync bool      `bson:"hidden_by_sync,omitempty"`
+	SchemaV      int       `bson:"schema_v,omitempty"`
 	UpdatedAt    time.Time `bson:"updated_at"`
 }
 
@@ -315,25 +347,40 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 }
 
 // syncAddition upserts an ERP-only product as a store addition. On INSERT the
-// Saathi-owned defaults are chosen once (category from the ref, subscribable
-// false, in-stock true); afterwards the sync updates only the Dolibarr-owned
-// fields, and the photo only while it still points at the dolimg proxy (a
-// store-manager-set photo wins forever).
+// Saathi-owned defaults are chosen once — category from the ref, subscribable
+// false, and IN-STOCK FALSE: during the pilot a new ERP product must appear in
+// the app immediately but stay unbuyable until the store manager confirms the
+// dark store actually stocks it (one switch in the console). Afterwards the
+// sync updates only the Dolibarr-owned fields (name/variant/unit/description/
+// price/photos) — never in_stock — and photos only while they still point at
+// the dolimg proxy (a store-manager-set photo wins forever).
+//
+// ERP labels embed the pack size, so they are split into name + variant
+// (dolibarrSplitLabel) — that lets the app group sizes of one product onto one
+// card instead of rendering a look-alike card per size.
 func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref string, price float64, p dolibarr.Product, st *dolibarrSyncState) {
 	cfg := s.deps.Cfg
 	sku := dolibarrAdditionSku(ref)
-	photo := s.dolibarrPickPhoto(ctx, cli, ref, st)
+	name, variant := dolibarrSplitLabel(p.Label)
+	front, back := s.dolibarrPickPhotos(ctx, cli, ref, st)
 
 	if st.Mode != "addition" { // first sight → create
 		subscribable := false
-		inStock := true
+		inStock := false // pilot rule: visible immediately, sellable only after the manager flips it
 		doc := &catalogDoc{
 			StoreID: cfg.DolibarrStoreID, SkuID: sku, Kind: catalogKindAddition,
-			BaseID: ref, Name: p.Label, Category: dolibarrCategory(ref, p.Label),
+			BaseID: ref, Name: name, Variant: variant, Unit: variant,
+			Category:    dolibarrCategory(ref, p.Label),
 			Description: p.Description, Subscribable: &subscribable,
-			Price: &price, InStock: &inStock, PhotoURL: photo,
+			Price: &price, InStock: &inStock, PhotoURL: front, BackPhotoURL: back,
 			UpdatedBy: dolibarrUpdatedBy,
 			UpdatedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+		}
+		// MRP: only when the ERP actually declares one (price_min); the same
+		// GST rule as the selling price applies. FE shows the strikethrough
+		// only when mrp is present — absent is fine.
+		if mrp := dolibarrEffectiveMin(p); mrp > 0 && mrp >= price {
+			doc.MRP = &mrp
 		}
 		if ml := p.VolumeMl(); ml > 0 {
 			doc.Physical = &physicalDoc{VolumeMl: ml}
@@ -344,23 +391,32 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 		} else {
 			s.saveDolibarrState(ctx, dolibarrSyncState{
 				Ref: ref, DolibarrID: p.ID.Int(), SkuID: sku, Mode: "addition",
-				Price: price, Name: p.Label, PhotoURL: photo,
+				Price: price, Name: p.Label, PhotoURL: front,
 			})
-			s.log.Info("dolibarr product added", "ref", ref, "sku", sku, "price", price, "photo", photo != "")
+			s.log.Info("dolibarr product added (out of stock until enabled)", "ref", ref, "sku", sku, "price", price, "photo", front != "")
 			return
 		}
 	}
 
-	if st.Mode == "addition" && st.Price == price && st.Name == p.Label && (photo == "" || photo == st.PhotoURL) && !st.HiddenBySync {
-		return // unchanged
+	if st.Mode == "addition" && st.Price == price && st.Name == p.Label &&
+		(front == "" || front == st.PhotoURL) && !st.HiddenBySync && st.SchemaV >= dolibarrSyncSchemaV {
+		return // unchanged (and already written in the current schema shape)
 	}
 	set := bson.D{
-		{Key: "name", Value: p.Label},
+		{Key: "name", Value: name},
+		{Key: "variant", Value: variant},
+		{Key: "unit", Value: variant},
 		{Key: "description", Value: p.Description},
 		{Key: "price", Value: &price},
 	}
-	if photo != "" {
-		set = append(set, bson.E{Key: "photo_url", Value: photo})
+	if mrp := dolibarrEffectiveMin(p); mrp > 0 && mrp >= price {
+		set = append(set, bson.E{Key: "mrp", Value: &mrp})
+	}
+	if front != "" {
+		set = append(set, bson.E{Key: "photo_url", Value: front})
+	}
+	if back != "" {
+		set = append(set, bson.E{Key: "back_photo_url", Value: back})
 	}
 	if st.HiddenBySync { // product is back on sale in the ERP → unhide
 		hidden := false
@@ -372,28 +428,37 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	}
 	s.saveDolibarrState(ctx, dolibarrSyncState{
 		Ref: ref, DolibarrID: p.ID.Int(), SkuID: sku, Mode: "addition",
-		Price: price, Name: p.Label, PhotoURL: photo,
+		Price: price, Name: p.Label, PhotoURL: front,
 	})
 	s.log.Info("dolibarr product updated", "ref", ref, "sku", sku, "price", price)
 }
 
-// dolibarrPickPhoto returns the proxy photo path for the product's first image
-// attachment ("" when none). Cheap: listing only happens when the state has no
-// photo yet or on the periodic resync of a changed product.
-func (s *service) dolibarrPickPhoto(ctx context.Context, cli *dolibarr.Client, ref string, st *dolibarrSyncState) string {
+// dolibarrPickPhotos returns proxy paths for the product's cover images: the
+// FIRST image attachment is the front cover, the SECOND the back cover — the
+// upload convention for the ERP team. ("","") keeps whatever we knew.
+func (s *service) dolibarrPickPhotos(ctx context.Context, cli *dolibarr.Client, ref string, st *dolibarrSyncState) (front, back string) {
 	docs, err := cli.ListProductDocuments(ctx, ref)
 	if err != nil || len(docs) == 0 {
-		return st.PhotoURL // keep whatever we knew
+		return st.PhotoURL, ""
 	}
+	var imgs []string
 	for _, d := range docs {
 		if d.IsImage() && d.Level1Name != "" && d.RelativeName != "" {
-			return dolibarrImagePath(d.Level1Name, d.RelativeName)
+			imgs = append(imgs, dolibarrImagePath(d.Level1Name, d.RelativeName))
 		}
 	}
-	return st.PhotoURL
+	switch len(imgs) {
+	case 0:
+		return st.PhotoURL, ""
+	case 1:
+		return imgs[0], ""
+	default:
+		return imgs[0], imgs[1]
+	}
 }
 
 func (s *service) saveDolibarrState(ctx context.Context, st dolibarrSyncState) {
+	st.SchemaV = dolibarrSyncSchemaV
 	st.UpdatedAt = time.Now().UTC()
 	_, err := s.deps.DB.Collection(collDolibarrSync).UpdateByID(ctx, st.Ref,
 		bson.D{{Key: "$set", Value: st}}, options.Update().SetUpsert(true))

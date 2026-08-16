@@ -120,6 +120,38 @@ func TestDolibarrCategoriesMatchSeedVocabulary(t *testing.T) {
 	}
 }
 
+// ERP labels embed the pack size; the split is what lets the app group sizes of
+// one product onto one card (the "same product 3-4 times" bug).
+func TestDolibarrSplitLabel(t *testing.T) {
+	for _, c := range []struct{ label, name, variant string }{
+		{"Parag Dahi (Sada / Plain) 80 GM", "Parag Dahi (Sada / Plain)", "80 GM"},
+		{"Parag Taza Toned Milk 130 ML", "Parag Taza Toned Milk", "130 ML"},
+		{"Parag Gold Full Cream Milk (FCM) 1 LTR", "Parag Gold Full Cream Milk (FCM)", "1 LTR"},
+		{"Parag Ghee (Tin) 15 LTR", "Parag Ghee (Tin)", "15 LTR"},
+		{"Parag Table Butter 20 GM", "Parag Table Butter", "20 GM"},
+		{"Parag Kheer (Chhena) 100 GM", "Parag Kheer (Chhena)", "100 GM"},
+		{"Parag Gold 1 L", "Parag Gold", "1 L"},
+		{"Parag Paneer 1.5 KG", "Parag Paneer", "1.5 KG"},
+		{"Something With No Size", "Something With No Size", ""},
+	} {
+		n, v := dolibarrSplitLabel(c.label)
+		if n != c.name || v != c.variant {
+			t.Errorf("split(%q) = (%q,%q) want (%q,%q)", c.label, n, v, c.name, c.variant)
+		}
+	}
+}
+
+func TestDolibarrEffectiveMin(t *testing.T) {
+	p := dolProduct(t, `{"price_ttc":"119.04762000","price_min":"119.04762000","tva_tx":"0.000","default_vat_code":"C+S-5"}`)
+	if got := dolibarrEffectiveMin(p); got != 125 {
+		t.Fatalf("mrp: got %v want 125", got)
+	}
+	none := dolProduct(t, `{"price_ttc":"30","price_min":"0.00000000"}`)
+	if got := dolibarrEffectiveMin(none); got != 0 {
+		t.Fatalf("no declared mrp must be 0, got %v", got)
+	}
+}
+
 func TestDolibarrAdditionSkuAndImagePath(t *testing.T) {
 	if got := dolibarrAdditionSku("PRG-KALAKAND-1KG"); got != "dol-prg-kalakand-1kg" {
 		t.Fatalf("sku: %q", got)
