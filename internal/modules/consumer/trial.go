@@ -39,11 +39,11 @@ import (
 const collConsumerTrials = "consumer_trials"
 
 const (
-	trialPaidDays = 2 // full-price delivered days AFTER the free window (gold-500ml)
-	trialFreeDays = 2 // free (charged 0) delivered days that OPEN the trial
+	trialPaidDays = 2 // full-price delivered days that OPEN the trial (gold-500ml)
+	trialFreeDays = 2 // free (charged 0) delivered days AFTER the paid window
 
-	trialPhasePaid = "paid" // inside the 2 full-price days after the free window
-	trialPhaseFree = "free" // inside the FIRST 2 days (charge 0)
+	trialPhasePaid = "paid" // inside the FIRST 2 full-price days
+	trialPhaseFree = "free" // inside the 2 free days after the paid window (charge 0)
 	trialPhaseDone = "done" // trial exhausted — charge normally
 )
 
@@ -115,25 +115,26 @@ type trialView struct {
 // delivered day will be), given how many paid/free days have already landed.
 func trialPhaseFor(deliveredPaid, deliveredFree int) string {
 	switch {
-	case deliveredFree < trialFreeDays:
-		return trialPhaseFree
 	case deliveredPaid < trialPaidDays:
 		return trialPhasePaid
+	case deliveredFree < trialFreeDays:
+		return trialPhaseFree
 	default:
 		return trialPhaseDone
 	}
 }
 
 // trialApply computes the effective amount + phase for ONE new distinct delivered
-// day and returns the advanced counts. FIRST 2 delivered days → 0 (free++);
-// NEXT 2 → full (paid++); after 4 → full ("done"). Pure: the caller owns
-// persistence.
+// day and returns the advanced counts. FIRST 2 delivered days → full (paid++);
+// NEXT 2 → 0 (free++); after 4 → full ("done"). Paid days come first by design:
+// the pitch is "2 days worth of free milk" and the free days are the reward for
+// completing the paid ones. Pure: the caller owns persistence.
 func trialApply(deliveredPaid, deliveredFree int, fullAmount float64) (effective float64, phase string, newPaid, newFree int) {
 	switch {
-	case deliveredFree < trialFreeDays:
-		return 0, trialPhaseFree, deliveredPaid, deliveredFree + 1
 	case deliveredPaid < trialPaidDays:
 		return fullAmount, trialPhasePaid, deliveredPaid + 1, deliveredFree
+	case deliveredFree < trialFreeDays:
+		return 0, trialPhaseFree, deliveredPaid, deliveredFree + 1
 	default:
 		return fullAmount, trialPhaseDone, deliveredPaid, deliveredFree
 	}
@@ -189,8 +190,8 @@ func (t *consumerTrial) view() trialView {
 		DeliveredFree: t.DeliveredFree,
 		PaidRemaining: max(0, trialPaidDays-t.DeliveredPaid),
 		FreeRemaining: max(0, trialFreeDays-t.DeliveredFree),
-		// Free-first: the free window is active from day one until its quota lands.
-		FreeActive: t.DeliveredFree < trialFreeDays,
+		// Paid-first: the free window opens only once the paid days are complete.
+		FreeActive: t.DeliveredPaid >= trialPaidDays && t.DeliveredFree < trialFreeDays,
 	}
 }
 
@@ -217,7 +218,7 @@ func (r *repository) getOrCreateTrial(ctx context.Context, consumerID primitive.
 			{Key: "consumer_id", Value: consumerID},
 			{Key: "delivered_paid", Value: 0},
 			{Key: "delivered_free", Value: 0},
-			{Key: "phase", Value: trialPhaseFree},
+			{Key: "phase", Value: trialPhasePaid},
 			{Key: "charges", Value: []trialCharge{}},
 			{Key: "seq", Value: int64(0)},
 			{Key: "created_at", Value: now},

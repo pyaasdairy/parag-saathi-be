@@ -27,10 +27,10 @@ func TestTrialProgression(t *testing.T) {
 		wantFree  int
 	}
 	steps := []step{
-		{"d1", 0, trialPhaseFree, 0, 1},    // free 1  ← the trial OPENS free
-		{"d2", 0, trialPhaseFree, 0, 2},    // free 2  ← boundary: day 2 still free
-		{"d3", full, trialPhasePaid, 1, 2}, // paid 1  ← boundary: day 3 flips to paid
-		{"d4", full, trialPhasePaid, 2, 2}, // paid 2  ← boundary: day 4 still paid
+		{"d1", full, trialPhasePaid, 1, 0}, // paid 1  ← the trial OPENS paid
+		{"d2", full, trialPhasePaid, 2, 0}, // paid 2  ← boundary: day 2 still paid
+		{"d3", 0, trialPhaseFree, 2, 1},    // free 1  ← boundary: day 3 flips to free
+		{"d4", 0, trialPhaseFree, 2, 2},    // free 2  ← boundary: day 4 still free
 		{"d5", full, trialPhaseDone, 2, 2}, // done    ← day 5 bills normally
 		{"d6", full, trialPhaseDone, 2, 2}, // done — stays normal
 	}
@@ -46,7 +46,7 @@ func TestTrialProgression(t *testing.T) {
 }
 
 // TestTrialBoundaries isolates the four boundary days the spec calls out:
-// day 1 free, day 2 free, day 3 paid, day 4 paid.
+// day 1 paid, day 2 paid, day 3 free, day 4 free.
 func TestTrialBoundaries(t *testing.T) {
 	const full = 100.0
 	tr := newTrial()
@@ -55,32 +55,32 @@ func TestTrialBoundaries(t *testing.T) {
 		eff, _ := tr.charge(string(rune('a'+i)), full)
 		got = append(got, eff)
 	}
-	// days:     1  2     3     4     5     6
-	want := []float64{0, 0, full, full, full, full}
+	// days:              1     2     3  4  5     6
+	want := []float64{full, full, 0, 0, full, full}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("day %d effective = %.0f, want %.0f", i+1, got[i], want[i])
 		}
 	}
-	if got[0] != 0 {
-		t.Error("day 1 must be FREE (0) — the banner promise")
+	if got[0] != full {
+		t.Error("day 1 must be PAID (full amount) — paid days open the trial")
 	}
-	if got[1] != 0 {
-		t.Error("day 2 must be FREE (0) — the banner promise")
+	if got[1] != full {
+		t.Error("day 2 must be PAID (full amount)")
 	}
-	if got[2] != full {
-		t.Error("day 3 must be PAID (full amount)")
+	if got[2] != 0 {
+		t.Error("day 3 must be FREE (0) — the 2+2 promise")
 	}
-	if got[3] != full {
-		t.Error("day 4 must be PAID (full amount)")
+	if got[3] != 0 {
+		t.Error("day 4 must be FREE (0) — the 2+2 promise")
 	}
 }
 
 // TestTrialPauseSafe proves the window counts DELIVERED days, not calendar days:
 // a paused/skipped day is simply a key that is never charged, and it does NOT
-// burn a free day. Two shoppers with wildly different calendars but the same
-// number of DELIVERIES end up in the exact same trial state, and the free window
-// counts only REAL deliveries — free-first, the paid window opens after 2 real free deliveries.
+// burn a trial day. Two shoppers with wildly different calendars but the same
+// number of DELIVERIES end up in the exact same trial state — paid-first, the
+// free window opens only after 2 real PAID deliveries.
 func TestTrialPauseSafe(t *testing.T) {
 	const full = 40.0
 
@@ -92,7 +92,7 @@ func TestTrialPauseSafe(t *testing.T) {
 
 	aKeys := []string{"2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"}
 	// B skips whole weeks between each delivery — a pause on "day 2..N" must not
-	// consume the free window.
+	// consume the trial window.
 	bKeys := []string{"2026-01-01", "2026-01-20", "2026-02-15", "2026-03-30"}
 
 	for i := range aKeys {
@@ -102,13 +102,13 @@ func TestTrialPauseSafe(t *testing.T) {
 			t.Errorf("delivery %d: A=(%.0f,%q) B=(%.0f,%q) — delivered-day counting must ignore the calendar gap", i+1, ea, pa, eb, pb)
 		}
 	}
-	// After 4 deliveries, BOTH must be paid=2, free=2 — the paid window opened
-	// only after the 2nd real FREE delivery, regardless of calendar pauses.
+	// After 4 deliveries, BOTH must be paid=2, free=2 — the free window opened
+	// only after the 2nd real PAID delivery, regardless of calendar pauses.
 	if a.DeliveredPaid != 2 || a.DeliveredFree != 2 {
 		t.Errorf("A: paid=%d free=%d, want 2/2", a.DeliveredPaid, a.DeliveredFree)
 	}
 	if b.DeliveredPaid != 2 || b.DeliveredFree != 2 {
-		t.Errorf("B: paid=%d free=%d, want 2/2 — a pause burned a free day", b.DeliveredPaid, b.DeliveredFree)
+		t.Errorf("B: paid=%d free=%d, want 2/2 — a pause burned a trial day", b.DeliveredPaid, b.DeliveredFree)
 	}
 
 	// Explicit "pause does not advance": charging nothing (a paused morning is
@@ -125,10 +125,10 @@ func TestTrialIdempotentByKey(t *testing.T) {
 	const full = 55.0
 	tr := newTrial()
 
-	// First charge on day 1 — FREE (the trial opens free).
+	// First charge on day 1 — PAID (the trial opens paid).
 	eff1, ph1 := tr.charge("day-1", full)
-	if eff1 != 0 || ph1 != trialPhaseFree {
-		t.Fatalf("first charge = (%.0f,%q), want (0,free)", eff1, ph1)
+	if eff1 != full || ph1 != trialPhasePaid {
+		t.Fatalf("first charge = (%.0f,%q), want (%.0f,paid)", eff1, ph1, full)
 	}
 	snapPaid, snapFree, snapCharges := tr.DeliveredPaid, tr.DeliveredFree, len(tr.Charges)
 
@@ -145,20 +145,20 @@ func TestTrialIdempotentByKey(t *testing.T) {
 	}
 
 	// A brand-new key on the same ledger DOES advance (distinct delivered day).
-	eff2, _ := tr.charge("day-2", full) // free 2 — fills the free window
-	if eff2 != 0 || tr.DeliveredFree != 2 {
-		t.Errorf("a distinct key must advance: eff=%.0f free=%d, want 0/2", eff2, tr.DeliveredFree)
+	eff2, _ := tr.charge("day-2", full) // paid 2 — fills the paid window
+	if eff2 != full || tr.DeliveredPaid != 2 {
+		t.Errorf("a distinct key must advance: eff=%.0f paid=%d, want %.0f/2", eff2, tr.DeliveredPaid, full)
 	}
 
-	// Idempotency is preserved across a PAID day too: the 2 free days are done, so
-	// day-3 is the first paid day — replay it and it still bills full, no advance.
-	effPaid, phPaid := tr.charge("day-3", full) // paid 1
-	if effPaid != full || phPaid != trialPhasePaid {
-		t.Fatalf("day-3 = (%.0f,%q), want (%.0f,paid)", effPaid, phPaid, full)
+	// Idempotency is preserved across a FREE day too: the 2 paid days are done, so
+	// day-3 is the first free day — replay it and it still charges 0, no advance.
+	effFree, phFree := tr.charge("day-3", full) // free 1
+	if effFree != 0 || phFree != trialPhaseFree {
+		t.Fatalf("day-3 = (%.0f,%q), want (0,free)", effFree, phFree)
 	}
-	paidSnap := tr.DeliveredPaid
-	if e, p := tr.charge("day-3", full); e != full || p != trialPhasePaid || tr.DeliveredPaid != paidSnap {
-		t.Errorf("paid-day replay = (%.0f,%q) paid=%d, want (%.0f,paid) paid=%d", e, p, tr.DeliveredPaid, full, paidSnap)
+	freeSnap := tr.DeliveredFree
+	if e, p := tr.charge("day-3", full); e != 0 || p != trialPhaseFree || tr.DeliveredFree != freeSnap {
+		t.Errorf("free-day replay = (%.0f,%q) free=%d, want (0,free) free=%d", e, p, tr.DeliveredFree, freeSnap)
 	}
 }
 
@@ -169,30 +169,30 @@ func TestTrialIdempotentByKey(t *testing.T) {
 func TestTrialSameDayDifferentAmount(t *testing.T) {
 	tr := newTrial()
 
-	// First delivery of a FREE day (the trial opens free) → 0, advances free to 1.
-	if eff, ph := tr.charge("day-1", 60); eff != 0 || ph != trialPhaseFree {
-		t.Fatalf("first free = (%.0f,%q), want (0,free)", eff, ph)
+	// First delivery of a PAID day (the trial opens paid) → full, advances paid to 1.
+	if eff, ph := tr.charge("day-1", 60); eff != 60 || ph != trialPhasePaid {
+		t.Fatalf("first paid = (%.0f,%q), want (60,paid)", eff, ph)
 	}
-	// A second delivery the SAME free day is also 0 regardless of its own price,
-	// and must NOT advance the counter (still one delivered day).
-	if eff, ph := tr.charge("day-1", 999); eff != 0 || ph != trialPhaseFree {
-		t.Errorf("same-day 2nd free = (%.0f,%q), want (0,free) at any price", eff, ph)
-	}
-	if tr.DeliveredFree != 1 {
-		t.Errorf("same-day 2nd delivery advanced the window: free=%d, want 1", tr.DeliveredFree)
-	}
-
-	// Fill the 2 free days, then day-3 is the first PAID day; a same-day second
-	// paid delivery charges its OWN amount — never a replay of the first.
-	tr.charge("day-2", 60) // free 2
-	if eff, ph := tr.charge("day-3", 60); eff != 60 || ph != trialPhasePaid {
-		t.Fatalf("day-3 first = (%.0f,%q), want (60,paid)", eff, ph)
-	}
-	if eff, ph := tr.charge("day-3", 25); eff != 25 || ph != trialPhasePaid {
+	// A second delivery the SAME paid day charges its OWN amount (25, not a
+	// replay of 60), and must NOT advance the counter (still one delivered day).
+	if eff, ph := tr.charge("day-1", 25); eff != 25 || ph != trialPhasePaid {
 		t.Errorf("same-day 2nd paid = (%.0f,%q), want (25,paid) — must not replay the first amount", eff, ph)
 	}
 	if tr.DeliveredPaid != 1 {
-		t.Errorf("same-day 2nd paid advanced the window: paid=%d, want 1", tr.DeliveredPaid)
+		t.Errorf("same-day 2nd delivery advanced the window: paid=%d, want 1", tr.DeliveredPaid)
+	}
+
+	// Fill the 2 paid days, then day-3 is the first FREE day; a same-day second
+	// free delivery is also 0 regardless of its own price.
+	tr.charge("day-2", 60) // paid 2
+	if eff, ph := tr.charge("day-3", 60); eff != 0 || ph != trialPhaseFree {
+		t.Fatalf("day-3 first = (%.0f,%q), want (0,free)", eff, ph)
+	}
+	if eff, ph := tr.charge("day-3", 999); eff != 0 || ph != trialPhaseFree {
+		t.Errorf("same-day 2nd free = (%.0f,%q), want (0,free) at any price", eff, ph)
+	}
+	if tr.DeliveredFree != 1 {
+		t.Errorf("same-day 2nd free advanced the window: free=%d, want 1", tr.DeliveredFree)
 	}
 }
 
@@ -225,24 +225,24 @@ func TestTrialView(t *testing.T) {
 	const full = 30.0
 	tr := newTrial()
 
-	// Fresh shopper: the FREE window is open from day one.
+	// Fresh shopper: the PAID window opens the trial; free is not yet active.
 	v := tr.view()
-	if v.Phase != trialPhaseFree || v.PaidRemaining != 2 || v.FreeRemaining != 2 || !v.FreeActive {
-		t.Errorf("fresh view = %+v, want free/2/2/true", v)
+	if v.Phase != trialPhasePaid || v.PaidRemaining != 2 || v.FreeRemaining != 2 || v.FreeActive {
+		t.Errorf("fresh view = %+v, want paid/2/2/free=false", v)
 	}
 
-	// After 1 free day: still free phase, 1 free remaining.
+	// After 1 paid day: still paid phase, 1 paid remaining, free still inactive.
 	tr.charge("d1", full)
 	v = tr.view()
-	if v.Phase != trialPhaseFree || v.DeliveredFree != 1 || v.FreeRemaining != 1 || !v.FreeActive {
-		t.Errorf("mid-free view = %+v, want free/free=1/remaining=1/active=true", v)
+	if v.Phase != trialPhasePaid || v.DeliveredPaid != 1 || v.PaidRemaining != 1 || v.FreeActive {
+		t.Errorf("mid-paid view = %+v, want paid/paid=1/remaining=1/free=false", v)
 	}
 
-	// After the 2nd free day: paid window opens (free no longer active).
+	// After the 2nd paid day: free window opens (free now active).
 	tr.charge("d2", full)
 	v = tr.view()
-	if v.Phase != trialPhasePaid || v.FreeRemaining != 0 || v.PaidRemaining != 2 || v.FreeActive {
-		t.Errorf("paid-open view = %+v, want paid/freeRemaining=0/paidRemaining=2/free=false", v)
+	if v.Phase != trialPhaseFree || v.PaidRemaining != 0 || v.FreeRemaining != 2 || !v.FreeActive {
+		t.Errorf("free-open view = %+v, want free/paidRemaining=0/freeRemaining=2/free=true", v)
 	}
 
 	// After all 4 days: done, both remainings 0, free no longer active.
