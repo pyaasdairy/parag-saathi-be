@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -93,6 +94,8 @@ type order struct {
 	PlacedAt       time.Time          `bson:"placed_at"               json:"placed_at"`
 	Priority       string             `bson:"priority,omitempty"      json:"priority,omitempty"`
 	DeliveryWindow string             `bson:"delivery_window,omitempty" json:"delivery_window,omitempty"`
+	DeliveryDate   string             `bson:"delivery_date,omitempty" json:"delivery_date,omitempty"`
+	BuyerGSTIN     string             `bson:"buyer_gstin,omitempty"   json:"buyer_gstin,omitempty"`
 	ProofPhotoURL  string             `bson:"proof_photo_url,omitempty" json:"proof_photo_url,omitempty"`
 	Lane           string             `bson:"lane"                    json:"lane,omitempty"`
 	// TrialFree marks a 2+2 free-day subscription delivery: the sticker Total
@@ -230,6 +233,11 @@ type orderInput struct {
 	ConsumerName   string      `json:"consumer_name"`
 	Phone          string      `json:"phone"`
 	Geo            *geoPoint   `json:"geo"`
+	// Scheduled morning orders: the member-picked IST delivery date
+	// (YYYY-MM-DD, tomorrow..+7d). Empty = next morning / instant-now.
+	DeliveryDate string `json:"delivery_date"`
+	// Optional company GSTIN entered at checkout — printed on the invoice.
+	BuyerGSTIN string `json:"buyer_gstin"`
 }
 
 func (s *service) createOrder(ctx context.Context, userID string, in orderInput) (*order, error) {
@@ -313,12 +321,30 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	if priority == "" {
 		priority = "normal"
 	}
+	// Scheduled morning date: validate against IST — tomorrow through +7 days.
+	// (Instant orders never carry one; the FE sends null.) Invalid input is
+	// rejected loudly instead of silently becoming a due-now delivery.
+	deliveryDate := strings.TrimSpace(in.DeliveryDate)
+	if deliveryDate != "" && lane == "morning" {
+		d, derr := time.ParseInLocation("2006-01-02", deliveryDate, istZone)
+		if derr != nil {
+			return nil, errBadRequest("delivery_date must be YYYY-MM-DD")
+		}
+		ist := time.Now().In(istZone)
+		today0 := time.Date(ist.Year(), ist.Month(), ist.Day(), 0, 0, 0, 0, istZone)
+		if d.Before(today0.AddDate(0, 0, 1)) || d.After(today0.AddDate(0, 0, 7)) {
+			return nil, errUnprocessable("BAD_DELIVERY_DATE", "pick a morning between tomorrow and 7 days from now")
+		}
+	} else {
+		deliveryDate = ""
+	}
 	now := time.Now().UTC()
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: userID, Status: "placed",
 		Subtotal: subtotal, DeliveryFee: fee, MonsoonFee: monsoonFee, Total: total, PaymentMethod: pm,
 		AddressLabel: in.AddressLabel, AddressText: in.AddressText, RiderID: nil,
 		PlacedAt: now, Priority: priority, DeliveryWindow: in.DeliveryWindow, Lane: lane,
+		DeliveryDate: deliveryDate, BuyerGSTIN: strings.TrimSpace(in.BuyerGSTIN),
 		Items: items, Rider: nil, CanReview: false, Review: nil,
 		ConsumerName: in.ConsumerName, Phone: in.Phone, Geo: in.Geo, CreatedAt: now, UpdatedAt: now,
 	}

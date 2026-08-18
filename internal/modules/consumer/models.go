@@ -1,6 +1,7 @@
 package consumer
 
 import (
+	"encoding/json"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -54,12 +55,18 @@ type otpChallenge struct {
 	CreatedAt time.Time `bson:"created_at"`
 }
 
-// refreshToken — rotating, hashed at rest.
+// refreshToken — rotating, hashed at rest. UsedAt marks a consumed (rotated)
+// token: instead of hard-deleting on rotation, the token stays valid for a
+// short GRACE window so a replay from the same device — a request that raced
+// the rotation, or an app killed after the server rotated but before the new
+// pair was persisted — re-issues a fresh pair instead of stranding the session
+// ("Session expired" mid-use). After the grace it is dead as before.
 type refreshToken struct {
 	TokenHash  string             `bson:"token_hash"`
 	ConsumerID primitive.ObjectID `bson:"consumer_id"`
 	ExpiresAt  time.Time          `bson:"expires_at"`
 	CreatedAt  time.Time          `bson:"created_at"`
+	UsedAt     *time.Time         `bson:"used_at,omitempty"`
 }
 
 // address — delivery address; resolves to a serving store + cluster (§6).
@@ -77,6 +84,31 @@ type address struct {
 	StoreID     string             `bson:"store_id,omitempty"   json:"store_id,omitempty"`
 	Preferences map[string]any     `bson:"preferences,omitempty" json:"-"`
 	CreatedAt   time.Time          `bson:"created_at"           json:"created_at"`
+}
+
+// MarshalJSON flattens the doorstep Preferences (receiver_name, ring_bell,
+// call_before, instructions, door_photo_uri, geo_label) onto the address wire
+// object — the app reads them top-level, and an address book that never sends
+// them back silently blanked every saved doorstep profile on hydration.
+func (a address) MarshalJSON() ([]byte, error) {
+	type plain address // method-free alias, avoids recursion
+	raw, err := json.Marshal(plain(a))
+	if err != nil {
+		return nil, err
+	}
+	if len(a.Preferences) == 0 {
+		return raw, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	for _, k := range []string{"receiver_name", "geo_label", "ring_bell", "call_before", "instructions", "door_photo_uri"} {
+		if v, ok := a.Preferences[k]; ok {
+			m[k] = v
+		}
+	}
+	return json.Marshal(m)
 }
 
 // wallet — dual-bucket (Cash real + Rewards promotional), append-only ledger.

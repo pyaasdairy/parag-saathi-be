@@ -119,6 +119,11 @@ func Register(r chi.Router, d *deps.Deps) {
 		cr.Get("/serviceability", h.serviceability)
 		cr.Post("/waitlist", h.joinWaitlist)
 
+		// Lead capture (leads.go) — both app-key-gated; the partner form is
+		// reachable signed-out, the wishlist tap sends the server-known uid.
+		cr.Post("/partner-leads", h.createPartnerLead)
+		cr.Post("/wishlist/leads", h.createWishlistLead)
+
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
 			pr.Use(svc.authenticate)

@@ -9,7 +9,7 @@ services:
     # Pin the deploy branch so a redeploy can't silently fall back to a branch
     # without the consumer order→dispatch feature (OFFERED broadcast, claim,
     # reject, /delivery/tasks/available). Keep in sync with the active release.
-    branch: release/26.07.02
+    branch: release/26.07.03
     plan: free # upgrade to starter for always-on (free spins down when idle)
     dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz

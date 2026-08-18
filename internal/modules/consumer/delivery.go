@@ -77,10 +77,10 @@ type delivery struct {
 	// nearby-rider ranked) or "morning" (the 5-7:30 AM subscription run).
 	Lane string `bson:"lane,omitempty"       json:"lane,omitempty"`
 	// EtaAt is set for instant deliveries only: placed-at + 20 min (RFC3339).
-	EtaAt            string    `bson:"eta_at,omitempty"     json:"etaAt,omitempty"`
-	DistanceKm       float64   `bson:"distance_km"          json:"distanceKm"`
-	Status           string    `bson:"status"               json:"status"`
-	AssignedAt       string    `bson:"assigned_at"          json:"assignedAt"`
+	EtaAt      string  `bson:"eta_at,omitempty"     json:"etaAt,omitempty"`
+	DistanceKm float64 `bson:"distance_km"          json:"distanceKm"`
+	Status     string  `bson:"status"               json:"status"`
+	AssignedAt string  `bson:"assigned_at"          json:"assignedAt"`
 	// Auto-dispatch (instant lane): the task is broadcast as OFFERED and the first
 	// rider to claim it wins. OfferedAt anchors the offer; RejectedBy lists riders
 	// who declined (never re-offered to them); ReofferCount counts re-broadcasts.

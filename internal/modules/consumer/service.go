@@ -306,7 +306,17 @@ func (s *service) issueTokens(ctx context.Context, acct *account, now time.Time)
 	return &tokenPair{AccessToken: access, RefreshToken: rawRefresh, Profile: acct}, nil
 }
 
-// refresh rotates the refresh token and re-issues the pair.
+// refreshRotationGrace: how long a JUST-consumed refresh token keeps working.
+// Covers the two session-killers seen in the field: a request that raced the
+// rotation (backend consumed the token before the app saved the new one), and
+// an app killed/crashed inside that same window. Short enough that a stolen
+// old token is useless moments later.
+const refreshRotationGrace = 90 * time.Second
+
+// refresh rotates the refresh token and re-issues the pair. A replay of a
+// token consumed within refreshRotationGrace ALSO gets a fresh pair (session
+// continuity beats strict single-use inside the window); after the grace the
+// replay is rejected exactly as before.
 func (s *service) refresh(ctx context.Context, rawRefresh string) (*tokenPair, error) {
 	if rawRefresh == "" {
 		return nil, errUnauthorized("refresh token required")
@@ -320,12 +330,17 @@ func (s *service) refresh(ctx context.Context, rawRefresh string) (*tokenPair, e
 	if doc == nil || now.After(doc.ExpiresAt) {
 		return nil, errUnauthorized("invalid or expired refresh token")
 	}
-	// Rotate: consume the old token first (a replay finds nothing).
-	if deleted, e := s.repo.deleteRefresh(ctx, hash); e != nil {
-		return nil, e
-	} else if deleted == 0 {
+	if doc.UsedAt == nil {
+		// First use: atomically stamp used_at. Losing the stamp race just means
+		// another request from this device rotated a moment ago — fall through
+		// to the grace rule rather than stranding this caller.
+		if _, e := s.repo.consumeRefresh(ctx, hash, now); e != nil {
+			return nil, e
+		}
+	} else if now.Sub(*doc.UsedAt) > refreshRotationGrace {
 		return nil, errUnauthorized("refresh token already used")
 	}
+	s.repo.purgeUsedRefresh(ctx, now.Add(-time.Hour)) // best-effort tidy-up
 	acct, err := s.repo.findAccountByID(ctx, doc.ConsumerID)
 	if err != nil {
 		return nil, errUnauthorized("account no longer exists")

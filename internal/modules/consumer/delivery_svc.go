@@ -70,7 +70,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
 		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
-		Slot: o.DeliveryWindow, Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
+		Slot: slotLabel(o), Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
 		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
 	_ = s.repo.insertDelivery(ctx, del)
@@ -922,4 +922,17 @@ func (h *handler) riderDeliver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, d)
+}
+
+// slotLabel is what the store/rider console sees on the task: a scheduled
+// morning order carries its member-picked IST date in front of the window so
+// a +N-days order is never worked as "due tomorrow".
+func slotLabel(o *order) string {
+	if o.DeliveryDate != "" {
+		if o.DeliveryWindow != "" {
+			return o.DeliveryDate + " · " + o.DeliveryWindow
+		}
+		return o.DeliveryDate
+	}
+	return o.DeliveryWindow
 }

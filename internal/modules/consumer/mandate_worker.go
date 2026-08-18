@@ -19,6 +19,7 @@ package consumer
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -51,9 +52,18 @@ func (r *repository) dueMandates(ctx context.Context, now time.Time, limit int64
 	return due, nil
 }
 
-// mandateAutoRenewalWorker runs for the lifetime of the process. Always on —
-// auto-renewal is core product behaviour, not an integration flag.
+// mandateAutoRenewalWorker runs for the lifetime of the process — but the
+// SWEEP is gated on MANDATE_AUTODEBIT=true. Audit finding: runMandateCharge
+// DEBITS the wallet for the mandate amount while subscription days are ALSO
+// debited at delivery — a member with both active would be charged twice a
+// day. Until the charge is reworked into what AutoPay actually promises (a
+// gateway-funded wallet TOP-UP via the stored Razorpay token), the automatic
+// sweep stays off; flip the env only after that rework.
 func (s *service) mandateAutoRenewalWorker(ctx context.Context) {
+	if os.Getenv("MANDATE_AUTODEBIT") != "true" {
+		s.log.Info("mandate auto-renewal worker OFF (MANDATE_AUTODEBIT != true; double-debit guard)")
+		return
+	}
 	// boot delay: let mongo/indexes settle before the first sweep
 	select {
 	case <-time.After(45 * time.Second):

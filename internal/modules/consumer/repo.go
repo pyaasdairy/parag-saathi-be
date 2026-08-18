@@ -296,6 +296,25 @@ func (r *repository) deleteRefresh(ctx context.Context, hash string) (int64, err
 	return res.DeletedCount, nil
 }
 
+// consumeRefresh atomically stamps used_at on a not-yet-used token. Returns
+// true when THIS call performed the rotation (used_at was unset); false when
+// another request got there first (the caller then applies the grace rule).
+func (r *repository) consumeRefresh(ctx context.Context, hash string, now time.Time) (bool, error) {
+	res, err := r.refresh.UpdateOne(ctx,
+		bson.D{{Key: "token_hash", Value: hash}, {Key: "used_at", Value: bson.D{{Key: "$exists", Value: false}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "used_at", Value: now}}}})
+	if err != nil {
+		return false, errInternal("refresh consume failed")
+	}
+	return res.ModifiedCount == 1, nil
+}
+
+// purgeUsedRefresh best-effort deletes used tokens older than the cutoff so
+// consumed rows don't accumulate for the full 30-day TTL.
+func (r *repository) purgeUsedRefresh(ctx context.Context, before time.Time) {
+	_, _ = r.refresh.DeleteMany(ctx, bson.D{{Key: "used_at", Value: bson.D{{Key: "$lt", Value: before}}}})
+}
+
 // ── Addresses ───────────────────────────────────────────────────────────────
 
 func (r *repository) listAddresses(ctx context.Context, consumerID primitive.ObjectID) ([]address, error) {

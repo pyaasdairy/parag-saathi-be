@@ -91,8 +91,8 @@ func TestActionTargetsAreReachable(t *testing.T) {
 // UTC midnight must land on the same day as the delivery it pays for.
 func TestMandateChargeRefIdempotencyKey(t *testing.T) {
 	// Two instants on the same IST day → same day key → same ref.
-	morning := time.Date(2026, 7, 29, 5, 30, 0, 0, time.UTC)  // 11:00 IST, 29 Jul
-	evening := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC)  // 23:30 IST, 29 Jul
+	morning := time.Date(2026, 7, 29, 5, 30, 0, 0, time.UTC) // 11:00 IST, 29 Jul
+	evening := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC) // 23:30 IST, 29 Jul
 	if dayKey(morning) != dayKey(evening) {
 		t.Fatalf("same-day keys differ: %q vs %q", dayKey(morning), dayKey(evening))
 	}

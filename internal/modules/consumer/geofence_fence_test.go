@@ -10,11 +10,11 @@ func TestGeoSane(t *testing.T) {
 		lat, lng float64
 		want     bool
 	}{
-		{26.85, 81.00, true},  // STORE-LKO-01 (valid)
-		{0, 0, false},         // Null Island — a store that never got a geo
-		{91, 10, false},       // lat out of range
-		{10, 181, false},      // lng out of range
-		{-90, 180, true},      // valid extremes
+		{26.85, 81.00, true}, // STORE-LKO-01 (valid)
+		{0, 0, false},        // Null Island — a store that never got a geo
+		{91, 10, false},      // lat out of range
+		{10, 181, false},     // lng out of range
+		{-90, 180, true},     // valid extremes
 	}
 	for _, c := range cases {
 		if got := geoSane(c.lat, c.lng); got != c.want {

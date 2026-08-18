@@ -174,16 +174,16 @@ type zone struct {
 	InstantRadiusM  float64            `bson:"instant_radius_m"        json:"instantRadiusM"`
 	StandardRadiusM float64            `bson:"standard_radius_m"       json:"standardRadiusM"`
 	// Monsoon surcharge (store-manager set) charged on INSTANT orders only.
-	MonsoonEnabled  bool               `bson:"monsoon_enabled"         json:"monsoonEnabled"`
-	MonsoonRupees   int                `bson:"monsoon_rupees"          json:"monsoonRupees"`
+	MonsoonEnabled bool `bson:"monsoon_enabled"         json:"monsoonEnabled"`
+	MonsoonRupees  int  `bson:"monsoon_rupees"          json:"monsoonRupees"`
 	// Instant delivery hours (minutes since IST midnight) + a manual "closed now"
 	// switch. When instant is shut the consumer offers only the morning lane.
 	// InstantCloseMin==0 → no hours gating (legacy zones stay 24h instant).
-	InstantOpenMin  int                `bson:"instant_open_min"        json:"instantOpenMin"`
-	InstantCloseMin int                `bson:"instant_close_min"       json:"instantCloseMin"`
-	InstantPaused   bool               `bson:"instant_paused"          json:"instantPaused"`
-	IncludePincodes []string           `bson:"include_pincodes,omitempty" json:"includePincodes,omitempty"`
-	ExcludePincodes []string           `bson:"exclude_pincodes,omitempty" json:"excludePincodes,omitempty"`
+	InstantOpenMin  int      `bson:"instant_open_min"        json:"instantOpenMin"`
+	InstantCloseMin int      `bson:"instant_close_min"       json:"instantCloseMin"`
+	InstantPaused   bool     `bson:"instant_paused"          json:"instantPaused"`
+	IncludePincodes []string `bson:"include_pincodes,omitempty" json:"includePincodes,omitempty"`
+	ExcludePincodes []string `bson:"exclude_pincodes,omitempty" json:"excludePincodes,omitempty"`
 	// Polygon rings ([]geoPt, lat/lng). Include = an allowed area beyond the
 	// circle (standard); exclude = a hole denied even inside a circle.
 	IncludePolygons [][]geoPt `bson:"include_polygons,omitempty" json:"includePolygons,omitempty"`
@@ -866,5 +866,8 @@ func (h *handler) putZone(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
-	httpx.JSON(w, http.StatusOK, z)
+	// Echo the SAME view shape as GET — the Saathi console re-hydrates its form
+	// from this response, and the raw struct (GeoJSON center, metre radii)
+	// blanked the pin + radii after every Save.
+	httpx.JSON(w, http.StatusOK, zoneView(z, chi.URLParam(r, "storeId")))
 }
