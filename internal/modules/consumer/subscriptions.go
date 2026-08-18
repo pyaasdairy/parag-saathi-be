@@ -44,6 +44,11 @@ import (
 
 const collSubscriptions = "consumer_subscriptions"
 
+// subscriptionDeliveryFee is the delivery fee on a SUBSCRIPTION morning delivery:
+// always 0. The consumer app quotes and debits the bare subtotal on the Subscribe
+// button, so the server-side recurring debit must match (never subtotal + ₹15).
+const subscriptionDeliveryFee = 0.0
+
 // NOTE: cadence math and day-claims use IST (istZone, shared with trial.go),
 // matching the FE's local calendar dates, never UTC (UTC is "yesterday" until
 // 05:30 IST).
@@ -520,7 +525,11 @@ func (s *service) insertSubscriptionOrder(ctx context.Context, sub *subscription
 		}
 	}
 	subtotal := round2(sub.UnitPrice * float64(sub.Qty))
-	fee := deliveryFeeFor(subtotal)
+	// SUBSCRIPTION deliveries carry NO delivery fee — the consumer app quotes and
+	// charges the bare subtotal on the Subscribe button (lib/api.ts), so the
+	// server must debit the same. A ₹15 fee here over-charged every subscription
+	// delivery vs the price the member agreed to.
+	fee := subscriptionDeliveryFee
 	now := at.UTC()
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: sub.ConsumerID.Hex(), Status: "placed",
@@ -581,7 +590,7 @@ func (s *service) refreshSubOrder(ctx context.Context, o *order, sub *subscripti
 		return o
 	}
 	subtotal := round2(sub.UnitPrice * float64(sub.Qty))
-	fee := deliveryFeeFor(subtotal)
+	fee := subscriptionDeliveryFee // subscriptions never carry the ₹15 fee (see insertSubscriptionOrder)
 	updated, err := s.repo.updateOrder(ctx, o.OrderID, o.UserID, bson.D{
 		{Key: "order_items", Value: []orderItem{{
 			ID: newItemID(), ProductID: sub.ProductID, Name: sub.Name,
@@ -659,7 +668,7 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 		if sub.LastOrderDate != today && subscriptionDueOn(sub, today) {
 			if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
 				lineTotal := round2(sub.UnitPrice * float64(sub.Qty))
-				cost := lineTotal + deliveryFeeFor(lineTotal)
+				cost := lineTotal + subscriptionDeliveryFee // affordability check must match the fee-free debit
 				if wv, werr := s.wallet(ctx, sub.ConsumerID); werr == nil && wv.Available >= cost {
 					if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, today); won {
 						if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, today, true, now); oerr == nil {
