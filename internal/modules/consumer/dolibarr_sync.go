@@ -93,6 +93,14 @@ var dolibarrRefToSeedSku = map[string]string{
 	"PRG-GULABJAMUN-200GM": "gulab-jamun-200g",
 	"PRG-GULABJAMUN-500GM": "gulab-jamun-500g",
 	"PRG-SHREEKHAND-100GM": "shree-khand-100g",
+	// Pyaas house brand — the seeded PYAAS cards (real carton art, subscribable)
+	// take their price/MRP from the ERP like every other baseline. The 500 ML
+	// CARTON refs (PYS-*-CTN-500ML) are new pack formats with no seeded twin and
+	// stay additions.
+	"PYS-TONED-1LTR":     "pyaas-toned-1l",
+	"PYS-TONED-PP-500ML": "pyaas-toned-pouch",
+	"PYS-A2-1LTR":        "pyaas-a2-1l",
+	"PYS-A2-PP-500ML":    "pyaas-a2-pouch",
 }
 
 // dolibarrCategoryBySegment maps the <CAT> segment of a PRG-<CAT>-<SIZE> ref to
@@ -219,6 +227,7 @@ type dolibarrSyncState struct {
 	SkuID        string    `bson:"sku_id"`
 	Mode         string    `bson:"mode"` // baseline | addition
 	Price        float64   `bson:"price"`
+	MRP          float64   `bson:"mrp,omitempty"` // ERP price_min mirrored to the override (baselines)
 	Name         string    `bson:"name"`
 	PhotoURL     string    `bson:"photo_url,omitempty"`
 	HiddenBySync bool      `bson:"hidden_by_sync,omitempty"`
@@ -344,7 +353,15 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 // app and are never touched (that is what "must not affect anything" means).
 func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, ref, seedSku string, price float64, p dolibarr.Product, st *dolibarrSyncState) {
 	stock := p.StockReel.Int()
-	if st.Mode == "baseline" && st.Price == price && !st.HiddenBySync &&
+	// MRP: the ERP's price_min under the same GST rule. An MRP below the selling
+	// price is nonsense — mirror an explicit 0 instead, which CLEARS any stale
+	// bundled strikethrough in the app (so an ERP price hike can never render
+	// under an out-of-date bundled MRP).
+	mrp := dolibarrEffectiveMin(p)
+	if mrp < price {
+		mrp = 0
+	}
+	if st.Mode == "baseline" && st.Price == price && st.MRP == mrp && !st.HiddenBySync &&
 		st.Stock == stock && st.SchemaV >= dolibarrSyncSchemaV {
 		return // unchanged
 	}
@@ -353,7 +370,7 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 	// seeded row so the store console and low-stock alerts run on ERP truth.
 	// The manager keeps the in/out-of-stock SWITCH; the COUNT is the ledger's.
 	s.setSeededStockCount(ctx, seedSku, stock)
-	set := bson.D{{Key: "price", Value: &price}}
+	set := bson.D{{Key: "price", Value: &price}, {Key: "mrp", Value: &mrp}}
 	if st.HiddenBySync { // ERP put it back ON sale → restore availability
 		on := true
 		set = append(set, bson.E{Key: "in_stock", Value: &on})
@@ -365,9 +382,9 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 	}
 	s.saveDolibarrState(ctx, dolibarrSyncState{
 		Ref: ref, DolibarrID: p.ID.Int(), SkuID: seedSku, Mode: "baseline",
-		Price: price, Name: p.Label, Stock: stock,
+		Price: price, MRP: mrp, Name: p.Label, Stock: stock,
 	})
-	s.log.Info("dolibarr → baseline", "ref", ref, "sku", seedSku, "price", price, "stock", stock)
+	s.log.Info("dolibarr → baseline", "ref", ref, "sku", seedSku, "price", price, "mrp", mrp, "stock", stock)
 }
 
 // syncAddition upserts an ERP-only product as a store addition. On INSERT the

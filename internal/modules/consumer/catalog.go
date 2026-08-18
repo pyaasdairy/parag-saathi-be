@@ -193,6 +193,11 @@ type overrideView struct {
 	Price   *float64 `json:"price,omitempty"`
 	InStock *bool    `json:"in_stock,omitempty"`
 	Hidden  *bool    `json:"hidden,omitempty"`
+	// MRP mirrored from the ERP (price_min) for Dolibarr-mapped baselines — an
+	// explicit 0 CLEARS a stale bundled strikethrough (the app adopts mrp>=0
+	// and hides the strike when it is 0), so an ERP price edit can never render
+	// under an out-of-date bundled MRP.
+	MRP *float64 `json:"mrp,omitempty"`
 }
 
 // additionView is a store-added SKU as the consumer app consumes it. A base
@@ -804,7 +809,7 @@ func (r *repository) catalogView(ctx context.Context, serveSeeded bool) (*catalo
 			resp.Additions = append(resp.Additions, additionViewFromDoc(d))
 			continue
 		}
-		resp.Overrides[d.SkuID] = overrideView{Price: d.Price, InStock: d.InStock, Hidden: d.Hidden}
+		resp.Overrides[d.SkuID] = overrideView{Price: d.Price, InStock: d.InStock, Hidden: d.Hidden, MRP: d.MRP}
 	}
 	if !maxT.IsZero() {
 		resp.Version = maxT.UnixMilli()
