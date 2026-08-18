@@ -65,9 +65,11 @@ func TestReviewLoginGateDefaultsClosed(t *testing.T) {
 	if !svc.reviewLoginEnabled() {
 		t.Fatal("REVIEW_LOGIN_ENABLED=true must enable the review window")
 	}
+	// OTP_DEV_MODE must NOT open the review money-mint — the gate rides on the
+	// dedicated flag ONLY, so flipping OTP_DEV_MODE off (or on) never affects it.
 	t.Setenv("REVIEW_LOGIN_ENABLED", "")
 	svc.deps.Cfg.OTPDevMode = true
-	if !svc.reviewLoginEnabled() {
-		t.Fatal("dev mode keeps the local flow working")
+	if svc.reviewLoginEnabled() {
+		t.Fatal("OTP_DEV_MODE must NOT enable the review login (it mints wallet credit)")
 	}
 }

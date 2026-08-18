@@ -15,7 +15,8 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: ENV
-        value: dev
+        value: prod # production hardening ON: the boot-guard (config.go) refuses
+                    # to start if OTP_DEV_MODE=true or JWT_SECRET is a dev value.
       - key: LOG_LEVEL
         value: info
       # Render injects PORT; the server reads it (config envInt("PORT", 8080)).
@@ -53,9 +54,14 @@ services:
         sync: false
       - key: MSG91_TEMPLATE_ID
         sync: false
-      # Testing conveniences (flip OFF for production):
+      # PRODUCTION: OFF. With this false the login OTP is delivered ONLY over real
+      # MSG91 SMS (set MSG91_AUTHKEY + MSG91_TEMPLATE_ID in the dashboard first, or
+      # nobody can log in), the OTP is never echoed in the API response, and every
+      # dev money-mint seam (test top-up, promo credit, forged-payment verify) is
+      # closed. The fixed Play-review login is now gated on REVIEW_LOGIN_ENABLED
+      # ONLY — set that true for the review window, off after.
       - key: OTP_DEV_MODE
-        value: "true"
+        value: "false"
       # TESTING: offer ⚡ Instant wherever serviceable (before a store manager draws
       # an instant zone). Flip OFF for production so instant is gated on the radius.
       - key: INSTANT_TEST_OPEN

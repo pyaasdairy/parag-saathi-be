@@ -37,26 +37,18 @@ const (
 	reviewWalletFloor = 500.0        // ₹ kept available on every review login
 )
 
-// reviewLoginEnabled gates the Play-review bypass. The phone + OTP constants
-// above live in a public repo, and the review account tops its wallet up to a
-// spendable floor — left always-on in production that is a money mint anyone
-// can operate. It now runs ONLY when REVIEW_LOGIN_ENABLED=true is set (flip it
-// on for a Play-review window, off again after) or in OTP dev mode. Disabled,
-// the review number behaves like any other phone (normal OTP-over-SMS).
+// reviewLoginEnabled gates the fixed-OTP Play-review account (9999900000 /
+// 123456). It MINTS SPENDABLE WALLET CREDIT (the ₹500 floor refills on every
+// login), so unlike the other dev seams it must NEVER ride on OTP_DEV_MODE:
+// it opens ONLY when REVIEW_LOGIN_ENABLED=true is set explicitly (flip it on for
+// a Play-review window, off after). Disabled — the default, and the case even
+// while OTP_DEV_MODE is still true — the review number behaves like any other
+// phone (normal OTP-over-SMS). A copy-pasted dev .env cannot open it by accident.
 func (s *service) reviewLoginEnabled() bool {
-	return os.Getenv("REVIEW_LOGIN_ENABLED") == "true" || s.deps.Cfg.OTPDevMode
+	return strings.EqualFold(os.Getenv("REVIEW_LOGIN_ENABLED"), "true")
 }
 
 var phoneRe = regexp.MustCompile(`^[6-9]\d{9}$`)
-
-// reviewLoginEnabled gates the fixed-OTP Play-review account. It MINTS SPENDABLE
-// WALLET CREDIT (the ₹500 floor refills on every login), so unlike the other dev
-// seams it must never be reachable by default: enable it explicitly with
-// REVIEW_LOGIN_ENABLED=true for the duration of a store review, then turn it
-// off. Default off — a copy-pasted dev .env cannot open it by accident.
-func reviewLoginEnabled() bool {
-	return strings.EqualFold(os.Getenv("REVIEW_LOGIN_ENABLED"), "true")
-}
 
 type service struct {
 	deps *deps.Deps
