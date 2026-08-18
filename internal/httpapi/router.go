@@ -44,9 +44,10 @@ func New(d *deps.Deps) http.Handler {
 		httpx.Error(w, r, httpx.MethodNotAllowed())
 	})
 
-	// Operational endpoints — outside /api/v1, never authenticated.
+	// Operational endpoints — outside /api/v1, never authenticated. `build` marks
+	// the deployed code revision so a running instance can be matched to a commit.
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok", "build": "26.07.03-serverprice-alwaysreview"})
 	})
 	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
