@@ -67,15 +67,20 @@ func TestDolibarrBaselineMapTargetsExistInSeed(t *testing.T) {
 	}
 }
 
-// Only the PRG-* master range may sync; legacy/test rows must never reach the
-// catalog (they would duplicate seeded products).
+// Only the PRG-* master range and the PYS-* Pyaas house-brand range may sync;
+// legacy/test rows must never reach the catalog (they would duplicate seeded
+// products).
 func TestDolibarrRefGate(t *testing.T) {
 	for ref, ok := range map[string]bool{
 		"PRG-TONED-500ML":     true,
 		"PRG-GHEE-SIKA-1LTR":  true,
+		"PYS-TONED-1LTR":      true, // Pyaas house brand
+		"PYS-A2-CTN-500ML":    true,
+		"PYS-GHEE-A2-500ML":   true,
 		"Parag_Gold":          false, // legacy test row
 		"Full_Cream_Milk_FCM": false, // legacy test row
 		"prg-toned-500ml":     false, // gate runs on the UPPERCASED ref → "PRG-TONED-500ML"
+		"pys-toned-1ltr":      false, // same — matched after ToUpper
 		"":                    false,
 	} {
 		if got := dolibarrRefPattern.MatchString(ref); got != ok {
@@ -95,6 +100,9 @@ func TestDolibarrCategory(t *testing.T) {
 		{"PRG-CHHACH-430ML", "Parag Chhach 430 ML", "chaach"},
 		{"PRG-NEWTHING-1KG", "Parag Fancy Milk Drink", "milk"}, // unknown segment, milky label
 		{"PRG-NEWTHING-1KG", "Parag Fancy Barfi", "sweets"},    // unknown segment, sweet default
+		{"PYS-TONED-1LTR", "Pyaas Toned Milk 1 LTR", "milk"},   // Pyaas house brand
+		{"PYS-A2-1LTR", "Pyaas A2 Cow Milk 1 LTR", "milk"},     // A2 segment maps explicitly
+		{"PYS-GHEE-A2-500ML", "Pyaas Pure Cow Ghee (A2 Bilona) 500 ML", "ghee"},
 	} {
 		if got := dolibarrCategory(c.ref, c.label); got != c.want {
 			t.Errorf("%s (%s): got %q want %q", c.ref, c.label, got, c.want)
@@ -173,9 +181,13 @@ func TestDolibarrFallbackMapTargetsExistInSeed(t *testing.T) {
 			t.Errorf("fallback %s → %q: seeded product has no image asset", seg, sku)
 		}
 	}
-	// every category segment has a fallback (no family renders empty)
+	// every category segment has a fallback (no family renders empty) — except
+	// segments that exist only in the PYS-* house-brand range: fallback art is
+	// all Parag pack shots and is PRG-gated (dolibarrFallbackPhotos), so a PYS
+	// card without an ERP image renders the clean name-card instead.
+	pysOnly := map[string]bool{"A2": true}
 	for seg := range dolibarrCategoryBySegment {
-		if _, ok := dolibarrFallbackSeedSku[seg]; !ok {
+		if _, ok := dolibarrFallbackSeedSku[seg]; !ok && !pysOnly[seg] {
 			t.Errorf("segment %s has a category but no photo fallback", seg)
 		}
 	}

@@ -98,7 +98,7 @@ var dolibarrRefToSeedSku = map[string]string{
 // dolibarrCategoryBySegment maps the <CAT> segment of a PRG-<CAT>-<SIZE> ref to
 // the app's seeded category vocabulary (products_seed.json uses exactly these).
 var dolibarrCategoryBySegment = map[string]string{
-	"TONED": "milk", "FCM": "milk", "STD": "milk",
+	"TONED": "milk", "FCM": "milk", "STD": "milk", "A2": "milk",
 	"TEA": "super_tea", "FLAVMILK": "flavoured_milk",
 	"GHEE": "ghee", "BUTTER": "butter", "DAHI": "dahi",
 	"PANEER": "paneer", "KHOYA": "khoya", "LASSI": "lassi",
@@ -108,10 +108,11 @@ var dolibarrCategoryBySegment = map[string]string{
 	"KHEER": "sweets", "SHREEKHAND": "sweets",
 }
 
-// dolibarrRefPattern gates which ERP rows sync at all: only the PRG-* master
-// range. Legacy/test rows (Parag_Gold, Full_Cream_Milk_FCM, …) never sync, so
+// dolibarrRefPattern gates which ERP rows sync at all: the PRG-* master range
+// (Parag) and the PYS-* range (the Pyaas house brand — Toned/A2 milk + A2
+// ghee). Legacy/test rows (Parag_Gold, Full_Cream_Milk_FCM, …) never sync, so
 // they can never duplicate a product in the app.
-var dolibarrRefPattern = regexp.MustCompile(`^PRG-[A-Z0-9-]+$`)
+var dolibarrRefPattern = regexp.MustCompile(`^(?:PRG|PYS)-[A-Z0-9-]+$`)
 
 // dolibarrFallbackSeedSku maps a PRG-<CAT> segment to the seeded product whose
 // photos stand in for an ERP addition that has NO image of its own — image
@@ -485,7 +486,13 @@ func (s *service) currentAdditionPhoto(ctx context.Context, sku string) string {
 
 // dolibarrFallbackPhotos returns the seeded family art (front, back) for an ERP
 // ref with no image of its own; ("","") when the family has no seeded stand-in.
+// PRG-* only: the seeded art is all Parag pack shots, and a Pyaas house-brand
+// card must never wear a Parag pack — a PYS-* row with no ERP image renders the
+// app's clean name-card until the team uploads its real shots in Dolibarr.
 func (s *service) dolibarrFallbackPhotos(ctx context.Context, ref string) (string, string) {
+	if !strings.HasPrefix(ref, "PRG-") {
+		return "", ""
+	}
 	parts := strings.Split(ref, "-")
 	if len(parts) < 2 {
 		return "", ""
