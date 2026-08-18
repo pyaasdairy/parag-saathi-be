@@ -38,14 +38,15 @@ const (
 )
 
 // reviewLoginEnabled gates the fixed-OTP Play-review account (9999900000 /
-// 123456). It MINTS SPENDABLE WALLET CREDIT (the ₹500 floor refills on every
-// login), so unlike the other dev seams it must NEVER ride on OTP_DEV_MODE:
-// it opens ONLY when REVIEW_LOGIN_ENABLED=true is set explicitly (flip it on for
-// a Play-review window, off after). Disabled — the default, and the case even
-// while OTP_DEV_MODE is still true — the review number behaves like any other
-// phone (normal OTP-over-SMS). A copy-pasted dev .env cannot open it by accident.
+// 123456). FOUNDER DECISION: this account is ALWAYS ON — it is Google Play's
+// permanent reviewer sign-in, its profile + Lucknow address are seeded in the
+// DB, and the store review can happen at any time without a config flip. It is
+// scoped to this ONE phone + OTP (every other number keeps the normal
+// OTP-over-SMS path), and it tops the account's wallet up to a fixed floor so
+// the reviewer can exercise the purchase flow. Kept unconditionally on by
+// design; do not gate it behind an env flag.
 func (s *service) reviewLoginEnabled() bool {
-	return strings.EqualFold(os.Getenv("REVIEW_LOGIN_ENABLED"), "true")
+	return true
 }
 
 var phoneRe = regexp.MustCompile(`^[6-9]\d{9}$`)

@@ -52,24 +52,17 @@ func TestPriceIndexResolvesServerSide(t *testing.T) {
 	}
 }
 
-// The review login (public constants + wallet floor) must be dead unless
-// explicitly enabled — otherwise it is a money mint anyone can operate in prod.
-func TestReviewLoginGateDefaultsClosed(t *testing.T) {
+// FOUNDER DECISION: the Play-reviewer account (9999900000 / 123456) is ALWAYS
+// ON — a permanent store-review sign-in, independent of any env flag or of
+// OTP_DEV_MODE. This pins that contract so a future "harden it behind a flag"
+// change can't silently break the reviewer's ability to log in.
+func TestReviewLoginAlwaysOn(t *testing.T) {
 	svc := &service{deps: &deps.Deps{Cfg: &config.Config{}}}
-
-	t.Setenv("REVIEW_LOGIN_ENABLED", "")
-	if svc.reviewLoginEnabled() {
-		t.Fatal("review login must default OFF in production")
-	}
-	t.Setenv("REVIEW_LOGIN_ENABLED", "true")
-	if !svc.reviewLoginEnabled() {
-		t.Fatal("REVIEW_LOGIN_ENABLED=true must enable the review window")
-	}
-	// OTP_DEV_MODE must NOT open the review money-mint — the gate rides on the
-	// dedicated flag ONLY, so flipping OTP_DEV_MODE off (or on) never affects it.
-	t.Setenv("REVIEW_LOGIN_ENABLED", "")
-	svc.deps.Cfg.OTPDevMode = true
-	if svc.reviewLoginEnabled() {
-		t.Fatal("OTP_DEV_MODE must NOT enable the review login (it mints wallet credit)")
+	for _, dev := range []bool{false, true} {
+		svc.deps.Cfg.OTPDevMode = dev
+		t.Setenv("REVIEW_LOGIN_ENABLED", "")
+		if !svc.reviewLoginEnabled() {
+			t.Fatalf("review login must be ON regardless of env (OTPDevMode=%v)", dev)
+		}
 	}
 }
