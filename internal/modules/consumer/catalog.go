@@ -793,6 +793,20 @@ func (r *repository) catalogView(ctx context.Context, serveSeeded bool) (*catalo
 	}
 	resp := &catalogResponse{Overrides: map[string]overrideView{}, Additions: []additionView{}}
 	var maxT time.Time
+	// Pass 1 — collect overrides. A sku that is ALSO served as a product/addition
+	// row gets its override folded INTO that entry (pass 2) instead of a separate
+	// overrides-map key: the app keeps first-patch-wins per sku id, so a bare
+	// {price} override alongside a rich served entry would REPLACE it and drop
+	// any sku the app doesn't bundle (the withheld PYAAS cards vanished exactly
+	// this way). Each sku therefore appears exactly once in the response.
+	type ovDoc struct{ d catalogDoc }
+	ovBySku := map[string]ovDoc{}
+	for _, d := range docs {
+		if d.Kind != catalogKindAddition && d.Kind != catalogKindProduct {
+			ovBySku[d.SkuID] = ovDoc{d} // oldest→newest: a later write wins
+		}
+	}
+	consumed := map[string]bool{}
 	for _, d := range docs {
 		// Seeded baseline products are inert until CONSUMER_CATALOG_SEED_SERVE is on:
 		// skip them BEFORE the version stamp so the response stays byte-identical.
@@ -803,13 +817,35 @@ func (r *repository) catalogView(ctx context.Context, serveSeeded bool) (*catalo
 			maxT = d.UpdatedAt
 		}
 		if d.Kind == catalogKindAddition || d.Kind == catalogKindProduct {
+			ov, hasOv := ovBySku[d.SkuID]
+			// hidden by its own row OR by an override → not shown to shoppers;
+			// the override still emits (below) so a bundled copy hides too.
 			if d.Hidden != nil && *d.Hidden {
-				continue // a hidden addition/product is not shown to shoppers
+				continue
+			}
+			if hasOv && ov.d.Hidden != nil && *ov.d.Hidden {
+				continue
+			}
+			if hasOv { // fold the override into the served entry
+				if ov.d.Price != nil {
+					d.Price = ov.d.Price
+				}
+				if ov.d.MRP != nil {
+					d.MRP = ov.d.MRP
+				}
+				if ov.d.InStock != nil {
+					d.InStock = ov.d.InStock
+				}
+				consumed[d.SkuID] = true
 			}
 			resp.Additions = append(resp.Additions, additionViewFromDoc(d))
+		}
+	}
+	for sku, ov := range ovBySku {
+		if consumed[sku] {
 			continue
 		}
-		resp.Overrides[d.SkuID] = overrideView{Price: d.Price, InStock: d.InStock, Hidden: d.Hidden, MRP: d.MRP}
+		resp.Overrides[sku] = overrideView{Price: ov.d.Price, InStock: ov.d.InStock, Hidden: ov.d.Hidden, MRP: ov.d.MRP}
 	}
 	if !maxT.IsZero() {
 		resp.Version = maxT.UnixMilli()
