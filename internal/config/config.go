@@ -93,7 +93,7 @@ func Load() (*Config, error) {
 		DolibarrURL:             strings.TrimRight(envStr("DOLIBARR_URL", ""), "/"),
 		DolibarrAPIKey:          envStr("DOLIBARR_API_KEY", ""),
 		DolibarrStoreID:         envStr("DOLIBARR_STORE_ID", "6a53fb242b4fd88066524d41"),
-		DolibarrSyncEvery:       time.Duration(envInt("DOLIBARR_SYNC_EVERY_MINUTES", 1)) * time.Minute,
+		DolibarrSyncEvery:       dolibarrSyncCadence(),
 		DolibarrWebhookToken:    envStr("DOLIBARR_WEBHOOK_TOKEN", ""),
 		DolibarrStockOutHourIST: envInt("DOLIBARR_STOCKOUT_HOUR_IST", 1),
 		DolibarrOutWarehouseID:  envInt("DOLIBARR_OUT_WAREHOUSE_ID", 2),
@@ -184,4 +184,19 @@ func envBool(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+// dolibarrSyncCadence — how often the ERP catalog poll runs. Seconds-first:
+// DOLIBARR_SYNC_EVERY_SECONDS (default 20 — each pass is a single /products
+// call, so a sub-minute cadence is trivially light on DoliCloud). The legacy
+// DOLIBARR_SYNC_EVERY_MINUTES is honoured when explicitly set. The webhook
+// kick still short-circuits both when configured — this poll is the floor,
+// not the ceiling.
+func dolibarrSyncCadence() time.Duration {
+	if v := os.Getenv("DOLIBARR_SYNC_EVERY_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Minute
+		}
+	}
+	return time.Duration(envInt("DOLIBARR_SYNC_EVERY_SECONDS", 20)) * time.Second
 }
