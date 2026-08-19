@@ -55,6 +55,10 @@ type service struct {
 	deps *deps.Deps
 	repo *repository
 	log  *slog.Logger
+	// dolibarrKick wakes the catalog-sync loop IMMEDIATELY (webhook / manual
+	// trigger) instead of waiting for the next poll tick. Buffered(1): kicks
+	// during a running pass coalesce into exactly one follow-up pass.
+	dolibarrKick chan struct{}
 	// consumerKey is DERIVED from the shared JWT secret via HMAC domain
 	// separation, so consumer tokens are cryptographically DISJOINT from
 	// operator tokens: an operator token fails signature validation on a
@@ -96,6 +100,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		sms:                sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
 		catalogServeSeeded: os.Getenv("CONSUMER_CATALOG_SEED_SERVE") == "true",
 		b2img:              newB2DownloadClient(),
+		dolibarrKick:       make(chan struct{}, 1),
 	}
 }
 

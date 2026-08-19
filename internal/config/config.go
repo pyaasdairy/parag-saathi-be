@@ -55,6 +55,7 @@ type Config struct {
 	DolibarrAPIKey          string        // DOLAPIKEY of the scoped saathi.sync user
 	DolibarrStoreID         string        // store whose overlay receives overrides/additions
 	DolibarrSyncEvery       time.Duration // catalog pull cadence (also runs once at boot)
+	DolibarrWebhookToken    string        // shared secret for POST /consumer/dolibarr/webhook (instant sync kick)
 	DolibarrStockOutHourIST int           // IST hour to post YESTERDAY's net stock-out
 	DolibarrOutWarehouseID  int           // 2 = MOBILE HUB (id 1 AT PLANT is UI-only)
 	DolibarrPostStockOut    bool          // false → compute + log only (dry-run)
@@ -92,7 +93,8 @@ func Load() (*Config, error) {
 		DolibarrURL:             strings.TrimRight(envStr("DOLIBARR_URL", ""), "/"),
 		DolibarrAPIKey:          envStr("DOLIBARR_API_KEY", ""),
 		DolibarrStoreID:         envStr("DOLIBARR_STORE_ID", "6a53fb242b4fd88066524d41"),
-		DolibarrSyncEvery:       time.Duration(envInt("DOLIBARR_SYNC_EVERY_MINUTES", 360)) * time.Minute,
+		DolibarrSyncEvery:       time.Duration(envInt("DOLIBARR_SYNC_EVERY_MINUTES", 1)) * time.Minute,
+		DolibarrWebhookToken:    envStr("DOLIBARR_WEBHOOK_TOKEN", ""),
 		DolibarrStockOutHourIST: envInt("DOLIBARR_STOCKOUT_HOUR_IST", 1),
 		DolibarrOutWarehouseID:  envInt("DOLIBARR_OUT_WAREHOUSE_ID", 2),
 		DolibarrPostStockOut:    envBool("DOLIBARR_POST_STOCKOUT", false),

@@ -124,6 +124,12 @@ func Register(r chi.Router, d *deps.Deps) {
 		cr.Post("/partner-leads", h.createPartnerLead)
 		cr.Post("/wishlist/leads", h.createWishlistLead)
 
+		// Instant ERP→catalog sync kick — target URL for the DoliCloud Webhook
+		// module (token-gated; see dolibarrWebhook). GET supported too so the
+		// COO can trigger a manual refresh from a browser bookmark.
+		cr.Post("/dolibarr/webhook", h.dolibarrWebhook)
+		cr.Get("/dolibarr/webhook", h.dolibarrWebhook)
+
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
 			pr.Use(svc.authenticate)

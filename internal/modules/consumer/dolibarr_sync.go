@@ -253,6 +253,12 @@ func (s *service) dolibarrWorkers(ctx context.Context) {
 	go s.dolibarrStockOutLoop(ctx, cli)
 }
 
+// dolibarrPhotoSweepEvery: full product-image passes are ~72 extra ERP calls,
+// so at the fast poll cadence they run only every Nth pass (and always on the
+// first). Stock/price/name changes land within ONE tick; a new ERP photo lands
+// within dolibarrPhotoSweepEvery ticks.
+const dolibarrPhotoSweepEvery = 15
+
 func (s *service) dolibarrCatalogLoop(ctx context.Context, cli *dolibarr.Client) {
 	// small boot delay so a crash-looping dependency can't hammer the ERP
 	select {
@@ -260,21 +266,35 @@ func (s *service) dolibarrCatalogLoop(ctx context.Context, cli *dolibarr.Client)
 	case <-ctx.Done():
 		return
 	}
+	pass := 0
 	for {
-		if err := s.runDolibarrCatalogSync(ctx, cli); err != nil {
+		pass++
+		withPhotos := pass == 1 || pass%dolibarrPhotoSweepEvery == 0
+		if err := s.runDolibarrCatalogSync(ctx, cli, withPhotos); err != nil {
 			s.log.Warn("dolibarr catalog sync failed", "err", err)
 		}
 		select {
 		case <-time.After(s.deps.Cfg.DolibarrSyncEvery):
+		case <-s.dolibarrKick: // webhook / manual trigger → sync NOW
+			s.log.Info("dolibarr sync kicked (webhook)")
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
+// KickDolibarrSync wakes the catalog loop immediately. Non-blocking: kicks
+// while a pass is running coalesce into one follow-up pass.
+func (s *service) KickDolibarrSync() {
+	select {
+	case s.dolibarrKick <- struct{}{}:
+	default:
+	}
+}
+
 // runDolibarrCatalogSync executes one full inbound pass. Idempotent; safe to
 // run at any frequency (change-detected against dolibarr_sync state).
-func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Client) error {
+func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Client, withPhotos bool) error {
 	cfg := s.deps.Cfg
 	products, err := cli.ListSellableProducts(ctx)
 	if err != nil {
@@ -303,7 +323,7 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 		if seedSku, ok := dolibarrRefToSeedSku[ref]; ok {
 			s.syncBaselinePrice(ctx, cli, ref, seedSku, price, p, &st)
 		} else {
-			s.syncAddition(ctx, cli, ref, price, p, &st)
+			s.syncAddition(ctx, cli, ref, price, p, &st, withPhotos)
 		}
 		synced++
 	}
@@ -399,7 +419,7 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 // ERP labels embed the pack size, so they are split into name + variant
 // (dolibarrSplitLabel) — that lets the app group sizes of one product onto one
 // card instead of rendering a look-alike card per size.
-func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref string, price float64, p dolibarr.Product, st *dolibarrSyncState) {
+func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref string, price float64, p dolibarr.Product, st *dolibarrSyncState, withPhotos bool) {
 	cfg := s.deps.Cfg
 	sku := dolibarrAdditionSku(ref)
 	name, variant := dolibarrSplitLabel(p.Label)
@@ -407,7 +427,15 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	// Image policy: an ERP-uploaded image ALWAYS wins; a photo already on the
 	// row (manager-set or earlier) is respected; only a photo-less card falls
 	// back to our own family art so nothing ever renders empty.
-	erpFront, erpBack := s.dolibarrPickPhotos(ctx, cli, ref, st)
+	// FAST passes (withPhotos=false) skip the per-product document call —
+	// ~72 extra ERP requests per pass — and keep the known photo; first sight
+	// of a NEW product always fetches so its card never starts photo-less.
+	var erpFront, erpBack string
+	if withPhotos || st.Mode != "addition" {
+		erpFront, erpBack = s.dolibarrPickPhotos(ctx, cli, ref, st)
+	} else {
+		erpFront, erpBack = st.PhotoURL, ""
+	}
 	front, back := erpFront, erpBack
 	if front == "" && s.currentAdditionPhoto(ctx, sku) == "" {
 		front, back = s.dolibarrFallbackPhotos(ctx, ref)

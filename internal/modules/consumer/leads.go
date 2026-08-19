@@ -115,3 +115,26 @@ func (h *handler) createWishlistLead(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
+// dolibarrWebhook — POST /consumer/dolibarr/webhook?token=… (also accepts the
+// X-Webhook-Token header). Wired to the DoliCloud Webhook module so a product
+// edit / stock movement in the ERP kicks the catalog sync IMMEDIATELY instead
+// of waiting for the next poll tick. The payload body is ignored on purpose:
+// the sync always re-reads the ERP as the source of truth, so a forged body
+// can never inject data — the token only gates who may spend our sync cycles.
+func (h *handler) dolibarrWebhook(w http.ResponseWriter, r *http.Request) {
+	want := h.svc.deps.Cfg.DolibarrWebhookToken
+	if want == "" {
+		want = h.svc.deps.Cfg.DolibarrAPIKey // sensible default: the DOLAPIKEY
+	}
+	got := r.URL.Query().Get("token")
+	if got == "" {
+		got = r.Header.Get("X-Webhook-Token")
+	}
+	if want == "" || got != want {
+		writeErr(w, errForbidden("bad webhook token"))
+		return
+	}
+	h.svc.KickDolibarrSync()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "kicked": true})
+}
