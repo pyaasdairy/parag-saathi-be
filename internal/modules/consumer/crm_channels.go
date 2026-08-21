@@ -9,7 +9,10 @@
 //   - SMS content is the DLT-REGISTERED template held at MSG91; we only supply
 //     variables. A trigger with no mapped DLT template id (CRM_DLT_TEMPLATE_IDS)
 //     never attempts SMS — unregistered content is a TRAI violation, so the
-//     channel reports itself unavailable with a logged reason instead.
+//     channel reports itself unavailable with a logged reason instead. DLT
+//     approves each language body as a SEPARATE registration, so a mapping may
+//     be per-language ({"en":…,"hi":…}); the id is resolved for the language of
+//     the body actually sent, and a missing language key is equally unmapped.
 //   - SMS is ROMAN-ONLY: variables are drawn from the roman body (hi_roman,
 //     else en) and any Devanagari in a variable value aborts the send.
 //     WhatsApp carries the Devanagari rendering (hi_devanagari preferred).
@@ -146,6 +149,65 @@ func crmHasDevanagari(s string) bool {
 	return false
 }
 
+// crmDLTTemplateID is one CRM_DLT_TEMPLATE_IDS value. DLT approves the EN and
+// Hindi bodies of a trigger as SEPARATE template registrations, so a value is
+// EITHER a plain string (one id covering whichever language body is sent —
+// the original format, unchanged) OR an object {"en":"<id>","hi":"<id>"}
+// carrying one id per registered language. Any other JSON type for the value
+// is malformed and fails the WHOLE map's unmarshal — degrading exactly like
+// malformed JSON always has (crmParseDLTMap: log once, channel mappings
+// disabled). Unknown language keys inside the object form are tolerated and
+// ignored, matching encoding/json's usual tolerance for extra keys.
+type crmDLTTemplateID struct {
+	any    string            // plain-string form
+	byLang map[string]string // object form, keyed "en" / "hi"
+}
+
+func (d *crmDLTTemplateID) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		d.any = s
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal(b, &m); err != nil {
+		return fmt.Errorf(`DLT template id must be a string or {"en":"…","hi":"…"} object: %w`, err)
+	}
+	d.byLang = m
+	return nil
+}
+
+// forLang resolves the DLT id registered for the body language SMS routes
+// ("hi" for hi_roman, "en" for en). A plain-string mapping covers either
+// language; an object mapping missing the selected language resolves to "" —
+// unmapped, so available() suppresses the send exactly like an absent trigger.
+func (d crmDLTTemplateID) forLang(lang string) string {
+	if d.any != "" {
+		return d.any
+	}
+	return d.byLang[lang]
+}
+
+// crmParseDLTMap reads CRM_DLT_TEMPLATE_IDS: {"<trigger-id>": <string-or-
+// per-language-object>}. Same safety contract as crmParseTemplateMap —
+// malformed JSON (including a value of the wrong type) degrades to a nil map:
+// log once, every trigger reports "no template mapped", never a crash or an
+// unregistered send.
+func crmParseDLTMap(log *slog.Logger, env string) map[string]crmDLTTemplateID {
+	raw := strings.TrimSpace(os.Getenv(env))
+	if raw == "" {
+		return nil
+	}
+	m := map[string]crmDLTTemplateID{}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		if log != nil {
+			log.Warn("crm: malformed template map env — channel mappings disabled", "env", env, "err", err)
+		}
+		return nil
+	}
+	return m
+}
+
 // crmParseTemplateMap reads a {"<trigger-id>":"<provider-template>"} JSON map
 // from env. Malformed JSON degrades SAFELY: the map comes back empty, so every
 // trigger reports "no template mapped" and delivery stays on the inbox —
@@ -264,7 +326,7 @@ type smsChannel struct {
 	sender  string // 6-char DLT header (CRM_MSG91_SENDER, e.g. PYAASD)
 	baseURL string // crmMSG91FlowEndpoint; a struct field so tests point it at httptest
 	client  *http.Client
-	dlt     map[string]string // trigger id → DLT flow/template id (CRM_DLT_TEMPLATE_IDS)
+	dlt     map[string]crmDLTTemplateID // trigger id → DLT flow/template id(s) (CRM_DLT_TEMPLATE_IDS)
 	log     *slog.Logger
 }
 
@@ -279,7 +341,7 @@ func newSMSChannel(log *slog.Logger) *smsChannel {
 		sender:  strings.TrimSpace(os.Getenv("CRM_MSG91_SENDER")),
 		baseURL: crmMSG91FlowEndpoint,
 		client:  &http.Client{Timeout: 10 * time.Second},
-		dlt:     crmParseTemplateMap(log, "CRM_DLT_TEMPLATE_IDS"),
+		dlt:     crmParseDLTMap(log, "CRM_DLT_TEMPLATE_IDS"),
 		log:     log,
 	}
 }
@@ -298,6 +360,16 @@ func crmSMSBody(tpl crmTemplate) string {
 	return tpl.EN
 }
 
+// crmSMSLang is the DLT-registration language key for the body crmSMSBody
+// picks: hi_roman routes as "hi", the en fallback as "en". It mirrors — never
+// alters — crmSMSBody's selection, so the two can never disagree.
+func crmSMSLang(tpl crmTemplate) string {
+	if tpl.HI != "" {
+		return "hi"
+	}
+	return "en"
+}
+
 func (c *smsChannel) available(t crmTrigger, tpl crmTemplate) error {
 	if !c.Enabled() {
 		return fmt.Errorf("sms: channel not configured (CRM_MSG91_AUTHKEY unset)")
@@ -305,7 +377,11 @@ func (c *smsChannel) available(t crmTrigger, tpl crmTemplate) error {
 	if t.Category == "promotional" {
 		return fmt.Errorf("sms: G4 DND scrub not implemented — promotional SMS fails closed (TRAI)")
 	}
-	if c.dlt[t.ID] == "" {
+	// Resolve the id for the LANGUAGE of the body we would send (hi_roman →
+	// "hi", en → "en"): DLT registers each language body separately, so an id
+	// approved for one language never covers the other. Missing = unmapped =
+	// the same refusal as a trigger absent from the map entirely.
+	if c.dlt[t.ID].forLang(crmSMSLang(tpl)) == "" {
 		return fmt.Errorf("sms: no DLT template id mapped for trigger %s (CRM_DLT_TEMPLATE_IDS) — refusing unregistered content", t.ID)
 	}
 	if crmSMSBody(tpl) == "" {
@@ -330,7 +406,7 @@ func (c *smsChannel) deliver(ctx context.Context, phone string, t crmTrigger, tp
 		rec[strings.ToLower(n)] = values[i]
 	}
 	payload := map[string]any{
-		"template_id": c.dlt[t.ID],
+		"template_id": c.dlt[t.ID].forLang(crmSMSLang(tpl)),
 		"short_url":   "0",
 		"recipients":  []any{rec},
 	}
