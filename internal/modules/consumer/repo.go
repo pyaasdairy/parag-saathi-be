@@ -89,6 +89,11 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 		// A payment order id is globally unique — the top-up idempotency anchor.
 		{r.payOrders, bson.D{{Key: "order_id", Value: 1}}, options.Index().SetUnique(true)},
 		{r.payOrders, bson.D{{Key: "consumer_id", Value: 1}}, nil},
+		// 2+2 one-per-household gate: a phone claims the trial at most once,
+		// SURVIVING account erasure (fraud prevention). LOAD-BEARING unique
+		// index — without it the claim InsertOne always succeeds and the gate
+		// silently passes every re-signup.
+		{r.accounts.Database().Collection("free_pack_claims"), bson.D{{Key: "phone", Value: 1}}, options.Index().SetUnique(true)},
 	}
 	for _, s := range specs {
 		if _, err := s.c.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: s.keys, Options: s.opts}); err != nil {
@@ -202,11 +207,28 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 	// production, be re-keyed to a pseudonymous id and retained (§21); for the
 	// pilot we remove the consumer-scoped rows.
 	filter := bson.D{{Key: "consumer_id", Value: id}}
-	for _, c := range []*mongo.Collection{r.addresses, r.wallets, r.walletTxns, r.consents, r.refresh, r.payOrders} {
+	db := r.accounts.Database()
+	for _, c := range []*mongo.Collection{
+		r.addresses, r.wallets, r.walletTxns, r.consents, r.refresh, r.payOrders,
+		// An erased account must not leave an ACTIVE subscription behind — the
+		// backend worker would keep minting daily orders and delivery tasks
+		// for a customer who no longer exists.
+		r.subscriptions, r.trials,
+		// CRM rows are consumer-keyed PII surfaces too.
+		db.Collection(collConsumerOffers), db.Collection(collConsumerInbox),
+		db.Collection(collCRMDispatch), db.Collection(collCRMEvents),
+	} {
 		if _, err := c.DeleteMany(ctx, filter); err != nil {
 			return errInternal("erasure failed")
 		}
 	}
+	// Delivery tasks carry name, phone and precise geo, keyed by the hex id.
+	if _, err := r.deliveries.DeleteMany(ctx, bson.D{{Key: "consumer_id", Value: id.Hex()}}); err != nil {
+		return errInternal("erasure failed")
+	}
+	// DELIBERATELY RETAINED: free_pack_claims (keyed by phone) — the 2+2
+	// one-per-household gate is fraud-prevention data; erase-and-resignup must
+	// not re-arm a marketing offer (DPDP permits retention for that purpose).
 	// Orders carry raw PII (name, phone, precise geo, address) and are keyed by
 	// user_id (the consumer hex), not consumer_id — erase them too.
 	if _, err := r.orders.DeleteMany(ctx, bson.D{{Key: "user_id", Value: id.Hex()}}); err != nil {

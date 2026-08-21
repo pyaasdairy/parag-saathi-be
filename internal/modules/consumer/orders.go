@@ -107,11 +107,12 @@ type order struct {
 	DeliveryDate   string             `bson:"delivery_date,omitempty" json:"delivery_date,omitempty"`
 	// Welcome Litre linkage (crm_offers.go). OfferPack 1|2 marks a
 	// promotional pack order; both omitempty → absent everywhere else.
-	OfferID       string `bson:"offer_id,omitempty"   json:"offer_id,omitempty"`
-	OfferPack     int    `bson:"offer_pack,omitempty" json:"offer_pack,omitempty"`
-	BuyerGSTIN    string `bson:"buyer_gstin,omitempty"   json:"buyer_gstin,omitempty"`
-	ProofPhotoURL string `bson:"proof_photo_url,omitempty" json:"proof_photo_url,omitempty"`
-	Lane          string `bson:"lane"                    json:"lane,omitempty"`
+	DeliveryPrefs *deliveryPrefsDoc `bson:"delivery_prefs,omitempty" json:"delivery_prefs,omitempty"`
+	OfferID       string            `bson:"offer_id,omitempty"   json:"offer_id,omitempty"`
+	OfferPack     int               `bson:"offer_pack,omitempty" json:"offer_pack,omitempty"`
+	BuyerGSTIN    string            `bson:"buyer_gstin,omitempty"   json:"buyer_gstin,omitempty"`
+	ProofPhotoURL string            `bson:"proof_photo_url,omitempty" json:"proof_photo_url,omitempty"`
+	Lane          string            `bson:"lane"                    json:"lane,omitempty"`
 	// TrialFree marks a 2+2 free-day subscription delivery: the sticker Total
 	// stands, but the wallet charge at delivery is 0 (trialChargeFor). Set at
 	// creation from the trial phase — DISPLAY + ANALYTICS only, it never gates the
@@ -252,6 +253,9 @@ type orderInput struct {
 	DeliveryDate string `json:"delivery_date"`
 	// Optional company GSTIN entered at checkout — printed on the invoice.
 	BuyerGSTIN string `json:"buyer_gstin"`
+	// Doorstep instructions for THIS order (ring-bell / call-before / note) —
+	// sanitized server-side, copied onto the delivery task for the rider.
+	DeliveryPrefs map[string]any `json:"delivery_prefs"`
 }
 
 func (s *service) createOrder(ctx context.Context, userID string, in orderInput) (*order, error) {
@@ -361,6 +365,7 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 		DeliveryDate: deliveryDate, BuyerGSTIN: strings.TrimSpace(in.BuyerGSTIN),
 		Items: items, Rider: nil, CanReview: false, Review: nil,
 		ConsumerName: in.ConsumerName, Phone: in.Phone, Geo: in.Geo, CreatedAt: now, UpdatedAt: now,
+		DeliveryPrefs: sanitizeDeliveryPrefs(in.DeliveryPrefs),
 	}
 	if err := s.repo.insertOrder(ctx, o); err != nil {
 		return nil, err

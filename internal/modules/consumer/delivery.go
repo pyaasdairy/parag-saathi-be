@@ -62,12 +62,15 @@ type delivery struct {
 	PhoneMasked  string             `bson:"phone_masked"         json:"phoneMasked"`
 	Phone        string             `bson:"phone,omitempty"      json:"phone,omitempty"`
 	AddressLabel string             `bson:"address_label"        json:"addressLabel"`
-	AddressLine  string             `bson:"address_line"         json:"addressLine"`
-	Landmark     string             `bson:"landmark,omitempty"   json:"landmark,omitempty"`
-	Geo          geoPt              `bson:"geo"                  json:"geo"`
-	Items        []deliveryItem     `bson:"items"                json:"items"`
-	Amount       float64            `bson:"amount"               json:"amount"`
-	PaymentMode  string             `bson:"payment_mode"         json:"paymentMode"`
+	// Doorstep instructions the RIDER acts on (ring the bell / call first /
+	// drop note) — copied from the order or the account at task creation.
+	DeliveryPrefs *deliveryPrefsDoc `bson:"delivery_prefs,omitempty" json:"deliveryPrefs,omitempty"`
+	AddressLine   string            `bson:"address_line"         json:"addressLine"`
+	Landmark      string            `bson:"landmark,omitempty"   json:"landmark,omitempty"`
+	Geo           geoPt             `bson:"geo"                  json:"geo"`
+	Items         []deliveryItem    `bson:"items"                json:"items"`
+	Amount        float64           `bson:"amount"               json:"amount"`
+	PaymentMode   string            `bson:"payment_mode"         json:"paymentMode"`
 	// TrialEligible is set at creation when the order is a PYAAS Taaza subscription
 	// item — only then may the 2-paid/2-free welcome trial waive its settle charge.
 	TrialEligible bool   `bson:"trial_eligible,omitempty" json:"-"`

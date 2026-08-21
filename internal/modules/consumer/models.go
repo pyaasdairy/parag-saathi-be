@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -43,10 +44,50 @@ type account struct {
 	// HasPaidOrder — CH-19: true from the first order whose SETTLED value was
 	// > 0, NEVER from a promotional-only order. Gates win-back journeys and
 	// Welcome Litre eligibility. Server-internal; not exposed on /me.
-	HasPaidOrder bool      `bson:"has_paid_order,omitempty" json:"-"`
-	Status       string    `bson:"status"                 json:"status"`
-	CreatedAt    time.Time `bson:"created_at"             json:"created_at"`
-	UpdatedAt    time.Time `bson:"updated_at"             json:"updated_at"`
+	HasPaidOrder bool `bson:"has_paid_order,omitempty" json:"-"`
+	// DeliveryPrefs — the standing doorstep instructions (PATCH /me). Copied
+	// onto every delivery task so the RIDER sees them; an order-level prefs
+	// object overrides these per order.
+	DeliveryPrefs *deliveryPrefsDoc `bson:"delivery_prefs,omitempty" json:"delivery_prefs,omitempty"`
+	Status        string            `bson:"status"                 json:"status"`
+	CreatedAt     time.Time         `bson:"created_at"             json:"created_at"`
+	UpdatedAt     time.Time         `bson:"updated_at"             json:"updated_at"`
+}
+
+// deliveryPrefsDoc — sanitized, server-stored doorstep instructions.
+type deliveryPrefsDoc struct {
+	Handover   string `bson:"handover,omitempty"    json:"handover,omitempty"` // RING_BELL | HAND_TO_CUSTOMER | DROP
+	CallBefore bool   `bson:"call_before,omitempty" json:"call_before,omitempty"`
+	RingBell   bool   `bson:"ring_bell,omitempty"   json:"ring_bell,omitempty"`
+	Note       string `bson:"note,omitempty"        json:"note,omitempty"`
+	Receiver   string `bson:"receiver,omitempty"    json:"receiver,omitempty"`
+}
+
+// sanitizeDeliveryPrefs whitelists + caps client-supplied doorstep fields.
+func sanitizeDeliveryPrefs(m map[string]any) *deliveryPrefsDoc {
+	if m == nil {
+		return nil
+	}
+	clip := func(v any, max int) string {
+		s, _ := v.(string)
+		s = strings.TrimSpace(s)
+		if len(s) > max {
+			s = s[:max]
+		}
+		return s
+	}
+	b := func(v any) bool { x, _ := v.(bool); return x }
+	d := &deliveryPrefsDoc{
+		Handover:   clip(m["handover"], 24),
+		CallBefore: b(m["callBefore"]) || b(m["call_before"]),
+		RingBell:   b(m["ringBell"]) || b(m["ring_bell"]),
+		Note:       clip(m["note"], 280),
+		Receiver:   clip(m["receiver"], 80),
+	}
+	if d.Handover == "" && !d.CallBefore && !d.RingBell && d.Note == "" && d.Receiver == "" {
+		return nil
+	}
+	return d
 }
 
 // otpChallenge mirrors the operator pattern but in the consumer namespace.

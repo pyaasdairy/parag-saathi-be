@@ -389,6 +389,11 @@ func (s *service) updateMe(ctx context.Context, consumerID primitive.ObjectID, p
 			set = append(set, bson.E{Key: "family_member_count", Value: int(f)})
 		}
 	}
+	if v, ok := patch["delivery_prefs"]; ok {
+		if m, ok := v.(map[string]any); ok {
+			set = append(set, bson.E{Key: "delivery_prefs", Value: sanitizeDeliveryPrefs(m)})
+		}
+	}
 	if len(set) == 0 {
 		return s.repo.findAccountByID(ctx, consumerID)
 	}
@@ -440,18 +445,14 @@ func (s *service) wallet(ctx context.Context, consumerID primitive.ObjectID) (wa
 // the customer was shown at checkout must be the tier the wallet actually
 // credits. Picks the highest tier whose threshold the amount meets.
 func bonusFor(amount float64) float64 {
-	switch {
-	case amount >= 10000:
-		return 1000
-	case amount >= 1000:
-		return 250
-	case amount >= 500:
-		return 100
-	case amount >= 200:
-		return 50
-	default:
-		return 0
-	}
+	// RETIRED (must stay mirrored with the FE's RECHARGE_TIERS, lib/pricing.ts,
+	// where every tier's bonus is 0 and rechargeBonus() always returns null:
+	// "you get exactly what you add"). The old tiers kept minting ₹50–₹1000 of
+	// unadvertised Rewards on every top-up ≥ ₹200 after the FE retired them —
+	// real money the customer was never promised. A future promo re-adds a
+	// tier HERE AND in lib/pricing.ts in the same release, never one side only.
+	_ = amount
+	return 0
 }
 
 // round2 bounds float rupee rounding to paise (pilot; production would use

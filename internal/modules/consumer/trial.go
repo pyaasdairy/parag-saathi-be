@@ -260,6 +260,48 @@ func (r *repository) saveTrial(ctx context.Context, t *consumerTrial) (bool, err
 // returns the same result and never double-advances the window. The window counts
 // DELIVERED days — so a paused/skipped day is simply a key that was never charged
 // and thus never burns a free day.
+// trialClaimGate closes the erase-and-resignup loophole: the FIRST time a
+// consumer's trial is about to advance, their phone is registered in the
+// free_pack_claims collection (unique per phone, retained through account
+// erasure). If the phone was already claimed by a DIFFERENT consumer id, this
+// household has had its 2+2 — the trial is exhausted instead of advancing, and
+// every delivery charges normally. One extra lookup only on virgin trials.
+func (s *service) trialClaimGate(ctx context.Context, consumerID primitive.ObjectID) bool {
+	acct, err := s.repo.findAccountByID(ctx, consumerID)
+	if err != nil || acct == nil || acct.Phone == "" {
+		return true // no phone to key on — never block the settle path
+	}
+	claims := s.repo.accounts.Database().Collection("free_pack_claims")
+	_, ierr := claims.InsertOne(ctx, bson.D{
+		{Key: "phone", Value: acct.Phone}, {Key: "consumer_id", Value: consumerID},
+		{Key: "claimed_at", Value: time.Now().UTC()},
+	})
+	if ierr == nil {
+		return true // first claim for this phone — proceed
+	}
+	var prior struct {
+		ConsumerID primitive.ObjectID `bson:"consumer_id"`
+	}
+	if ferr := claims.FindOne(ctx, bson.D{{Key: "phone", Value: acct.Phone}}).Decode(&prior); ferr != nil {
+		return true // transient — fail open, the next settle re-checks
+	}
+	if prior.ConsumerID == consumerID {
+		return true
+	}
+	// Same phone, different account: exhaust this trial permanently.
+	_, _ = s.repo.trials.UpdateOne(ctx,
+		bson.D{{Key: "consumer_id", Value: consumerID}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "delivered_paid", Value: trialPaidDays},
+			{Key: "delivered_free", Value: trialFreeDays},
+			{Key: "phase", Value: trialPhaseDone},
+			{Key: "updated_at", Value: time.Now().UTC()},
+		}}})
+	s.log.Info("trial: 2+2 refused — phone already claimed by another account",
+		"consumer", consumerID.Hex())
+	return false
+}
+
 func (s *service) trialChargeFor(ctx context.Context, consumerID primitive.ObjectID, deliveryKey string, fullAmount float64) (float64, string, error) {
 	full := round2(fullAmount)
 	// A handful of attempts absorbs the rare optimistic-concurrency race (two
@@ -271,6 +313,13 @@ func (s *service) trialChargeFor(ctx context.Context, consumerID primitive.Objec
 		}
 		if rec, ok := t.findCharge(deliveryKey); ok {
 			return effectiveForPhase(rec.Phase, full), rec.Phase, nil // idempotent replay
+		}
+		// Virgin trial about to take its first day: the per-phone claim gate
+		// decides whether this household still has a 2+2 to spend.
+		if t.DeliveredPaid == 0 && t.DeliveredFree == 0 && len(t.Charges) == 0 && t.Phase != trialPhaseDone {
+			if !s.trialClaimGate(ctx, consumerID) {
+				return full, trialPhaseDone, nil // household already used its 2+2
+			}
 		}
 		eff, phase := t.charge(deliveryKey, full)
 		ok, err := s.repo.saveTrial(ctx, t) // guarded on the loaded seq

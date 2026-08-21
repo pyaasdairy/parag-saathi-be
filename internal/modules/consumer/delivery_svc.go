@@ -65,13 +65,25 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	if o.Lane == "instant" {
 		status, offeredAt = "OFFERED", now.Format(time.RFC3339)
 	}
+	// Doorstep instructions for the rider: this order's own prefs win; the
+	// account's standing prefs (PATCH /me delivery_prefs) fill in otherwise —
+	// so the subscription worker's morning orders carry them too.
+	prefs := o.DeliveryPrefs
+	if prefs == nil {
+		if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
+			if acct, aerr := s.repo.findAccountByID(ctx, cid); aerr == nil && acct != nil {
+				prefs = acct.DeliveryPrefs
+			}
+		}
+	}
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
 		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
 		Slot: slotLabel(o), Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
-		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
+		DeliveryPrefs: prefs,
+		Status:        status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
 	_ = s.repo.insertDelivery(ctx, del)
 }

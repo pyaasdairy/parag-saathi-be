@@ -155,3 +155,24 @@ func TestCRMDisabledIsInert(t *testing.T) {
 		t.Fatal("flag flip must enable without a rebuild")
 	}
 }
+
+// Doorstep prefs are client input — pin the whitelist + caps + nil-collapse.
+func TestSanitizeDeliveryPrefs(t *testing.T) {
+	if sanitizeDeliveryPrefs(nil) != nil {
+		t.Fatal("nil map must stay nil")
+	}
+	if sanitizeDeliveryPrefs(map[string]any{"junk": "x"}) != nil {
+		t.Fatal("only unknown keys → nil (nothing to store)")
+	}
+	d := sanitizeDeliveryPrefs(map[string]any{
+		"handover": " RING_BELL ", "callBefore": true, "note": "  leave at door  ",
+		"receiver": "Amma", "evil": "<script>",
+	})
+	if d == nil || d.Handover != "RING_BELL" || !d.CallBefore || d.Note != "leave at door" || d.Receiver != "Amma" {
+		t.Fatalf("sanitize wrong: %+v", d)
+	}
+	long := sanitizeDeliveryPrefs(map[string]any{"note": string(make([]byte, 1000))})
+	if long != nil && len(long.Note) > 280 {
+		t.Fatalf("note cap breached: %d", len(long.Note))
+	}
+}
