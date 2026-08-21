@@ -1,6 +1,6 @@
 # CRM Welcome Litre — Developer Handoff
 
-**Date:** 21 Aug 2026 · **Status:** built, reviewed, E2E-tested, **NOT deployed** (safe behind branch + env gate)
+**Date:** 21 Aug 2026 · **Status:** built, reviewed, E2E-tested, persistence-audited, **NOT deployed** (safe behind branch + env gate)
 
 ---
 
@@ -15,8 +15,8 @@ test suite + live app testing).
 
 | Repo | Branch | Commits | State |
 |---|---|---|---|
-| `parag-saathi-be` | `feature/crm-welcome-litre` | `31902ae` feat · `e34f472` fix (23 review findings) · `cd30bdd` B-triggers | pushed, **not merged** — Render pins `release/26.07.03`, so nothing is live |
-| `pyaas-consumer` | `feature/consumer-revamp-phase2` | `1267a19` | pushed — **inert against the deployed backend** (CRM routes 404 → every surface hides itself) |
+| `parag-saathi-be` | `feature/crm-welcome-litre` | `31902ae` feat · `e34f472` fix (23 review findings) · `cd30bdd` B-triggers · `cccb8ff` persistence fixes | pushed, **not merged** — Render pins `release/26.07.03`, so nothing is live |
+| `pyaas-consumer` | `feature/consumer-revamp-phase2` | `1267a19` CRM surfaces · `b0baf56` mirror queue | pushed — **inert against the deployed backend** (CRM routes 404 → every surface hides itself; queue verified against prod) |
 
 ---
 
@@ -172,15 +172,47 @@ Note: the `parag_pixel` emulator currently has a **debug** build of `in.pyaasdai
    interface in `crm_engine.go` is the seam; in-app inbox keeps working regardless.
 5. Optional: per-trigger kill switches at runtime via `POST /crm/flags` — no deploy needed.
 
-## Open items / in flight
+## Persistence audit — COMPLETED (41-agent FE→BE trace, 30 confirmed findings, all P0/P1 fixed)
+
+Already backend-owned (verified, no change needed): **wallet** (every read/top-up/debit/settle,
+exactly-once refs), **orders** (POST /orders with NO local fallback; server repricing; cancel +
+reads server-side), **2+2 trial money core** (free days advance only on real delivery settles),
+**CRM** (all four collections above). Fixed in `cccb8ff` (BE) + `b0baf56` (FE):
+
+- **Durable mirror queue** (`pyaas-consumer/lib/mirrorQueue.ts`): every backend mirror used to be
+  one-shot fire-and-forget — a dropped request forked the phone from billing truth forever (a
+  lost PAUSE kept the backend debiting milk). Now: persistent, ordered, last-write-wins replay
+  on boot/foreground/enqueue/pre-sweep. Covers subscription create/pause/resume/cancel/edit,
+  vacations, address create/default/delete/map-pin, delivery prefs.
+- **Vacations**: server read-back on sync (a reinstall can no longer wipe server-side holiday
+  ranges); new subscriptions carry standing vacations at creation; edit-to-one-time now cancels
+  the backend twin (it used to keep billing daily).
+- **Backend money-truth**: retired recharge bonus killed (the server was still minting ₹50–₹1000
+  unadvertised Rewards per top-up ≥₹200 — live leak, also worth hotfixing on the release
+  branch); erasure cascade now covers subscriptions/trials/deliveries/CRM (no more billing
+  erased accounts); 2+2 gate is server-side per-PHONE (`free_pack_claims`, survives erasure —
+  erase-and-resignup no longer re-arms free days).
+- **Doorstep prefs reach the rider**: orders + PATCH /me accept sanitized `delivery_prefs`;
+  every delivery task carries them (order-level, else account standing prefs). NOTE: the
+  pyaas-saathi Flutter rider UI does not render `deliveryPrefs` yet — the data is on the task.
+- **Profile**: GET /me hydration on session start (reinstalls stop forgetting everything but
+  the name). **Sweep**: in backend mode, recurring cadences belong exclusively to the server
+  worker — no more unlinked phone-placed orders that re-billed free days at full price.
+- The 11:59 PM cut-off flow (subscribe before midnight + funds → next-morning milk) is
+  backend-owned (preview at 13:00, midnight lock + wallet floor, same-day catch-up) and was
+  NOT touched by any of this — it only got more reliable, because the subscription now always
+  reaches the server.
+
+Documented backlog (deliberate, not built): server-side invoices, referral/PYAAS-Plus
+membership server surfaces, avatar/door-photo upload (B2 seam exists), real UPI AutoPay,
+coupon server pricing (coupons are currently dead code).
+
+## Open items
 
 - **MSG91 authkey + WhatsApp token/phone-id** — awaited from the founder; SMS/WhatsApp channel
   implementation is the only unbuilt piece of the messaging stack.
-- **Persistence audit** (everything-on-DB-not-local) — in progress. Verified so far: wallet,
-  orders, trial money-core, CRM = fully backend-owned. Known fragilities being fixed:
-  vacation mirror is fire-and-forget (a failed PATCH silently under-syncs; a reinstall can
-  overwrite server vacations with an empty list) and the 2+2 claim registry is device-local
-  (the code's own `TODO(api)` — server-side per-phone claim endpoint is the fix).
+- **Recharge-bonus hotfix decision**: the bonus leak fix lives on this branch; the DEPLOYED
+  release/26.07.03 still grants the retired bonuses until this merges (or is cherry-picked).
 - 2+2 spec decision deferred by founder: current paid-first 2+2 stays; CRM exclusivity is
   Option B (switchable later without conflict).
 
