@@ -68,6 +68,17 @@ func Register(r chi.Router, d *deps.Deps) {
 	// mandates through the same idempotent money gate as the manual/dev path.
 	go svc.mandateAutoRenewalWorker(context.Background())
 
+	// CRM (Welcome Litre) — the worker self-gates on CRM_ENABLED every tick,
+	// so it idles for free until the founder flips the env; indexes are
+	// created OUTSIDE the fatal boot path (a campaign index failure must
+	// never take the platform down).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		svc.ensureCRMIndexes(ctx)
+	}()
+	go svc.crmWorker(context.Background())
+
 	r.Route("/consumer", func(cr chi.Router) {
 		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
 		// operator envelope, on unknown consumer routes.
@@ -133,6 +144,13 @@ func Register(r chi.Router, d *deps.Deps) {
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {
 			pr.Use(svc.authenticate)
+
+			// CRM (Welcome Litre) — the in-app inbox Phase A delivers into,
+			// and the offer state the wallet's third line reads. All of it
+			// returns empty/disabled payloads until CRM_ENABLED=true.
+			pr.Get("/crm/inbox", h.crmInbox)
+			pr.Post("/crm/inbox/{id}/read", h.crmInboxRead)
+			pr.Get("/crm/offer", h.crmMyOffer)
 
 			// Profile — support the FE's /users/me and the note's /me alias.
 			for _, base := range []string{"/users/me", "/me"} {
@@ -220,6 +238,21 @@ func Register(r chi.Router, d *deps.Deps) {
 		// Saathi FE (store.ts / delivery.ts, service:'consumer').
 		cr.Group(func(op chi.Router) {
 			op.Use(middleware.Authenticate(d.JWT))
+
+			// CRM campaign console — the "handover profile" surface: enrol a
+			// household, push a manual message (same guard chain as every
+			// automated trigger), inspect/override offer state with a reason,
+			// read the dispatch log, flip per-trigger kill switches. Gated to
+			// STORE_MANAGER or SUPER_ADMIN; every handler re-checks CRM_ENABLED.
+			op.Group(func(cm chi.Router) {
+				cm.Use(middleware.RequireRoles(domain.RoleStoreManager, domain.RoleSuperAdmin))
+				cm.Post("/crm/enrol", h.crmEnrolHandler)
+				cm.Post("/crm/message", h.crmComposeMessage)
+				cm.Get("/crm/offers/{phone}", h.crmOfferByPhone)
+				cm.Post("/crm/offers/{phone}/override", h.crmOverrideOffer)
+				cm.Get("/crm/dispatch-log/{phone}", h.crmDispatchLog)
+				cm.Post("/crm/flags", h.crmSetFlag)
+			})
 
 			// Store manager (STORE_MANAGER): orders in the store's vicinity, its
 			// rider roster (with distance tiers), and rider assignment.

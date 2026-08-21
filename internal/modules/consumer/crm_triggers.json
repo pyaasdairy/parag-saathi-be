@@ -1,0 +1,2764 @@
+{
+ "schema_version": "1.0",
+ "meta": {
+  "name": "PYAAS CRM trigger configuration",
+  "source_document": "Pyaas_CRM_Retention_AI_Calling_Playbook_Rev3.docx, 20 August 2026",
+  "generated": "2026-08-20",
+  "companion_spec": "PYAAS_CRM_App_Developer_Spec_Rev3.pdf",
+  "trigger_count": 43,
+  "architecture": "hybrid — in-house orchestration core, external vendor for AI outbound calls",
+  "note": "Every trigger MUST pass the guard chain in `guards.evaluation_order` before dispatch. A trigger that fires but fails a guard is logged as suppressed with the failing guard id — it is never silently dropped.",
+  "deviations_from_playbook": [
+   "C-01 product labelling — every product-referencing message names the supply source (Parag / PYAAS own-brand)",
+   "C-02 credit split — refundable wallet top-up and non-refundable promotional credit use different templates and different ledger accounts",
+   "C-03 opt-out bar — 90-day suppression after any opt-out, applied to all promotional triggers",
+   "C-04 consent validity — explicit consent carries an expiry; promotional triggers check freshness, not just presence",
+   "C-05 header suffixes — DLT headers carry -P / -S / -T / -G",
+   "C-06 skip notice timing — D-07 moves from 07:00 to the order cut-off the previous evening",
+   "C-07 claims freeze — no A2, breed or origin claim in any template until the herd substantiation file is closed",
+   "C-08 SLA hours — resolution SLAs are measured in published support hours, not wall-clock, except safety which is always immediate"
+  ],
+  "revision": 3,
+  "revision_note": "Revision 2, 20 August 2026 — all ten open values resolved by the client. Wallet ladder re-timed for a 12:00 noon cut-off; AI-call windows constrained to hours in which a human can receive a transfer.",
+  "aligned_to": "PYAAS_Welcome_Litre_Campaign_Full.pdf, 20 August 2026",
+  "change_register": "PYAAS_Campaign_CRM_Change_Register.pdf — items CH-01 to CH-20"
+ },
+ "enums": {
+  "segment": [
+   "new",
+   "active",
+   "high_value",
+   "subscription",
+   "at_risk",
+   "inactive",
+   "complaint_open",
+   "welcome_pack1_delivered",
+   "welcome_completed",
+   "welcome_lapsed",
+   "waitlist_out_of_area"
+  ],
+  "product_line": [
+   "quick_pyaas",
+   "morning_delivery"
+  ],
+  "supply_source": [
+   "parag",
+   "pyaas_own_brand",
+   "mixed"
+  ],
+  "channel": [
+   "push",
+   "whatsapp",
+   "rcs",
+   "sms",
+   "email",
+   "ai_call",
+   "human_call"
+  ],
+  "dlt_category": [
+   "transactional",
+   "service_implicit",
+   "service_explicit",
+   "promotional",
+   "government"
+  ],
+  "header_suffix": {
+   "promotional": "-P",
+   "service_implicit": "-S",
+   "service_explicit": "-S",
+   "transactional": "-T",
+   "government": "-G"
+  },
+  "trigger_kind": [
+   "event",
+   "scheduled"
+  ],
+  "phase": [
+   1,
+   2,
+   3,
+   4
+  ],
+  "language": [
+   "en",
+   "hi"
+  ],
+  "offer_pack1_state": [
+   "pending",
+   "delivered",
+   "forfeited"
+  ],
+  "offer_pack2_state": [
+   "locked",
+   "pending",
+   "delivered",
+   "expired"
+  ],
+  "offer_id": [
+   "welcome_litre"
+  ]
+ },
+ "guards": {
+  "evaluation_order": [
+   "G1_kill_switch",
+   "G2_consent",
+   "G3_opt_out_suppression",
+   "G4_dnd_scrub",
+   "G5_quiet_hours",
+   "G6_frequency_cap",
+   "G7_complaint_hold",
+   "G8_dedup_window",
+   "G9_channel_availability",
+   "G10_template_approved"
+  ],
+  "G1_kill_switch": {
+   "rule": "A global switch and a per-trigger switch. Either off = no dispatch. Must be togglable from the admin console without a deploy.",
+   "applies_to": "all"
+  },
+  "G2_consent": {
+   "rule": "Promotional requires explicit, unexpired consent for the channel. Service and transactional rely on the existing customer relationship. AI calls require call consent recorded separately from message consent.",
+   "explicit_consent_ttl_days": 7,
+   "explicit_consent_ttl_note": "Per the TCCCPR amendment of 12 February 2025. Confirm the exact application with the DLT aggregator in writing before building; if the aggregator confirms a longer period for your categories, change this value here and nowhere else.",
+   "applies_to": [
+    "promotional",
+    "service_explicit",
+    "ai_call"
+   ]
+  },
+  "G3_opt_out_suppression": {
+   "rule": "If opt_out_at is set, block all promotional dispatch for 90 days from that timestamp. Service and transactional messages required to deliver the paid service are never blocked by opt-out.",
+   "bar_days": 90,
+   "correction": "C-03",
+   "applies_to": [
+    "promotional"
+   ]
+  },
+  "G4_dnd_scrub": {
+   "rule": "Scrub the recipient list against the DND registry before every promotional campaign and before every outbound call batch. A number flagged fully blocked receives no promotional message and no promotional call, regardless of channel.",
+   "applies_to": [
+    "promotional",
+    "ai_call"
+   ]
+  },
+  "G5_quiet_hours": {
+   "windows": {
+    "promotional_message": {
+     "start": "10:00",
+     "end": "21:00"
+    },
+    "outbound_call": {
+     "start": "10:00",
+     "end": "20:00"
+    },
+    "service_transactional": {
+     "start": "00:00",
+     "end": "24:00",
+     "avoid": {
+      "start": "22:00",
+      "end": "07:00",
+      "unless": "critical"
+     }
+    }
+   },
+   "note": "TRAI prohibits commercial calls 21:00–09:00. The windows above are deliberately tighter than the regulation. Do not widen them without a written decision.",
+   "timezone": "Asia/Kolkata",
+   "ai_call_human_backstop": {
+    "rule": "No AI call may be placed at a time when no human is available to receive a transfer. Effective call windows are the intersection of the call window and support hours.",
+    "effective_windows": {
+     "Mon-Sat": "10:00-18:00",
+     "Sun": "10:00-13:00"
+    },
+    "consequence": "The playbook's 18:00-20:00 evening call slot is unavailable under 9-18 Mon-Sat support. To reopen it, let the 24x7 on-call responder accept AI-call transfers after 18:00.",
+    "derived_from": "AI guardrail 5 — transfer immediately on anger, quality/safety or dispute. A transfer with no destination is not a guardrail."
+   }
+  },
+  "G6_frequency_cap": {
+   "promotional": {
+    "per_day": 1,
+    "per_week": 3,
+    "scope": "all channels combined"
+   },
+   "service": {
+    "max_identical_per_hour": 6
+   },
+   "ai_call": {
+    "max_attempts": 2,
+    "min_gap_hours": 24,
+    "human_backstop_required": true
+   },
+   "rule": "Caps are enforced in the orchestration core as hard limits, not as vendor-side settings. A dispatch that would breach a cap is suppressed and logged."
+  },
+  "G7_complaint_hold": {
+   "rule": "While a complaint is open for a customer, hold all promotional dispatch to that customer until the complaint is closed. Service and transactional continue.",
+   "applies_to": [
+    "promotional"
+   ]
+  },
+  "G8_dedup_window": {
+   "rule": "One message per real event. Channel priority push → whatsapp → sms: if the higher-priority channel is delivered AND read inside the fallback window, cancel the lower-priority send. Never dispatch the same content on two channels within 30 minutes.",
+   "window_minutes": 30
+  },
+  "G9_channel_availability": {
+   "rule": "Push requires an installed app with a live FCM token and notification permission. If absent, fall through immediately rather than waiting out the fallback window."
+  },
+  "G10_template_approved": {
+   "rule": "SMS and RCS require a DLT-registered template id. WhatsApp requires a Meta-approved template id in the correct category. A dispatch with an unapproved or missing template id must fail loudly in staging and be blocked in production."
+  }
+ },
+ "product_labelling": {
+  "correction": "C-01",
+  "rule": "Any message naming a delivered or ordered product MUST render the supply source. The orchestration core resolves it from the order line, never from the customer record.",
+  "render": {
+   "parag": "{product_name} — delivered by PYAAS",
+   "pyaas_own_brand": "PYAAS {product_name} (limited trial)"
+  },
+  "placeholder": "{labelled_product}"
+ },
+ "wallet_accounts": {
+  "correction": "C-02",
+  "accounts": [
+   {
+    "id": "topup",
+    "label": "Wallet balance",
+    "refundable": true,
+    "expires": false
+   },
+   {
+    "id": "promo_credit",
+    "label": "Pyaas credit",
+    "refundable": false,
+    "expires": true,
+    "default_validity_days": 30
+   }
+  ],
+  "rule": "Two ledger accounts, two balances, two message templates. The app balance screen shows both lines separately. Spend order: promo_credit first (oldest expiry first), then topup.",
+  "terms_reference": "/terms — refund on closure is net of amounts due for delivered Products and any non-refundable promotional credits",
+  "entitlement": {
+   "correction": "CH-01",
+   "rule": "A promotional entitlement counts as funding for the deliveries it covers. days_of_cover MUST include entitled_free_deliveries_remaining. Every wallet trigger reads this one figure; none of them special-case the campaign.",
+   "formula": "days_of_cover = (topup_balance + promo_credit_spendable) / daily_order_value + entitled_free_deliveries_remaining",
+   "blocking": true,
+   "note": "Build this before any W trigger. Without it A-05, B-01, B-02 and D-07 all fire against the campaign on day 0 and tell the customer something untrue."
+  }
+ },
+ "templates": {
+  "T-A01": {
+   "dlt_category": "service_implicit",
+   "cta": "open_app_or_order",
+   "en": "Welcome to Pyaas! Fresh milk is 2 taps away — recharge your Wallet & place your first order. Help: [SUPPORT_NUMBER].",
+   "hi": "Pyaas mein swagat! Pehla order 2 tap mein — Wallet recharge karein. Madad: [SUPPORT_NUMBER]."
+  },
+  "T-A02": {
+   "dlt_category": "service_implicit",
+   "cta": "reorder",
+   "en": "Delivered! Thanks for trying {labelled_product}. Reorder anytime in the app.",
+   "hi": "Deliver ho gaya! {labelled_product} try karne ke liye dhanyavaad. Dobara order kabhi bhi app par."
+  },
+  "T-A03": {
+   "dlt_category": "service_implicit",
+   "cta": null,
+   "en": "Your morning milk starts [DATE], delivered by 7 am. Pause/resume anytime — changes before 12 noon apply from the next morning. Keep your Wallet topped up so it never stops.",
+   "hi": "Aapki subah ki milk [DATE] se, 7 baje tak. Kabhi bhi Pause/Resume — 12 baje se pehle kiya badlav agli subah se lagu. Wallet recharge rakhein."
+  },
+  "T-A04": {
+   "dlt_category": "service_implicit",
+   "cta": "complete_order",
+   "en": "Your Pyaas basket is waiting. Finish your order in 1 tap.",
+   "hi": "Aapka Pyaas basket taiyaar hai — 1 tap mein order poora karein."
+  },
+  "T-A05": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge",
+   "en": "One step left — recharge your Wallet to start tomorrow's delivery.",
+   "hi": "Bas ek kadam — Wallet recharge karein aur kal se delivery shuru."
+  },
+  "T-A06": {
+   "dlt_category": "service_implicit",
+   "cta": "get_help_or_order",
+   "en": "Need help placing your first order? Reply here or call [SUPPORT_NUMBER] — we'll set it up in 2 minutes.",
+   "hi": "Pehla order mein madad chahiye? Yahin reply karein ya [SUPPORT_NUMBER] par call."
+  },
+  "T-B01": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge",
+   "en": "Your Wallet is running low. Recharge to keep your morning milk coming.",
+   "hi": "Wallet kam hai. Recharge karein taaki subah ki milk na ruke."
+  },
+  "T-B02": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge_one_tap",
+   "en": "Low balance — recharge by 12 noon tomorrow to receive your delivery.",
+   "hi": "Balance kam — kal 12 baje tak recharge karein taaki delivery mile."
+  },
+  "T-B03": {
+   "dlt_category": "transactional",
+   "cta": "retry_payment",
+   "en": "Your recharge didn't go through. Try again or use another method — no money was deducted.",
+   "hi": "Recharge nahi hua. Dobara try karein — paise nahi kate."
+  },
+  "T-B04": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge",
+   "en": "Your monthly plan renews on [DATE]. Keep your Wallet topped up — nothing else to do.",
+   "hi": "Aapka monthly plan [DATE] ko renew. Bas Wallet recharge rakhein."
+  },
+  "T-B05-REFUND": {
+   "dlt_category": "transactional",
+   "cta": null,
+   "correction": "C-02",
+   "en": "₹[X] added to your Wallet ([REASON]). Refundable. Ready for your next order.",
+   "hi": "₹[X] aapke Wallet mein ([REASON]) jama. Refundable. Agle order ke liye taiyaar."
+  },
+  "T-B05-PROMO": {
+   "dlt_category": "transactional",
+   "cta": null,
+   "correction": "C-02",
+   "en": "₹[X] Pyaas credit added ([REASON]). Usable on orders; not refundable in cash. Valid 30 days.",
+   "hi": "₹[X] Pyaas credit ([REASON]) mila. Order par use karein; cash refund nahi. 30 din valid."
+  },
+  "T-C01": {
+   "dlt_category": "service_implicit",
+   "cta": "order",
+   "en": "Miss your Pyaas? Fresh milk & essentials, delivered in minutes.",
+   "hi": "Pyaas yaad aa rahi hai? Taaza doodh & essentials, minute mein."
+  },
+  "T-C02": {
+   "dlt_category": "promotional",
+   "cta": "order",
+   "correction": "C-02",
+   "en": "We'd love you back — here's ₹[X] Pyaas credit for your next order (valid [N] days, not refundable in cash).",
+   "hi": "Wapas aaiye — agle order par ₹[X] Pyaas credit (valid [N] din, cash refund nahi)."
+  },
+  "T-C03": {
+   "dlt_category": "service_implicit",
+   "cta": "reply_or_keep_plan",
+   "en": "We noticed a change. Everything okay with your deliveries? Reply here or we can call.",
+   "hi": "Humein change dikha. Delivery theek chal rahi hai? Reply karein ya hum call karein."
+  },
+  "T-C05": {
+   "dlt_category": "service_explicit",
+   "cta": "reply_yes",
+   "en": "We'll go quiet unless you need us. Reply YES to keep updates, or call [SUPPORT_NUMBER].",
+   "hi": "Hum kam message bhejenge. Updates chahiye to YES bhejein."
+  },
+  "T-C07": {
+   "dlt_category": "service_implicit",
+   "cta": "reply_or_rate",
+   "en": "Sorry if yesterday's delivery wasn't perfect. Did everything arrive okay? We'll fix anything.",
+   "hi": "Kal ki delivery mein kami ho to maaf kijiye. Sab theek mila? Hum sudhaar denge."
+  },
+  "T-D01": {
+   "dlt_category": "service_implicit",
+   "cta": "track",
+   "en": "Order confirmed ✅ {labelled_product}. Arriving [ETA].",
+   "hi": "Order confirm ✅ {labelled_product}. [ETA] tak."
+  },
+  "T-D02": {
+   "dlt_category": "service_implicit",
+   "cta": "track_live",
+   "en": "Out for delivery — [PARTNER], ETA [X] min.",
+   "hi": "Delivery ke liye nikla — ETA [X] min."
+  },
+  "T-D03": {
+   "dlt_category": "service_implicit",
+   "cta": "track",
+   "en": "Running a little late — new ETA [X]. Sorry for the wait.",
+   "hi": "Thodi der ho rahi hai — naya ETA [X]. Kshama karein."
+  },
+  "T-D04": {
+   "dlt_category": "service_implicit",
+   "cta": "approve_yes_no",
+   "en": "{labelled_product} is out — okay to swap for [ALT] (similar price)? Reply YES/NO.",
+   "hi": "{labelled_product} nahi hai — [ALT] chalega? YES/NO bhejein."
+  },
+  "T-D05": {
+   "dlt_category": "transactional",
+   "cta": null,
+   "en": "{labelled_product} is unavailable; ₹[X] refunded to your Wallet. Sorry!",
+   "hi": "{labelled_product} uplabdh nahi; ₹[X] Wallet mein wapas. Maaf kijiye."
+  },
+  "T-D06": {
+   "dlt_category": "service_implicit",
+   "cta": "rate",
+   "en": "Delivered ✅ {labelled_product}. Enjoy! Tap to rate.",
+   "hi": "Deliver ho gaya ✅ {labelled_product}. Rate karein."
+  },
+  "T-D07": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge_or_resume",
+   "correction": "C-06",
+   "en": "No delivery tomorrow — [REASON]. [Recharge by 12 noon today to resume / Resumes [DATE]].",
+   "hi": "Kal delivery nahi — [KARAN]. [Aaj 12 baje tak recharge karein / [DATE] se shuru]."
+  },
+  "T-D08": {
+   "dlt_category": "service_implicit",
+   "cta": "acknowledge",
+   "en": "Your delivery time/area is changing from [DATE] to [NEW]. Questions? [SUPPORT_NUMBER].",
+   "hi": "Aapki delivery [DATE] se [NEW] ho jaayegi. Sawaal? [SUPPORT_NUMBER]."
+  },
+  "T-E01": {
+   "dlt_category": "service_implicit",
+   "cta": "tell_us",
+   "en": "Sorry we missed the mark. What went wrong? We'll make it right.",
+   "hi": "Kami ke liye maaf kijiye. Kya hua? Hum theek karenge."
+  },
+  "T-E02": {
+   "dlt_category": "service_implicit",
+   "cta": null,
+   "en": "Got it — we're on it. You'll hear back within [SLA] with a fix.",
+   "hi": "Mil gaya — hum dekh rahe hain. [SLA] mein samadhan."
+  },
+  "T-E03": {
+   "dlt_category": "service_implicit",
+   "cta": null,
+   "correction": "C-02",
+   "en": "Sorry today's milk was late. We've added ₹[X] Pyaas credit as an apology (not refundable in cash).",
+   "hi": "Aaj milk late hui, maaf kijiye. ₹[X] Pyaas credit diya (cash refund nahi)."
+  },
+  "T-E04": {
+   "dlt_category": "service_implicit",
+   "cta": "choose_fix",
+   "en": "Sorry! We'll redeliver {labelled_product} or refund ₹[X] to your Wallet — your choice.",
+   "hi": "Maaf kijiye! {labelled_product} dobara bhejein ya ₹[X] Wallet mein — aap batayein."
+  },
+  "T-E06": {
+   "dlt_category": "service_implicit",
+   "cta": "rate",
+   "en": "Fixed ✅ Thanks for your patience. Anything else? We're here.",
+   "hi": "Theek ho gaya ✅ Dhanyavaad. Aur kuch? Hum yahin hain."
+  },
+  "T-E07": {
+   "dlt_category": "promotional",
+   "cta": "refer",
+   "correction": "C-02",
+   "en": "Thank you! Love Pyaas? Refer a neighbour — you both get Pyaas credit after their first paid order.",
+   "hi": "Dhanyavaad! Pyaas pasand aayi? Padosi ko refer karein — dono ko Pyaas credit."
+  },
+  "T-SMS-WELCOME": {
+   "dlt_category": "service_implicit",
+   "channel": "sms",
+   "en": "Pyaas: Welcome! Recharge your Wallet & place your first order in 2 taps. Help [SUPPORT_NUMBER]. Reply STOP to opt out.",
+   "header_note": "RESOLVED — PYAAS-only header. The Parag co-brand is dropped permanently; no sign-off, header or script may carry the Parag mark."
+  },
+  "T-SMS-WALLET-T1": {
+   "dlt_category": "service_implicit",
+   "channel": "sms",
+   "en": "Pyaas: Low Wallet balance. Recharge by 12 noon tomorrow to receive your milk: [LINK]."
+  },
+  "T-SMS-PAYFAIL": {
+   "dlt_category": "transactional",
+   "channel": "sms",
+   "en": "Pyaas: Your recharge didn't complete; no money was deducted. Retry: [LINK]. Help [SUPPORT_NUMBER]."
+  },
+  "T-SMS-SKIP": {
+   "dlt_category": "service_implicit",
+   "channel": "sms",
+   "en": "Pyaas: No delivery tomorrow ([REASON]). [Recharge to resume: [LINK] / Resumes [DATE]]. Sorry for the inconvenience."
+  },
+  "T-SMS-CREDIT": {
+   "dlt_category": "transactional",
+   "channel": "sms",
+   "en": "Pyaas: ₹[X] added to your Wallet ([REASON]). Ready for your next order."
+  },
+  "T-SMS-WINBACK": {
+   "dlt_category": "promotional",
+   "channel": "sms",
+   "en": "Pyaas: We'd love you back — ₹[X] Pyaas credit for your next order, valid [N] days: [LINK]. STOP to opt out."
+  },
+  "T-W01": {
+   "dlt_category": "service_implicit",
+   "cta": "none",
+   "en": "You're set. Tomorrow by 7 am: 500 ml Parag Full Cream — delivered by PYAAS, free. No payment now. Recharge Rs500 any time in the next 7 days and your second 500 ml pack comes free with your first paid delivery. Pause or cancel any time.",
+   "hi": "Ho gaya. Kal subah 7 baje tak 500 ml Parag Full Cream — muft, koi payment nahi. 7 din ke andar Rs500 recharge karein to doosra 500 ml pack bhi muft, pehli paid delivery ke saath. Kabhi bhi pause ya band karein.",
+   "hi_devanagari": "सब्सक्रिप्शन शुरू ✅ कल सुबह 7 बजे तक आपका पहला पैक — 500 मि.ली. पराग फुल क्रीम, मुफ़्त। अभी कोई भुगतान नहीं। 7 दिन के भीतर ₹500 का वॉलेट रिचार्ज कीजिए — दूसरा 500 मि.ली. पैक भी मुफ़्त। कभी भी रोकें, बदलें या बंद कीजिए।",
+   "channel_note": "WhatsApp carries the Devanagari rendering. SMS fallback uses the Roman version — a Devanagari SMS carries 70 characters per segment instead of 160."
+  },
+  "T-W02": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge",
+   "en": "Delivered. 500 ml Parag Full Cream — delivered by PYAAS. That one's on us. Want milk tomorrow too? Recharge by 12 noon today.",
+   "hi": "Deliver ho gaya. 500 ml Parag Full Cream — hamari taraf se. Kal bhi chahiye? Aaj 12 baje tak recharge karein."
+  },
+  "T-W03a": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge",
+   "en": "Milk tomorrow? Recharge by 12 noon today. Rs500 is about 8 mornings. Pause or cancel any time. [LINK]",
+   "hi": "Kal doodh chahiye? Aaj 12 baje tak recharge karein. Rs500 mein lagbhag 8 subah. Kabhi bhi pause ya band karein. [LINK]",
+   "note": "CH-06 — the service half. Carries no offer, so no promotional consent is required."
+  },
+  "T-W03b": {
+   "dlt_category": "promotional",
+   "cta": "recharge",
+   "en": "And your second 500 ml Full Cream is waiting — it comes free with your first paid delivery once you recharge Rs500. Valid 7 days. [LINK] STOP to opt out.",
+   "hi": "Aur aapka doosra 500 ml Full Cream taiyaar hai — Rs500 recharge par pehli paid delivery ke saath muft. 7 din valid. [LINK]",
+   "note": "CH-06 — the promotional half. Register separately. Ask the DLT aggregator to classify the combined wording in writing; if they confirm service-explicit, collapse T-W03a and T-W03b."
+  },
+  "T-W04": {
+   "dlt_category": "service_implicit",
+   "cta": "none",
+   "en": "Recharge received. Your second 500 ml Parag Full Cream — delivered by PYAAS — is scheduled free with tomorrow's delivery.",
+   "hi": "Recharge mil gaya. Doosra 500 ml Parag Full Cream kal ki delivery ke saath muft."
+  },
+  "T-W05": {
+   "dlt_category": "service_implicit",
+   "cta": "rate",
+   "en": "Delivered. [labelled_product] plus your second free 500 ml. That completes the welcome offer — from here it's just milk, every morning.",
+   "hi": "Deliver ho gaya. [labelled_product] aur aapka doosra muft 500 ml. Welcome offer poora — ab bas roz subah doodh."
+  },
+  "T-W06": {
+   "dlt_category": "service_implicit",
+   "cta": "recharge",
+   "en": "Your second 500 ml Full Cream is still waiting — recharge Rs500 by [DATE] and it comes free with your next delivery. [LINK]",
+   "hi": "Aapka doosra 500 ml Full Cream abhi bhi taiyaar hai — [DATE] tak Rs500 recharge karein. [LINK]"
+  },
+  "T-W07": {
+   "dlt_category": "service_implicit",
+   "cta": "none",
+   "en": "Your second free pack has expired — the 7 days are up. Nothing has been charged. Whenever you'd like milk again, it's one tap in the app. [LINK]",
+   "hi": "Aapka doosra muft pack ab uplabdh nahi — 7 din poore ho gaye. Koi shulk nahi laga hai. Jab chahein, app mein ek tap se delivery shuru karein. [LINK]",
+   "note": "\"Koi shulk nahi laga hai\" is mandatory and must not be shortened out."
+  },
+  "T-W08": {
+   "dlt_category": "service_implicit",
+   "cta": "none",
+   "en": "We don't deliver to your area yet. We've noted your pincode and we'll tell you the day we do — that's the only message you'll get from us.",
+   "hi": "Abhi aapke kshetra mein delivery nahi hai. Aapka pincode note kar liya hai — jis din shuru hogi, bata denge. Iske alawa koi message nahi aayega."
+  }
+ },
+ "triggers": [
+  {
+   "id": "A-01",
+   "section": "A",
+   "name": "Registered, no first order",
+   "phase": 2,
+   "kind": "event",
+   "event": "user.registered",
+   "delay": "PT2H",
+   "conditions": [
+    "orders_count == 0"
+   ],
+   "segments": [
+    "new"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT4H",
+      "if": "not_read"
+     },
+     {
+      "channel": "sms",
+      "at": "next_morning",
+      "if": "not_read"
+     }
+    ]
+   },
+   "template": "T-A01",
+   "frequency_cap": {
+    "per_day": 1,
+    "max_total": 3,
+    "window_days": 5
+   },
+   "success_metric": "first_order_conversion_pct"
+  },
+  {
+   "id": "A-02",
+   "section": "A",
+   "name": "First Quick Pyaas order completed",
+   "phase": 1,
+   "kind": "event",
+   "event": "order.delivered",
+   "delay": "PT0S",
+   "conditions": [
+    "product_line == 'quick_pyaas'",
+    "orders_count == 1"
+   ],
+   "segments": [
+    "new"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "sms",
+      "after": "PT12H",
+      "if": "not_read"
+     }
+    ]
+   },
+   "template": "T-A02",
+   "frequency_cap": {
+    "per_order": 1
+   },
+   "success_metric": "second_order_rate_14d",
+   "corrections": [
+    "C-01"
+   ]
+  },
+  {
+   "id": "A-03",
+   "section": "A",
+   "name": "Morning Delivery subscription started",
+   "phase": 1,
+   "kind": "event",
+   "event": "subscription.activated",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "new",
+    "subscription"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-A03",
+   "frequency_cap": {
+    "per_subscription": 1
+   },
+   "success_metric": "day1_delivery_success, d7_retention"
+  },
+  {
+   "id": "A-04",
+   "section": "A",
+   "name": "Cart added, checkout abandoned",
+   "phase": 2,
+   "kind": "scheduled",
+   "schedule": "*/15 * * * *",
+   "conditions": [
+    "cart.items > 0",
+    "cart.age >= PT30M",
+    "cart.age <= PT60M",
+    "cart.converted == false"
+   ],
+   "segments": [
+    "new",
+    "active"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT30M",
+      "if": "not_read"
+     }
+    ]
+   },
+   "template": "T-A04",
+   "frequency_cap": {
+    "per_cart": 1,
+    "second_attempt_only_if": "segment == 'high_value' → escalate to F-02"
+   },
+   "success_metric": "cart_recovery_pct"
+  },
+  {
+   "id": "A-05",
+   "section": "A",
+   "name": "Subscription selected, not paid",
+   "phase": 2,
+   "kind": "event",
+   "event": "subscription.created_unpaid",
+   "delay": "PT2H",
+   "conditions": [
+    "wallet.topup_balance < plan.first_cycle_amount",
+    "offer.entitled_free_deliveries_remaining == 0"
+   ],
+   "segments": [
+    "new"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "sms",
+      "at": "next_morning",
+      "if": "not_read"
+     }
+    ]
+   },
+   "template": "T-A05",
+   "frequency_cap": {
+    "max_total": 2
+   },
+   "escalation": {
+    "to": "F-01",
+    "if": "segment == 'high_value' && still_unpaid"
+   },
+   "success_metric": "activation_pct",
+   "corrections": [
+    "CH-02"
+   ],
+   "note": "CH-02. Without this second condition the trigger fires two hours after a campaign signup and tells the customer tomorrow's delivery needs payment — when tomorrow's delivery is already coming free and the promoter said so at the door an hour earlier. NOT disabled globally: it is the right message for a normal signup."
+  },
+  {
+   "id": "A-06",
+   "section": "A",
+   "name": "Inactive after registration (no order 72h)",
+   "phase": 2,
+   "kind": "scheduled",
+   "schedule": "0 10 * * *",
+   "conditions": [
+    "orders_count == 0",
+    "days_since_registration == 3"
+   ],
+   "segments": [
+    "new"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-A06",
+   "frequency_cap": {
+    "max_total": 1
+   },
+   "escalation": {
+    "to": "F-01",
+    "at_day": 5,
+    "if": "high_intent == true"
+   },
+   "success_metric": "activation_pct_by_day7"
+  },
+  {
+   "id": "B-01",
+   "section": "B",
+   "name": "Low balance before next cycle",
+   "phase": 1,
+   "kind": "scheduled",
+   "schedule": "0 9 * * *",
+   "conditions": [
+    "subscription.active == true",
+    "wallet.days_of_cover < 4"
+   ],
+   "segments": [
+    "subscription"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "parallel": [
+     "push"
+    ],
+    "fallback": []
+   },
+   "template": "T-B01",
+   "frequency_cap": {
+    "per_cycle": 1
+   },
+   "success_metric": "recharge_completion_pct",
+   "note": "Threshold raised from 3 to 4 days of cover — a 12:00 cut-off costs the customer most of the final day.",
+   "corrections": [
+    "CH-03"
+   ],
+   "ch03_verification": {
+    "day0_campaign_subscriber_zero_balance_free_pack_due": "MUST NOT FIRE — one entitled free delivery is cover",
+    "day1_noon_not_recharged": "MUST FIRE — the next day is genuinely unfunded",
+    "note": "Corrected by CH-01, not by an exception here. Verify explicitly; do not assume."
+   }
+  },
+  {
+   "id": "B-02",
+   "section": "B",
+   "name": "Insufficient for tomorrow at cut-off",
+   "phase": 1,
+   "kind": "scheduled",
+   "schedule": "0 17 * * *",
+   "conditions": [
+    "subscription.active == true",
+    "wallet.spendable_balance < day_after_tomorrow.order_value"
+   ],
+   "segments": [
+    "subscription"
+   ],
+   "category": "service_implicit",
+   "critical": true,
+   "delivery": {
+    "primary": "sms",
+    "parallel": [
+     "whatsapp"
+    ],
+    "fallback": []
+   },
+   "template": "T-B02",
+   "frequency_cap": {
+    "per_cycle": 1,
+    "critical_exempt_from_daily_cap": true
+   },
+   "success_metric": "save_rate_delivery_retained",
+   "note": "RE-TIMED for the 12:00 cut-off. Fires at 17:00 on D-2, telling the customer to recharge by 12:00 noon on D-1 for delivery on D. The playbook assumed an evening cut-off and put this the night before delivery; with a noon lock that would be too late. Evening send is retained deliberately — personal admin happens in the evening.",
+   "corrections": [
+    "CH-03"
+   ],
+   "ch03_verification": {
+    "day0_campaign_subscriber_zero_balance_free_pack_due": "MUST NOT FIRE — one entitled free delivery is cover",
+    "day1_noon_not_recharged": "MUST FIRE — the next day is genuinely unfunded",
+    "note": "Corrected by CH-01, not by an exception here. Verify explicitly; do not assume."
+   }
+  },
+  {
+   "id": "B-03",
+   "section": "B",
+   "name": "Failed recharge / payment",
+   "phase": 1,
+   "kind": "event",
+   "event": "payment.failed",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "new",
+    "active",
+    "subscription"
+   ],
+   "category": "transactional",
+   "delivery": {
+    "primary": "sms",
+    "parallel": [
+     "whatsapp"
+    ],
+    "fallback": []
+   },
+   "template": "T-B03",
+   "frequency_cap": {
+    "per_failure": 1,
+    "plus_one_retry_link": true
+   },
+   "success_metric": "recovery_pct",
+   "note": "'no money was deducted' must be verified against the gateway response before rendering. If the gateway reports a pending or captured state, use a different message — an inaccurate money statement is the highest-risk copy in the system."
+  },
+  {
+   "id": "B-04",
+   "section": "B",
+   "name": "Subscription renewal due",
+   "phase": 3,
+   "kind": "scheduled",
+   "schedule": "0 10 * * *",
+   "conditions": [
+    "subscription.renews_in_days == 2"
+   ],
+   "segments": [
+    "subscription"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-B04",
+   "frequency_cap": {
+    "per_renewal": 1
+   },
+   "success_metric": "renewal_pct"
+  },
+  {
+   "id": "B-05",
+   "section": "B",
+   "name": "Not recharged despite reminders → AI call",
+   "phase": 2,
+   "kind": "scheduled",
+   "schedule": "30 10 * * *",
+   "conditions": [
+    "reminders_sent >= 2",
+    "wallet.spendable_balance < tomorrow.order_value",
+    "subscription.active == true"
+   ],
+   "segments": [
+    "subscription",
+    "high_value"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "template": null,
+   "ai_call_flow": "F-03",
+   "frequency_cap": {
+    "max_calls": 1
+   },
+   "then": {
+    "action": "pause_subscription",
+    "after": "3 messages + 1 AI call over 48–72h",
+    "never": "cancel"
+   },
+   "success_metric": "save_rate, graceful_pause_pct",
+   "note": "RE-TIMED. Must complete before the 12:00 lock. Window 10:00-11:45 — starts at 10:00 because that is the earliest permitted call hour.",
+   "call_window": [
+    {
+     "start": "10:00",
+     "end": "11:45"
+    }
+   ],
+   "founding_family": {
+    "grace_delivery": false,
+    "extra_reminder": true,
+    "note": "Founding Family receive one additional service reminder and this AI call before pause. They are never delivered on a negative balance and never abruptly cut off."
+   }
+  },
+  {
+   "id": "B-06",
+   "section": "B",
+   "name": "Refund / credit / promo added to wallet",
+   "phase": 1,
+   "kind": "event",
+   "event": "wallet.credited",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "new",
+    "active",
+    "high_value",
+    "subscription",
+    "at_risk",
+    "inactive",
+    "complaint_open"
+   ],
+   "category": "transactional",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "sms",
+      "after": "PT2H",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": {
+    "if": "credit.account == 'topup'",
+    "then": "T-B05-REFUND",
+    "else": "T-B05-PROMO"
+   },
+   "frequency_cap": {
+    "per_credit": 1
+   },
+   "success_metric": "trust, next_order_uplift",
+   "corrections": [
+    "C-02"
+   ]
+  },
+  {
+   "id": "C-01",
+   "section": "C",
+   "name": "Quick Pyaas — no order 7 days",
+   "phase": 3,
+   "kind": "scheduled",
+   "schedule": "0 11 * * *",
+   "conditions": [
+    "product_line == 'quick_pyaas'",
+    "days_since_last_order == 7"
+   ],
+   "segments": [
+    "active",
+    "at_risk"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-C01",
+   "frequency_cap": {
+    "max_total": 1
+   },
+   "success_metric": "reactivation_pct_7d"
+  },
+  {
+   "id": "C-02",
+   "section": "C",
+   "name": "Quick Pyaas — no order 14 / 30 days (win-back)",
+   "phase": 4,
+   "kind": "scheduled",
+   "schedule": "0 11 * * *",
+   "conditions": [
+    "product_line == 'quick_pyaas'",
+    "days_since_last_order in [14, 30]",
+    "consent.promotional.valid == true",
+    "opt_out_at == null || days_since_opt_out > 90",
+    "customer.has_paid_order == true"
+   ],
+   "segments": [
+    "at_risk",
+    "inactive"
+   ],
+   "category": "promotional",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "sms",
+      "after": "PT24H",
+      "if": "not_read"
+     }
+    ]
+   },
+   "template": "T-C02",
+   "frequency_cap": {
+    "promotional_per_day": 1,
+    "window": "10:00–21:00"
+   },
+   "escalation": {
+    "to": "F-08",
+    "at_day": 30,
+    "if": "segment == 'high_value'"
+   },
+   "success_metric": "win_back_pct",
+   "corrections": [
+    "C-02",
+    "C-03",
+    "CH-19"
+   ],
+   "credit_paise": 7500
+  },
+  {
+   "id": "C-03",
+   "section": "C",
+   "name": "Morning Delivery — quantity reduced / paused / churn signs",
+   "phase": 3,
+   "kind": "event",
+   "event": "subscription.modified",
+   "delay": "PT1H",
+   "conditions": [
+    "change in ['quantity_reduced', 'paused']"
+   ],
+   "segments": [
+    "subscription",
+    "at_risk"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-C03",
+   "frequency_cap": {
+    "whatsapp": 1,
+    "ai_call": 1
+   },
+   "escalation": {
+    "to": "F-05",
+    "if": "segment == 'high_value' || pause_days > 7"
+   },
+   "success_metric": "churn_saved_pct"
+  },
+  {
+   "id": "C-04",
+   "section": "C",
+   "name": "Subscription nearing renewal",
+   "phase": 3,
+   "kind": "alias",
+   "alias_of": "B-04",
+   "note": "The playbook lists this in both B and C. Implement once, as B-04. Do not build a second trigger — it would double-send on the same event."
+  },
+  {
+   "id": "C-05",
+   "section": "C",
+   "name": "Stopped opening messages",
+   "phase": 3,
+   "kind": "scheduled",
+   "schedule": "0 11 * * *",
+   "conditions": [
+    "unread_whatsapp_count >= 3",
+    "window_days == 14"
+   ],
+   "segments": [
+    "active",
+    "at_risk",
+    "inactive"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "sms",
+    "fallback": []
+   },
+   "template": "T-C05",
+   "frequency_cap": {
+    "max_total": 1
+   },
+   "on_no_reply": {
+    "action": "downgrade_to_service_only",
+    "note": "Stop all non-essential dispatch. This is a re-permission trigger — treat silence as a no."
+   },
+   "success_metric": "re_engagement_pct, opt_out_pct"
+  },
+  {
+   "id": "C-06",
+   "section": "C",
+   "name": "High-value customer inactive",
+   "phase": 3,
+   "kind": "scheduled",
+   "schedule": "0 12 * * *",
+   "conditions": [
+    "segment == 'high_value'",
+    "(product_line == 'morning_delivery' && days_inactive == 10) || (product_line == 'quick_pyaas' && days_inactive == 21)"
+   ],
+   "segments": [
+    "high_value"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "template": null,
+   "ai_call_flow": "F-05",
+   "frequency_cap": {
+    "max_calls": 1
+   },
+   "success_metric": "high_value_retention_pct"
+  },
+  {
+   "id": "C-07",
+   "section": "C",
+   "name": "Poor experience, but no complaint",
+   "phase": 3,
+   "kind": "event",
+   "event": "delivery.miss_detected",
+   "delay": "PT2H",
+   "max_delay": "PT12H",
+   "conditions": [
+    "complaint_raised == false"
+   ],
+   "segments": [
+    "active",
+    "subscription",
+    "high_value"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-C07",
+   "frequency_cap": {
+    "max_total": 1
+   },
+   "success_metric": "silent_churn_prevented, rating_uplift"
+  },
+  {
+   "id": "D-01",
+   "section": "D",
+   "name": "Order confirmed",
+   "phase": 1,
+   "kind": "event",
+   "event": "order.confirmed",
+   "delay": "PT0S",
+   "conditions": [
+    "order.is_promotional_only == false"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT15M",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-D01",
+   "frequency_cap": {
+    "per_order": 1
+   },
+   "success_metric": "on_time_expectation_set",
+   "corrections": [
+    "C-01",
+    "CH-08"
+   ]
+  },
+  {
+   "id": "D-02",
+   "section": "D",
+   "name": "Packed / out for delivery",
+   "phase": 1,
+   "kind": "event",
+   "event": "order.dispatched",
+   "delay": "PT0S",
+   "conditions": [
+    "product_line == 'quick_pyaas'",
+    "order.is_promotional_only == false"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "rcs",
+      "after": "PT5M",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-D02",
+   "frequency_cap": {
+    "per_order": 1
+   },
+   "success_metric": "track_open_pct",
+   "corrections": [
+    "CH-08"
+   ]
+  },
+  {
+   "id": "D-03",
+   "section": "D",
+   "name": "Delivery delayed",
+   "phase": 1,
+   "kind": "event",
+   "event": "delivery.delayed",
+   "delay": "PT0S",
+   "conditions": [
+    "new_eta_known == true"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "parallel": [
+     "whatsapp"
+    ],
+    "fallback": []
+   },
+   "template": "T-D03",
+   "frequency_cap": {
+    "per_event": 1
+   },
+   "success_metric": "complaint_avoidance"
+  },
+  {
+   "id": "D-04",
+   "section": "D",
+   "name": "Product substitution needed",
+   "phase": 1,
+   "kind": "event",
+   "event": "order.substitution_proposed",
+   "delay": "PT0S",
+   "conditions": [
+    "product_line == 'quick_pyaas'",
+    "before_packing == true"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "push",
+      "after": "PT5M",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-D04",
+   "frequency_cap": {
+    "per_order_line": 1
+   },
+   "reply_handling": {
+    "YES": "apply_substitution",
+    "NO": "refund_line_to_topup",
+    "timeout": "PT20M → treat as NO"
+   },
+   "success_metric": "substitution_accept_pct",
+   "corrections": [
+    "C-01"
+   ]
+  },
+  {
+   "id": "D-05",
+   "section": "D",
+   "name": "Item unavailable",
+   "phase": 1,
+   "kind": "event",
+   "event": "order.line_cancelled",
+   "delay": "PT0S",
+   "conditions": [
+    "before_delivery == true"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "transactional",
+   "delivery": {
+    "primary": "whatsapp",
+    "parallel": [
+     "sms"
+    ],
+    "fallback": []
+   },
+   "template": "T-D05",
+   "frequency_cap": {
+    "per_order_line": 1
+   },
+   "wallet_account": "topup",
+   "success_metric": "refund_clarity, csat",
+   "corrections": [
+    "C-01",
+    "C-02"
+   ]
+  },
+  {
+   "id": "D-06",
+   "section": "D",
+   "name": "Delivery completed",
+   "phase": 1,
+   "kind": "event",
+   "event": "order.delivered",
+   "delay": "PT0S",
+   "conditions": [
+    "order.is_promotional_only == false"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT30M",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-D06",
+   "frequency_cap": {
+    "per_order": 1
+   },
+   "success_metric": "delivery_confirm_read_pct",
+   "corrections": [
+    "C-01",
+    "CH-08"
+   ],
+   "note": "CH-08. On the free-pack delivery W-02 replaces this message. Without the suppression a campaign customer receives four messages before noon on their first morning, and the first two say nothing W-01 did not."
+  },
+  {
+   "id": "D-07",
+   "section": "D",
+   "name": "Morning delivery will be skipped",
+   "phase": 1,
+   "kind": "scheduled",
+   "schedule": "0 12 * * *",
+   "conditions": [
+    "subscription.active == true",
+    "tomorrow.delivery_blocked == true"
+   ],
+   "segments": [
+    "subscription"
+   ],
+   "category": "service_implicit",
+   "critical": true,
+   "delivery": {
+    "primary": "sms",
+    "parallel": [
+     "whatsapp"
+    ],
+    "fallback": []
+   },
+   "template": "T-D07",
+   "frequency_cap": {
+    "per_event": 1
+   },
+   "success_metric": "same_day_resume_pct",
+   "corrections": [
+    "C-06",
+    "CH-03"
+   ],
+   "note": "Fires AT the 12:00 cut-off on D-1 for delivery on D — 19 hours notice. Retain a separate 07:00 run ONLY for causes arising after the cut-off (vehicle failure, area disruption), condition: blocked_reason_arose_after_cutoff == true.",
+   "ch03_verification": {
+    "day0_campaign_subscriber_zero_balance_free_pack_due": "MUST NOT FIRE — one entitled free delivery is cover",
+    "day1_noon_not_recharged": "MUST FIRE — the next day is genuinely unfunded",
+    "note": "Corrected by CH-01, not by an exception here. Verify explicitly; do not assume."
+   }
+  },
+  {
+   "id": "D-08",
+   "section": "D",
+   "name": "Route / service-area change",
+   "phase": 1,
+   "kind": "event",
+   "event": "route.changed",
+   "delay": "PT0S",
+   "conditions": [
+    "effective_in_days >= 2"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "parallel": [
+     "sms"
+    ],
+    "fallback": []
+   },
+   "template": "T-D08",
+   "frequency_cap": {
+    "per_change": 1,
+    "plus_reminder": 1
+   },
+   "success_metric": "complaints_avoided"
+  },
+  {
+   "id": "E-01",
+   "section": "E",
+   "name": "Low rating (≤3★)",
+   "phase": 3,
+   "kind": "event",
+   "event": "rating.submitted",
+   "delay": "PT0S",
+   "max_delay": "PT1H",
+   "conditions": [
+    "rating <= 3"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-E01",
+   "frequency_cap": {
+    "whatsapp": 1,
+    "call": 1
+   },
+   "escalation": {
+    "to": "F-07",
+    "if": "segment == 'high_value'"
+   },
+   "success_metric": "recovery_pct, rating_change"
+  },
+  {
+   "id": "E-02",
+   "section": "E",
+   "name": "Complaint raised",
+   "phase": 1,
+   "kind": "event",
+   "event": "complaint.created",
+   "delay": "PT0S",
+   "sla_acknowledge": "PT2H",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "sms",
+      "after": "PT1H",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-E02",
+   "frequency_cap": {
+    "as_needed": true
+   },
+   "side_effect": [
+    "set complaint_open = true",
+    "hold all promotional dispatch (G7)"
+   ],
+   "success_metric": "resolution_under_24h_pct",
+   "corrections": [
+    "C-08"
+   ]
+  },
+  {
+   "id": "E-03",
+   "section": "E",
+   "name": "Delivery late",
+   "phase": 1,
+   "kind": "event",
+   "event": "delivery.late_confirmed",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-E03",
+   "frequency_cap": {
+    "per_event": 1
+   },
+   "wallet_account": "promo_credit",
+   "success_metric": "csat, repeat_retained",
+   "corrections": [
+    "C-02"
+   ],
+   "credit_paise": 2000
+  },
+  {
+   "id": "E-04",
+   "section": "E",
+   "name": "Wrong / damaged / missing product",
+   "phase": 1,
+   "kind": "event",
+   "event": "complaint.created",
+   "delay": "PT0S",
+   "conditions": [
+    "complaint.type in ['wrong_item','damaged','missing']"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "parallel": [
+     "human_call"
+    ],
+    "fallback": []
+   },
+   "template": "T-E04",
+   "frequency_cap": {
+    "per_complaint": 1
+   },
+   "reply_handling": {
+    "REDELIVER": "create_makegood_order",
+    "REFUND": "credit_topup"
+   },
+   "success_metric": "make_good_time, csat",
+   "corrections": [
+    "C-01",
+    "C-02"
+   ]
+  },
+  {
+   "id": "E-05",
+   "section": "E",
+   "name": "MILK QUALITY / SAFETY CONCERN",
+   "phase": 1,
+   "kind": "event",
+   "event": "complaint.created",
+   "delay": "PT0S",
+   "conditions": [
+    "complaint.type == 'quality_safety'"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "critical": true,
+   "delivery": {
+    "primary": "human_call",
+    "fallback": []
+   },
+   "ai_permitted": false,
+   "template": null,
+   "sla": "human contact within the hour, 24×7, no exception",
+   "side_effect": [
+    "page the on-call responder",
+    "collect batch code and photo",
+    "quarantine that batch in the ERP",
+    "refund or replace",
+    "open a recall-SOP log entry",
+    "hold ALL outbound dispatch to this customer except the human handling"
+   ],
+   "success_metric": "safety_sla, zero_repeat",
+   "corrections": [
+    "C-08"
+   ],
+   "note": "NEVER route to AI. NEVER auto-respond. If no human is available the system must escalate to a named phone, not queue a message. This is the one trigger with no working-hours qualification."
+  },
+  {
+   "id": "E-06",
+   "section": "E",
+   "name": "Complaint resolved",
+   "phase": 1,
+   "kind": "event",
+   "event": "complaint.resolved",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-E06",
+   "frequency_cap": {
+    "per_complaint": 1
+   },
+   "side_effect": [
+    "set complaint_open = false",
+    "release promotional hold after PT24H, not immediately"
+   ],
+   "escalation": {
+    "to": "F-06",
+    "if": "segment == 'high_value'"
+   },
+   "success_metric": "reopen_pct, post_fix_csat"
+  },
+  {
+   "id": "E-07",
+   "section": "E",
+   "name": "High rating / positive feedback → referral",
+   "phase": 4,
+   "kind": "event",
+   "event": "rating.submitted",
+   "delay": "PT4H",
+   "conditions": [
+    "rating == 5",
+    "consent.promotional.valid == true",
+    "complaint_open == false",
+    "opt_out_at == null || days_since_opt_out > 90"
+   ],
+   "segments": [
+    "active",
+    "high_value",
+    "subscription"
+   ],
+   "category": "promotional",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-E07",
+   "frequency_cap": {
+    "per_quarter": 1
+   },
+   "success_metric": "referral_rate",
+   "corrections": [
+    "C-02",
+    "C-03"
+   ],
+   "credit_paise": {
+    "referrer": 7500,
+    "referee": 7500
+   }
+  },
+  {
+   "id": "F-01",
+   "section": "F",
+   "name": "AI call — first-order activation",
+   "phase": 2,
+   "kind": "scheduled",
+   "schedule": "0 11,17 * * *",
+   "conditions": [
+    "days_since_registration <= 5",
+    "orders_count == 0",
+    "high_intent == true",
+    "dnd_blocked == false",
+    "consent.call.valid == true"
+   ],
+   "segments": [
+    "new"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "11:00",
+     "end": "13:00"
+    },
+    {
+     "start": "16:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "greet_and_identify → consent_to_continue → offer_help_placing_first_order → guide_to_wallet_and_order → confirm",
+   "authority": {
+    "type": "promo_credit",
+    "cap_field": "F01_welcome_credit_cap",
+    "one_time": true,
+    "amount_paise": 3000
+   },
+   "transfer_to_human_when": [
+    "confusion beyond 2 attempts",
+    "complaint surfaces"
+   ],
+   "do_not_call": {
+    "no_repeat_within_days": 7,
+    "honour_opt_out": true
+   },
+   "success_metric": "first_order_conversion_pct",
+   "corrections": [
+    "C-02"
+   ],
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support."
+  },
+  {
+   "id": "F-02",
+   "section": "F",
+   "name": "AI call — cart abandonment (high basket)",
+   "phase": 2,
+   "kind": "scheduled",
+   "schedule": "0 11-19 * * *",
+   "conditions": [
+    "cart.value >= 300",
+    "cart.age > PT2H",
+    "cart.age < PT3H",
+    "consent.call.valid == true"
+   ],
+   "segments": [
+    "new",
+    "active"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "if": "no_answer"
+     }
+    ]
+   },
+   "call_window": [
+    {
+     "start": "11:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "identify_and_consent → state_basket_value → resolve_blocker → checkout",
+   "authority": {
+    "type": "free_delivery_this_order",
+    "one_time": true
+   },
+   "transfer_to_human_when": [
+    "payment or app fault",
+    "annoyance"
+   ],
+   "do_not_call": {
+    "max_attempts": 1
+   },
+   "success_metric": "recovered_basket_pct",
+   "note": "₹300 is the economically correct threshold — on a ₹15 delivery drop, a ₹36 order spends 41.7% on delivery and a ₹300 order spends 5.0%. Instrument cost_per_recovered_basket from day one; if it exceeds gross margin on the basket, raise the threshold rather than abandoning the trigger.",
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support."
+  },
+  {
+   "id": "F-03",
+   "section": "F",
+   "name": "AI call — wallet recharge (Morning Delivery)",
+   "phase": 2,
+   "kind": "scheduled",
+   "schedule": "30 10 * * *",
+   "conditions": [
+    "service_reminders_sent >= 2",
+    "subscription.active == true",
+    "wallet.spendable_balance < tomorrow.order_value",
+    "consent.call.valid == true",
+    "offer.entitled_free_deliveries_remaining == 0"
+   ],
+   "segments": [
+    "subscription",
+    "high_value"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "10:00",
+     "end": "11:45"
+    }
+   ],
+   "flow": "identify_and_consent → explain_shortfall → offer_one_tap_recharge_link → send_link → confirm → offer_pause_as_alternative",
+   "authority": {
+    "type": "none",
+    "may_pause_subscription": true
+   },
+   "transfer_to_human_when": [
+    "payment dispute",
+    "wants to cancel with frustration"
+   ],
+   "do_not_call": {
+    "max_per_cycle": 1,
+    "dnd_scrub": true
+   },
+   "success_metric": "save_rate",
+   "script_reference": "G.3 — see spec §9.4. \"kal ki delivery pakki\" must be replaced; nothing in the system can guarantee a delivery.",
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support.",
+   "note": "RE-TIMED from the playbook's 17:00-20:00. With a 12:00 cut-off an evening save call cannot save the next morning — the indent has already locked.",
+   "script_rule": "Do NOT mention any free pack. A call whose purpose is to offer something free is promotional in substance whatever it is labelled, and would pull AI calling into promotional consent, DND scrub and the 90-day bar for no gain. The recharge link opens a screen that already shows the pending pack.",
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "F-04",
+   "section": "F",
+   "name": "AI call — payment failure / renewal recovery",
+   "phase": 2,
+   "kind": "scheduled",
+   "schedule": "0 10-20 * * *",
+   "conditions": [
+    "payment.failed_or_renewal_lapsed == true",
+    "was_active == true",
+    "consent.call.valid == true"
+   ],
+   "segments": [
+    "active",
+    "subscription",
+    "high_value"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "10:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "identify_and_consent → explain_gently_no_money_lost → offer_retry_link_or_alt_method → confirm",
+   "authority": {
+    "type": "small_grace_extension"
+   },
+   "transfer_to_human_when": [
+    "any payment or refund dispute"
+   ],
+   "do_not_call": {
+    "max_attempts": 2,
+    "min_gap_hours": 24
+   },
+   "success_metric": "recovery_pct",
+   "note": "'no money lost' must be verified against the gateway state before the call is queued, not asserted by the script.",
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support."
+  },
+  {
+   "id": "F-05",
+   "section": "F",
+   "name": "AI call — churn-risk / inactive high-value",
+   "phase": 3,
+   "kind": "scheduled",
+   "schedule": "0 12,18 * * *",
+   "conditions": [
+    "segment == 'high_value'",
+    "(product_line == 'morning_delivery' && pause_days > 7) || (product_line == 'quick_pyaas' && days_inactive >= 21)",
+    "consent.call.valid == true"
+   ],
+   "segments": [
+    "high_value",
+    "at_risk"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "12:00",
+     "end": "14:00"
+    },
+    {
+     "start": "16:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "identify_and_consent → open_question_any_problem → listen → fix_or_resume → thank",
+   "authority": {
+    "type": "promo_credit",
+    "only_if": "warranted",
+    "cap_field": "F05_goodwill_cap",
+    "amount_paise": 2000
+   },
+   "transfer_to_human_when": [
+    "complaint surfaces",
+    "anger"
+   ],
+   "do_not_call": {
+    "max_calls": 1,
+    "rest_days": 30
+   },
+   "success_metric": "reactivation_pct",
+   "corrections": [
+    "C-02"
+   ],
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support."
+  },
+  {
+   "id": "F-06",
+   "section": "F",
+   "name": "AI call — post-complaint recovery",
+   "phase": 3,
+   "kind": "scheduled",
+   "schedule": "0 11-19 * * *",
+   "conditions": [
+    "complaint.resolved_yesterday == true",
+    "segment in ['high_value','subscription']",
+    "complaint.type != 'quality_safety'",
+    "consent.call.valid == true"
+   ],
+   "segments": [
+    "high_value",
+    "subscription"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "11:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "identify_and_consent → confirm_issue_resolved → small_goodwill_if_warranted",
+   "authority": {
+    "type": "promo_credit",
+    "cap_field": "F06_goodwill_cap",
+    "amount_paise": 2000
+   },
+   "transfer_to_human_when": [
+    "still unhappy",
+    "new issue raised"
+   ],
+   "do_not_call": {
+    "max_calls": 1,
+    "skip_if_opted_out": true
+   },
+   "success_metric": "reopen_pct, csat",
+   "corrections": [
+    "C-02"
+   ],
+   "note": "Excluded for quality/safety complaints — those close with a human, not a robot checking whether the customer is over it.",
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support."
+  },
+  {
+   "id": "F-07",
+   "section": "F",
+   "name": "AI call — feedback after poor experience",
+   "phase": 3,
+   "kind": "scheduled",
+   "schedule": "0 11-19 * * *",
+   "conditions": [
+    "rating <= 3 || flagged_miss == true",
+    "segment == 'high_value'",
+    "consent.call.valid == true"
+   ],
+   "segments": [
+    "high_value"
+   ],
+   "category": "service_explicit",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "11:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "identify_and_consent → ask_what_happened → capture → assure_fix",
+   "authority": {
+    "type": "make_good_within_authority"
+   },
+   "transfer_to_human_when": [
+    "anger",
+    "quality or safety"
+   ],
+   "do_not_call": {
+    "max_calls": 1,
+    "honour_opt_out": true
+   },
+   "success_metric": "recovery_pct, insight_logged",
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support."
+  },
+  {
+   "id": "F-08",
+   "section": "F",
+   "name": "AI call — win-back, recently cancelled",
+   "phase": 4,
+   "kind": "scheduled",
+   "schedule": "0 12,18 * * *",
+   "conditions": [
+    "cancelled_within_days <= 30",
+    "was_subscription == true",
+    "consent.promotional.valid == true",
+    "consent.call.valid == true",
+    "opt_out_at == null || days_since_opt_out > 90",
+    "customer.has_paid_order == true"
+   ],
+   "segments": [
+    "inactive"
+   ],
+   "category": "promotional",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "12:00",
+     "end": "14:00"
+    },
+    {
+     "start": "16:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "identify_and_consent → ask_what_stopped_them → address → offer_restart",
+   "authority": {
+    "type": "promo_credit",
+    "cap_field": "F08_restart_cap",
+    "founder_pricing_if_eligible": true,
+    "amount_paise": 7500
+   },
+   "transfer_to_human_when": [
+    "grievance about why they left"
+   ],
+   "do_not_call": {
+    "max_calls": 1,
+    "rest_days": 60
+   },
+   "success_metric": "win_back_pct",
+   "corrections": [
+    "C-02",
+    "C-03",
+    "CH-19"
+   ],
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support.",
+   "note": "CH-19. A campaign customer who took the free pack and cancelled was never a paying subscriber. Calling them a win-back candidate puts an AI call in front of someone who has already told us, by not paying, that they were not interested."
+  },
+  {
+   "id": "F-09",
+   "section": "F",
+   "name": "AI call — referral request",
+   "phase": 4,
+   "kind": "scheduled",
+   "schedule": "0 12,18 * * *",
+   "conditions": [
+    "recent_rating == 5",
+    "consent.promotional.valid == true",
+    "complaint_open == false",
+    "opt_out_at == null || days_since_opt_out > 90"
+   ],
+   "segments": [
+    "high_value",
+    "active"
+   ],
+   "category": "promotional",
+   "delivery": {
+    "primary": "ai_call",
+    "fallback": []
+   },
+   "call_window": [
+    {
+     "start": "12:00",
+     "end": "14:00"
+    },
+    {
+     "start": "16:00",
+     "end": "18:00"
+    }
+   ],
+   "flow": "identify_and_consent → thank → ask_for_referral",
+   "authority": {
+    "type": "promo_credit_both_sides",
+    "released_on": "referee_first_paid_order",
+    "amount_paise": 7500
+   },
+   "transfer_to_human_when": [
+    "any dissatisfaction surfaces"
+   ],
+   "do_not_call": {
+    "max_per_quarter": 1,
+    "opted_in_only": true
+   },
+   "success_metric": "referrals_generated",
+   "corrections": [
+    "C-02",
+    "C-03"
+   ],
+   "sunday_window": [
+    {
+     "start": "10:00",
+     "end": "13:00"
+    }
+   ],
+   "window_note": "Clipped to support hours — a transfer needs a human to transfer to. Evening slot lost under 9-18 Mon-Sat support."
+  },
+  {
+   "id": "W-01",
+   "name": "Welcome offer confirmed",
+   "kind": "event",
+   "event": "subscription.activated",
+   "delay": "PT0S",
+   "conditions": [
+    "offer.id == 'welcome_litre'"
+   ],
+   "segments": [
+    "new",
+    "subscription"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "parallel": [
+     "push"
+    ],
+    "fallback": [
+     {
+      "channel": "sms",
+      "at": "PT2H",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-W01",
+   "frequency_cap": {
+    "per_offer": 1
+   },
+   "success_metric": "day1_delivery_success",
+   "note": "Replaces A-03 for the campaign cohort. Must state exactly what is free and what is not, before any milk arrives.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "W-02",
+   "name": "Free pack 1 delivered",
+   "kind": "event",
+   "event": "order.delivered",
+   "delay": "PT0S",
+   "conditions": [
+    "offer.id == 'welcome_litre'",
+    "order.is_promotional_only == true"
+   ],
+   "segments": [
+    "welcome_pack1_delivered"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT20M",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-W02",
+   "frequency_cap": {
+    "per_offer": 1
+   },
+   "success_metric": "same_day_recharge_pct",
+   "note": "Replaces D-06 on this delivery. Sent at 07:30, immediately after handover.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "W-03a",
+   "name": "Cut-off recharge prompt, day one (service)",
+   "kind": "scheduled",
+   "schedule": "30 10 * * *",
+   "conditions": [
+    "offer.id == 'welcome_litre'",
+    "offer.pack1_state == \"delivered\"",
+    "wallet.topup_balance == 0",
+    "days_since_first_delivery == 0"
+   ],
+   "segments": [
+    "welcome_pack1_delivered"
+   ],
+   "category": "service_implicit",
+   "critical": true,
+   "delivery": {
+    "primary": "whatsapp",
+    "parallel": [
+     "push"
+    ],
+    "fallback": []
+   },
+   "template": "T-W03a",
+   "frequency_cap": {
+    "per_offer": 1
+   },
+   "success_metric": "subscription_to_recharge_pct",
+   "note": "CH-06. The service half. Sent unconditionally — it carries no offer, so it needs no promotional consent. The real noon cut-off is genuine urgency, not manufactured.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "W-03b",
+   "name": "Second pack reminder, day one (promotional)",
+   "kind": "scheduled",
+   "schedule": "32 10 * * *",
+   "conditions": [
+    "offer.id == 'welcome_litre'",
+    "offer.pack2_state == \"locked\"",
+    "days_since_first_delivery == 0",
+    "consent.promotional.valid == true",
+    "opt_out_at == null || days_since_opt_out > 90",
+    "complaint_open == false"
+   ],
+   "segments": [
+    "welcome_pack1_delivered"
+   ],
+   "category": "promotional",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-W03b",
+   "frequency_cap": {
+    "per_offer": 1,
+    "counts_against_promotional_daily_cap": true
+   },
+   "success_metric": "pack2_release_pct",
+   "corrections": [
+    "C-03",
+    "CH-05",
+    "CH-06"
+   ],
+   "note": "CH-06. The promotional half, registered separately. A customer without promotional consent still receives W-03a and still sees the pending pack on the screen the link opens. Making the offer conditional on marketing consent would be Forced Action.",
+   "section": "W",
+   "phase": 1
+  },
+  {
+   "id": "W-04",
+   "name": "Second pack unlocked by first recharge",
+   "kind": "event",
+   "event": "wallet.recharge_settled",
+   "delay": "PT0S",
+   "conditions": [
+    "offer.id == 'welcome_litre'",
+    "offer.pack2_state == \"locked\"",
+    "recharge.amount_paise >= 50000",
+    "recharge.settled == true",
+    "days_since_first_delivery <= 7"
+   ],
+   "segments": [
+    "welcome_pack1_delivered"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "parallel": [
+     "push"
+    ],
+    "fallback": []
+   },
+   "template": "T-W04",
+   "frequency_cap": {
+    "per_offer": 1
+   },
+   "success_metric": "pack2_release_pct",
+   "corrections": [
+    "C-01",
+    "CH-05"
+   ],
+   "note": "SETTLED funds only, never payment initiation. Releasing on initiation is trivially exploitable. The pack is scheduled onto the next delivery, not dispatched separately.",
+   "section": "W",
+   "phase": 1
+  },
+  {
+   "id": "W-05",
+   "name": "Second pack delivered",
+   "kind": "event",
+   "event": "order.delivered",
+   "delay": "PT0S",
+   "conditions": [
+    "offer.id == 'welcome_litre'",
+    "order.contains_promotional_line == true",
+    "order.is_promotional_only == false"
+   ],
+   "segments": [
+    "welcome_completed"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT20M",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-W05",
+   "frequency_cap": {
+    "per_offer": 1
+   },
+   "success_metric": "d7_retention",
+   "corrections": [
+    "C-01",
+    "CH-05"
+   ],
+   "note": "The free-to-paid boundary. This is the delivery where the customer pays for the first time AND receives something free, so they never experience a morning worse than the last.",
+   "section": "W",
+   "phase": 1
+  },
+  {
+   "id": "W-06",
+   "name": "Second pack still available",
+   "kind": "scheduled",
+   "schedule": "30 10 * * *",
+   "conditions": [
+    "offer.id == 'welcome_litre'",
+    "offer.pack2_state == \"locked\"",
+    "days_since_first_delivery in [3, 5]"
+   ],
+   "segments": [
+    "welcome_pack1_delivered"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": []
+   },
+   "template": "T-W06",
+   "frequency_cap": {
+    "max_total": 2
+   },
+   "success_metric": "late_conversion_pct",
+   "note": "Twice, then stop. Recovering is worth two messages; nagging costs more than the pack.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "W-07",
+   "name": "Second pack window closed",
+   "kind": "scheduled",
+   "schedule": "30 10 * * *",
+   "conditions": [
+    "offer.id == 'welcome_litre'",
+    "offer.pack2_state == \"locked\"",
+    "days_since_first_delivery == 7"
+   ],
+   "segments": [
+    "welcome_lapsed"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "sms",
+      "at": "PT4H",
+      "if": "not_read"
+     }
+    ]
+   },
+   "template": "T-W07",
+   "frequency_cap": {
+    "per_offer": 1
+   },
+   "success_metric": "complaints_avoided",
+   "note": "Sets offer.pack2_state = expired. The line \"koi shulk nahi laga hai\" is NOT optional — a customer who received free milk and then stopped hearing from us will assume something was debited.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "W-08",
+   "name": "Out of area — waitlist captured",
+   "kind": "event",
+   "event": "serviceability.checked",
+   "delay": "PT0S",
+   "conditions": [
+    "serviceability.in_zone == false"
+   ],
+   "segments": [
+    "waitlist_out_of_area"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "whatsapp",
+    "fallback": [
+     {
+      "channel": "sms",
+      "at": "PT1H",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-W08",
+   "frequency_cap": {
+    "per_customer": 1
+   },
+   "success_metric": "waitlist_size",
+   "note": "One message, ever. This cohort receives no promotional contact at all and exactly one further service message on the day the zone reaches them.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "W-09",
+   "name": "Abuse flag raised",
+   "kind": "event",
+   "event": "abuse_flag_raised",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "internal",
+   "delivery": {
+    "primary": "admin_console",
+    "fallback": []
+   },
+   "template": null,
+   "frequency_cap": {
+    "per_flag": 1
+   },
+   "success_metric": "review_turnaround_hours, false_positive_pct",
+   "note": "NO customer message. Flag, never auto-reject — genuine multi-family households exist, especially in older Lucknow properties. Support may approve a second offer at the same address on evidence of a separate household. Build the review path before launch.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  },
+  {
+   "id": "W-10",
+   "name": "Promotional stock reconciliation exception",
+   "kind": "scheduled",
+   "schedule": "0 18 * * *",
+   "conditions": [
+    "abs(packs_issued - consumers_created) > tolerance"
+   ],
+   "segments": [
+    "*"
+   ],
+   "category": "internal",
+   "delivery": {
+    "primary": "admin_console",
+    "parallel": [
+     "email"
+    ],
+    "fallback": []
+   },
+   "template": null,
+   "frequency_cap": {
+    "per_day": 1
+   },
+   "success_metric": "reconciliation_variance",
+   "note": "NO customer message. This is the campaign stop-loss condition — promotional stock that cannot be reconciled to consumers created halts the campaign — so it needs an event and an alert, not a spreadsheet.",
+   "section": "W",
+   "phase": 1,
+   "corrections": [
+    "CH-05"
+   ]
+  }
+ ],
+ "ai_call_guardrails": {
+  "applies_to": "every trigger with delivery.primary == 'ai_call'",
+  "rules": [
+   "Identify PYAAS and the purpose of the call within the first 10 seconds.",
+   "Disclose that the caller is an AI assistant. Not yet mandated by TRAI; do it anyway.",
+   "Ask consent to continue. On a no: thank, end, log, do not retry.",
+   "Hard stop at 90 seconds unless the customer is mid-sentence.",
+   "Never make a promise the system cannot keep — no guarantee of tomorrow's delivery.",
+   "Offer an explicit opt-out in-call and honour it immediately across all channels.",
+   "Offer a one-line path to a human on request.",
+   "Transfer immediately on anger, abuse, any quality or safety concern, any refund/payment/legal dispute, or two or more failed deliveries.",
+   "Respect DND, the call window and the per-trigger cap.",
+   "Give a recording notice before recording. Store consent state and outcome for audit."
+  ],
+  "human_only": [
+   "quality or safety",
+   "anger or abuse",
+   "refund or payment dispute",
+   "legal or regulatory",
+   "repeated failed deliveries (>=2)"
+  ],
+  "vendor_boundary": "The vendor executes the call. Eligibility, consent, DND state, caps, do-not-call windows and the decision to place the call are computed in the PYAAS core and passed per call. The vendor must not hold or re-target the customer list."
+ },
+ "claims_freeze": {
+  "correction": "C-07",
+  "rule": "No template, script, chatbot answer or AI-call flow may assert an A2, breed, origin, purity or health claim until the herd substantiation file is closed.",
+  "enforcement": "CI check — fail the build on these tokens in any template, script or chatbot file: A2, Sahiwal, Holstein, single origin, single-origin, pure, purest, healthier, immunity, medicinal, farm, society, collected at, traceab, फार्म, समिति, संग्रहित, ट्रेस",
+  "scope": [
+   "message templates",
+   "AI-call scripts",
+   "chatbot knowledge base",
+   "push copy",
+   "email",
+   "printed marketing assets",
+   "monthly summary email"
+  ],
+  "extension_ch12": "Traceability language is now frozen on any Parag product. The farm record is built from PYAAS own-brand collection data; Parag milk arrives packaged from the milk union and no society, collection time or batch is held for it. Lift the farm tokens only when supply_source is pyaas_own_brand, or when the union supplies batch data in writing."
+ },
+ "config": {
+  "cutoff_time": {
+   "value": "12:00",
+   "timezone": "Asia/Kolkata",
+   "means": "orders and wallet balance for the next morning lock at 12:00 noon on the preceding day",
+   "resolves": "AT_CUTOFF"
+  },
+  "delivery_by": "07:00",
+  "support": {
+   "hours": [
+    {
+     "days": "Mon-Sat",
+     "open": "09:00",
+     "close": "18:00"
+    },
+    {
+     "days": "Sun",
+     "open": "08:00",
+     "close": "13:00"
+    }
+   ],
+   "number": "96672 60050",
+   "sla_acknowledge": "PT2H (support hours)",
+   "sla_resolve": "PT24H (support hours)",
+   "safety_sla": "PT1H WALL CLOCK, 24x7, never business hours",
+   "safety_on_call": "named rotation, 24x7, quality/safety only",
+   "campaign_window_gap": {
+    "correction": "CH-10",
+    "issue": "The campaign conversion window is 07:00 (free pack delivered) to 12:00 (cut-off). Published opening is 09:00 Mon-Sat, so 07:00-09:00 is unstaffed on six days a week.",
+    "options": [
+     "move Mon-Sat opening to 07:00 for the pilot (recommended)",
+     "route 07:00-09:00 to the safety on-call (not recommended — blunts that rota)",
+     "accept it and publish 09:00 honestly"
+    ],
+    "status": "DECISION REQUIRED — operations, not build. No code depends on the answer; published hours, app, chatbot and printed assets must all state the same thing."
+   }
+  },
+  "dlt": {
+   "header": "PYAAS-only",
+   "co_branding": "NONE — the Parag co-brand is dropped permanently. No template, script or header may carry the Parag mark.",
+   "suffixes": {
+    "promotional": "-P",
+    "service": "-S",
+    "transactional": "-T"
+   }
+  },
+  "messaging_vendor": {
+   "model": "single CPaaS covering WhatsApp + SMS/DLT + RCS",
+   "note": "One integration, one template-approval queue. Adapters still sit behind the channel interface so the vendor can be replaced without touching guard logic."
+  },
+  "ai_calling": {
+   "model": "vendor from launch",
+   "recording_retention_days": 90,
+   "recording_deletion": "enforced in code, not policy"
+  },
+  "credits_paise": {
+   "welcome": 0,
+   "apology_late_delivery": 2000,
+   "winback": 7500,
+   "referral_referrer": 7500,
+   "referral_referee": 7500
+  },
+  "credits_note": "All issued to the promo_credit account: non-refundable, expiring. Amounts are deliberately inside one to two orders of gross margin. CH-07: welcome credit is 0 for the duration of the Welcome Litre campaign — the welcome benefit is the promotional milk (nil invoiced cost, Rs 72 MRP value). Restore to 3000 when the campaign ends.",
+  "wallet_low_threshold": {
+   "rule": "4 days of cover, computed per plan",
+   "formula": "daily_order_value * 4",
+   "examples": {
+    "parag_toned_1L_at_59": 23600,
+    "parag_fcm_1L_at_71": 28400,
+    "pyaas_toned_1L_at_62": 24800,
+    "pyaas_a2_1L_at_99": 39600
+   },
+   "note": "CH-11: examples recomputed on Parag prices — the campaign cohort drinks Parag, which carries the same price at every price level because the distributor terms bar any change to its consumer price. The formula is unchanged; only the worked examples were wrong."
+  },
+  "high_value": {
+   "rule": "subscription.active AND (ghee_purchased_within_days(90) OR monthly_spend_paise >= 150000)"
+  },
+  "founding_family_grace": {
+   "enabled": false,
+   "instead": "extended reminder ladder — one additional service reminder and one AI call before pause",
+   "never": "delivery on a negative balance"
+  },
+  "offer": {
+   "welcome_litre": {
+    "packs_in_entitlement": 2,
+    "packs_in_entitlement_note": "CH-05 rule 3. The work order grants \"one litre FCM\" and does NOT say two 500 ml packs. If the union supplies a single 1 L pack set this to 1 — W-04..W-07 then no-op and the offer collapses to one free morning. This must be configuration, never a compiled assumption.",
+    "pack_sku": "PARAG-FCM-500ML",
+    "pack_volume_ml": 500,
+    "unit_price_paise": 0,
+    "promotional_value_paise": 3600,
+    "supply_source": "parag",
+    "pack1_release": "subscription.activated",
+    "pack2_release": "wallet.recharge_settled AND amount_paise >= 50000",
+    "pack2_min_recharge_paise": 50000,
+    "pack2_grace_days": 7,
+    "eligibility": [
+     "one per mobile number (OTP-verified)",
+     "one per normalised address + geocode within 25 m",
+     "address inside the delivery zone"
+    ],
+    "address_match_action": "FLAG for human review — never auto-reject. Genuine multi-family households exist; a rule with no appeal generates complaints we cannot answer."
+   }
+  }
+ },
+ "resolved_values_reference": "see config block",
+ "remaining_placeholders": [
+  {
+   "token": "[LINK]",
+   "note": "short-link domain, must be whitelisted with the DLT platform — use one domain for all templates and register it once"
+  },
+  {
+   "token": "[REASON] / [KARAN]",
+   "note": "enumerated reason codes, rendered from the event"
+  },
+  {
+   "token": "[DATE] [ETA] [ALT] [PARTNER] [X]",
+   "note": "runtime values from the event payload"
+  },
+  {
+   "token": "[SUPPORT_NUMBER]",
+   "note": "Resolves to 96672 60050. This is also the number that goes on every printed campaign asset — not a personal mobile (CH-17)."
+  },
+  {
+   "token": "[DATE] in T-W06",
+   "note": "first_delivery_date + 7 days, rendered in the customer language"
+  }
+ ],
+ "traceability_display": {
+  "correction": "CH-13",
+  "rule": "Render the traceability block ONLY when order_line.supply_source == \"pyaas_own_brand\".",
+  "else": "Render NOTHING. Not a placeholder, not \"record unavailable\", not a skeleton — an empty block advertises an absence.",
+  "layout": "No layout shift when absent. Reserve nothing; collapse cleanly.",
+  "applies_to": [
+   "product listing tile",
+   "product detail card",
+   "subscription setup",
+   "order confirmation",
+   "delivery notification",
+   "monthly summary"
+  ]
+ },
+ "promotional_order_line": {
+  "correction": "CH-04",
+  "rule": "Every promotional pack is issued as a zero-value order line. Never off-ledger.",
+  "fields": [
+   "sku",
+   "batch",
+   "expiry",
+   "supply_source",
+   "unit_price_paise = 0",
+   "promotional_value_paise",
+   "is_promotional = true",
+   "proof_of_delivery"
+  ],
+  "why": [
+   "C-01 resolves {labelled_product} from the order line — no line means the message fails",
+   "E-05 needs a batch to stop on a quality concern; a free pack is not a lesser pack",
+   "fraud controls, daily reconciliation and promoter free-to-cancel rate all become queries"
+  ],
+  "accounting": "Invoiced cost nil; promotional value at MRP disclosed separately. Same two figures the financial model keeps apart."
+ },
+ "analytics_events_added": {
+  "correction": "CH-20",
+  "events": {
+   "offer_enrolled": [
+    "offer_id",
+    "society_id",
+    "promoter_id",
+    "asset_type"
+   ],
+   "offer_pack_state_change": [
+    "pack_no",
+    "from",
+    "to",
+    "reason"
+   ],
+   "entitlement_reconciled": [
+    "date",
+    "packs_issued",
+    "consumers_created",
+    "variance"
+   ]
+  },
+  "rule": "Reconcile the campaign catalogue and the CRM catalogue into ONE list before either is built. Two event catalogues in one product is how a dashboard ends up disagreeing with itself.",
+  "privacy": "No UPI handle, no VPA, no account number, no full address in any analytics payload."
+ }
+}

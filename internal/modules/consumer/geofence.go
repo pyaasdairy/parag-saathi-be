@@ -796,6 +796,11 @@ func (h *handler) joinWaitlist(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// CRM W-08 (inert unless CRM_ENABLED): out-of-area waitlist confirmation —
+	// one message, ever, per customer (the trigger's own cap enforces that).
+	h.svc.emitCRMEvent(r.Context(), "waitlist.joined", primitive.NilObjectID, map[string]any{
+		"phone": body.Phone, "pincode": body.Pincode,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "waitlisted": true})
 }
 

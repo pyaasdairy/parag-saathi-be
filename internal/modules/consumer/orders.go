@@ -53,6 +53,16 @@ type orderItem struct {
 	Variant   string  `bson:"variant"    json:"variant"`
 	Price     float64 `bson:"price"      json:"price"`
 	Qty       int     `bson:"qty"        json:"qty"`
+	// CH-04 promotional line (Welcome Litre): a free pack is a REAL ledger
+	// line at price 0, minted SERVER-SIDE ONLY (crm_offers.go) — these fields
+	// are never accepted from a request body, so the client price authority's
+	// ₹0 rejection stays fully intact. All omitempty: invisible on every
+	// existing order and inert for the published app (loose decode).
+	IsPromotional    bool    `bson:"is_promotional,omitempty"     json:"is_promotional,omitempty"`
+	PromotionalValue float64 `bson:"promotional_value,omitempty"  json:"promotional_value,omitempty"`
+	SupplySource     string  `bson:"supply_source,omitempty"      json:"supply_source,omitempty"`
+	Batch            string  `bson:"batch,omitempty"              json:"batch,omitempty"`
+	Expiry           string  `bson:"expiry,omitempty"             json:"expiry,omitempty"`
 }
 
 type rider struct {
@@ -95,9 +105,13 @@ type order struct {
 	Priority       string             `bson:"priority,omitempty"      json:"priority,omitempty"`
 	DeliveryWindow string             `bson:"delivery_window,omitempty" json:"delivery_window,omitempty"`
 	DeliveryDate   string             `bson:"delivery_date,omitempty" json:"delivery_date,omitempty"`
-	BuyerGSTIN     string             `bson:"buyer_gstin,omitempty"   json:"buyer_gstin,omitempty"`
-	ProofPhotoURL  string             `bson:"proof_photo_url,omitempty" json:"proof_photo_url,omitempty"`
-	Lane           string             `bson:"lane"                    json:"lane,omitempty"`
+	// Welcome Litre linkage (crm_offers.go). OfferPack 1|2 marks a
+	// promotional pack order; both omitempty → absent everywhere else.
+	OfferID       string `bson:"offer_id,omitempty"   json:"offer_id,omitempty"`
+	OfferPack     int    `bson:"offer_pack,omitempty" json:"offer_pack,omitempty"`
+	BuyerGSTIN    string `bson:"buyer_gstin,omitempty"   json:"buyer_gstin,omitempty"`
+	ProofPhotoURL string `bson:"proof_photo_url,omitempty" json:"proof_photo_url,omitempty"`
+	Lane          string `bson:"lane"                    json:"lane,omitempty"`
 	// TrialFree marks a 2+2 free-day subscription delivery: the sticker Total
 	// stands, but the wallet charge at delivery is 0 (trialChargeFor). Set at
 	// creation from the trial phase — DISPLAY + ANALYTICS only, it never gates the
@@ -121,7 +135,7 @@ type order struct {
 	// reconcile it, the shopper may cancel it); after it, the delivery task
 	// exists and the store owns it.
 	SubscriptionID string `bson:"subscription_id,omitempty" json:"-"`
-	ScheduledFor   string `bson:"scheduled_for,omitempty"   json:"delivery_date,omitempty"`
+	ScheduledFor   string `bson:"scheduled_for,omitempty"   json:"scheduled_for,omitempty"`
 	SubLockedAt    string `bson:"sub_locked_at,omitempty"   json:"-"`
 }
 

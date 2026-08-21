@@ -587,7 +587,10 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	}
 	// Debit-on-delivery BEFORE flipping status (funds gate). PREPAID only; keyed
 	// to the order so the consumer's settle sweep can never double-charge.
-	if d.PaymentMode == "PREPAID" && d.Amount > 0 {
+	// PREPAID at ANY amount: an Amount==0 task (a Welcome Litre promotional
+	// pack) must still consume the delivery ref with a ₹0 gate row, or the
+	// exactly-once key is left dangling forever. Amount>0 flows are unchanged.
+	if d.PaymentMode == "PREPAID" {
 		cid, cerr := primitive.ObjectIDFromHex(d.ConsumerID)
 		if cerr != nil {
 			return nil, errInternal("bad consumer id on delivery")
@@ -601,7 +604,7 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 		// offer's full cream (TrialEligible ← isTrialProduct, gold-*) AND the
 		// parent order must be SUBSCRIPTION-linked — a one-time morning order of
 		// the same milk never consumes or earns trial days.
-		if d.Lane == "morning" && d.TrialEligible && parent != nil && parent.SubscriptionID != "" {
+		if d.Amount > 0 && d.Lane == "morning" && d.TrialEligible && parent != nil && parent.SubscriptionID != "" {
 			day := trialDay(time.Now())
 			eff, _, terr := s.trialChargeFor(ctx, cid, trialDeliveryKey(cid, day), d.Amount)
 			if terr != nil {
@@ -613,6 +616,9 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 			if _, e := s.debit(ctx, cid, amount, "delivery:"+d.OrderID, "Delivery "+d.OrderCode); e != nil {
 				return nil, e // INSUFFICIENT_FUNDS etc. surface to the rider app
 			}
+			// CH-19: the first order with a SETTLED value > 0 marks the
+			// customer as paid — never a promotional-only ₹0 settle.
+			s.markHasPaidOrder(ctx, cid)
 		} else {
 			// FREE trial day: no money moves, but the delivery ref MUST still be
 			// consumed with a zero-amount ledger row. The consumer app runs a
@@ -626,7 +632,7 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 				ID: primitive.NewObjectID(), ConsumerID: cid,
 				Type: "DEBIT", Bucket: "CASH", Amount: 0, RefType: "order",
 				RefID: "delivery:" + d.OrderID, Status: "SUCCESS",
-				Remark: "Delivery " + d.OrderCode + " (trial free day)", CreatedAt: time.Now().UTC(),
+				Remark: "Delivery " + d.OrderCode + " (free delivery)", CreatedAt: time.Now().UTC(),
 			}
 			if _, e := s.repo.insertWalletTxnGate(ctx, gate); e != nil {
 				return nil, e // must not deliver without consuming the ref
@@ -693,6 +699,18 @@ func (s *service) syncOrderRiderLocation(ctx context.Context, d *delivery, lat, 
 func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "delivered"}, {Key: "can_review", Value: true}, {Key: "proof_photo_url", Value: d.ProofPhotoURI}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+	// CRM (inert unless CRM_ENABLED): a delivered Welcome Litre pack advances
+	// the offer state machine via the event outbox — best-effort by contract.
+	if crmEnabled() {
+		if o, err := s.repo.findOrderAnyUser(ctx, d.OrderID); err == nil && o != nil && o.OfferPack > 0 {
+			if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
+				s.emitCRMEvent(ctx, "order.delivered", cid, map[string]any{
+					"order_id": o.OrderID, "offer_pack": o.OfferPack,
+					"promotional_only": o.OfferPack > 0,
+				})
+			}
+		}
+	}
 }
 
 // syncOrderAssigned surfaces the winning rider to the consumer the moment a rider

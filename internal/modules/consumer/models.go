@@ -40,9 +40,13 @@ type account struct {
 	ReferralCode      *string            `bson:"referral_code,omitempty" json:"referral_code,omitempty"`
 	DeliverySlot      *string            `bson:"delivery_slot,omitempty" json:"delivery_slot,omitempty"`
 	MembershipTier    string             `bson:"membership_tier,omitempty" json:"membership_tier,omitempty"`
-	Status            string             `bson:"status"                 json:"status"`
-	CreatedAt         time.Time          `bson:"created_at"             json:"created_at"`
-	UpdatedAt         time.Time          `bson:"updated_at"             json:"updated_at"`
+	// HasPaidOrder — CH-19: true from the first order whose SETTLED value was
+	// > 0, NEVER from a promotional-only order. Gates win-back journeys and
+	// Welcome Litre eligibility. Server-internal; not exposed on /me.
+	HasPaidOrder bool      `bson:"has_paid_order,omitempty" json:"-"`
+	Status       string    `bson:"status"                 json:"status"`
+	CreatedAt    time.Time `bson:"created_at"             json:"created_at"`
+	UpdatedAt    time.Time `bson:"updated_at"             json:"updated_at"`
 }
 
 // otpChallenge mirrors the operator pattern but in the consumer namespace.

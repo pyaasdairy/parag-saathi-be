@@ -545,6 +545,10 @@ func (s *service) insertSubscriptionOrder(ctx context.Context, sub *subscription
 		ConsumerName: name, Phone: phone, Geo: &geoPoint{Lat: *addr.Lat, Lng: *addr.Lng},
 		CreatedAt: now, UpdatedAt: now,
 		SubscriptionID: sub.SubscriptionID, ScheduledFor: day,
+		// The wire date the app displays. ScheduledFor used to alias
+		// json:"delivery_date" until a tag collision silenced both — setting
+		// DeliveryDate restores the date on every subscription order response.
+		DeliveryDate: day,
 	}
 	// Flag a free-day trial delivery for DISPLAY + ANALYTICS (badge "FREE" in the
 	// app, count free milk in reporting). Peeking the trial ledger never advances

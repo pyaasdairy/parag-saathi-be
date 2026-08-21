@@ -478,6 +478,15 @@ func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID
 	if err != nil {
 		return nil, err
 	}
+	if !dup {
+		// CRM wallet.recharge_settled — SETTLED, not initiated: this line sits
+		// past the wallet's exactly-once gate, on the verified-credit path, so
+		// a replay or a forged initiation can never fire it twice. (No-op
+		// unless CRM_ENABLED.)
+		s.emitCRMEvent(ctx, "wallet.recharge_settled", consumerID, map[string]any{
+			"amount": amount, "method": method, "ref": ref,
+		})
+	}
 	if dup {
 		return s.getOrCreateWallet(ctx, consumerID) // already credited
 	}
