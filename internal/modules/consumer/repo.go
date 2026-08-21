@@ -89,6 +89,21 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 		// A payment order id is globally unique — the top-up idempotency anchor.
 		{r.payOrders, bson.D{{Key: "order_id", Value: 1}}, options.Index().SetUnique(true)},
 		{r.payOrders, bson.D{{Key: "consumer_id", Value: 1}}, nil},
+		// Consent current-state: ONE doc per (consumer, kind). LOAD-BEARING
+		// unique index — it is the opt-out-wins invariant: without it a racing
+		// upsert could leave a second ACTIVE grant doc behind that a revoke
+		// never touches, and crmHasPromoConsent (count>0) would keep passing
+		// after the customer opted out. Fatal like the wallet gate, by design.
+		{r.consents, bson.D{{Key: "consumer_id", Value: 1}, {Key: "kind", Value: 1}}, options.Index().SetUnique(true)},
+		// Consent audit log: at-least-once replay dedup — the app's mirror
+		// queue may deliver the same batch twice; each (consumer, kind,
+		// occurred_at, granted) record lands in the evidence trail exactly
+		// once. `granted` is part of the key so an opposite-polarity event at
+		// the same millisecond (grant + revoke) keeps BOTH rows — the evidence
+		// trail must never show a lone GRANT for a consumer whose tie-broken
+		// state is revoked.
+		{r.accounts.Database().Collection(collConsentLog), bson.D{{Key: "consumer_id", Value: 1}, {Key: "kind", Value: 1}, {Key: "occurred_at", Value: 1}, {Key: "granted", Value: 1}},
+			options.Index().SetUnique(true)},
 		// 2+2 one-per-household gate: a phone claims the trial at most once,
 		// SURVIVING account erasure (fraud prevention). LOAD-BEARING unique
 		// index — without it the claim InsertOne always succeeds and the gate
@@ -217,6 +232,10 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 		// CRM rows are consumer-keyed PII surfaces too.
 		db.Collection(collConsumerOffers), db.Collection(collConsumerInbox),
 		db.Collection(collCRMDispatch), db.Collection(collCRMEvents),
+		// Consent audit trail is consumer-keyed PII too — DPDP erasure takes
+		// the evidence rows with the account (r.consents above already covers
+		// the current-state docs, including the derived "promotional" one).
+		db.Collection(collConsentLog),
 	} {
 		if _, err := c.DeleteMany(ctx, filter); err != nil {
 			return errInternal("erasure failed")

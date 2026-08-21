@@ -17,8 +17,12 @@
 //     (crm_engine.go guard chain passes it structurally for the inbox), and a
 //     telecom channel may not skip it — so category=="promotional" makes the
 //     SMS transport unavailable. WhatsApp is an OTT channel outside the TRAI
-//     DND registry; its promotional gate is the G2 explicit-consent guard,
-//     which the dispatcher enforces before any channel is reached.
+//     DND registry; its promotional gates are the G2 explicit-consent guard
+//     (enforced before any channel is reached) AND the G2b channel-granular
+//     check (crmHasChannelConsent): the dispatcher hands a promotional trigger
+//     to a transport only when the member's marketing_<channel> consent is
+//     itself active and unexpired — an email-only opt-in never yields a promo
+//     SMS or WhatsApp.
 //   - Business-initiated WhatsApp requires a PRE-APPROVED template: a trigger
 //     with no mapped template name (CRM_WA_TEMPLATE_NAMES) never attempts it.
 //

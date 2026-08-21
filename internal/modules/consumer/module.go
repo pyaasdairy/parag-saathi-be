@@ -161,6 +161,13 @@ func Register(r chi.Router, d *deps.Deps) {
 			}
 			pr.Post("/me/erasure", h.erase)
 
+			// Consent capture (consents.go) — DPDP/Play evidence trail + the
+			// CRM promo gate's source of truth. Both path styles, like /users/me.
+			for _, base := range []string{"/users/me/consents", "/me/consents"} {
+				pr.Get(base, h.getConsents)
+				pr.Post(base, h.postConsents)
+			}
+
 			// Wallet — canonical + FE-alias paths.
 			pr.Get("/wallet", h.getWallet)
 			pr.Get("/wallet/txns", h.walletTxns)

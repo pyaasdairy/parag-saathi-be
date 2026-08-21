@@ -370,6 +370,26 @@ func (s *service) crmHasPromoConsent(ctx context.Context, consumerID primitive.O
 	return err == nil && n > 0
 }
 
+// crmHasChannelConsent — G2b: CHANNEL-GRANULAR explicit consent for one
+// promotional transport ("sms"/"whatsapp" → kind "marketing_sms"/…). The
+// derived "promotional" aggregate (G2) ORs every marketing channel, so on its
+// own an email-only opt-in would pass the gate and receive a promo SMS —
+// TRAI/TCCCPR consent is channel-specific, so the dispatcher re-checks the
+// concrete kind (same active + unexpired window as G2) before handing a
+// promotional trigger to a transport. Fail CLOSED on any error, absent doc,
+// revoked, or expired grant.
+func (s *service) crmHasChannelConsent(ctx context.Context, consumerID primitive.ObjectID, channel string) bool {
+	ttl := crmConfigLoad().Guards.ConsentTTLDays
+	since := time.Now().UTC().AddDate(0, 0, -ttl)
+	n, err := s.repo.consents.CountDocuments(ctx, bson.D{
+		{Key: "consumer_id", Value: consumerID},
+		{Key: "kind", Value: "marketing_" + channel},
+		{Key: "revoked_at", Value: nil},
+		{Key: "created_at", Value: bson.D{{Key: "$gte", Value: since}}},
+	})
+	return err == nil && n > 0
+}
+
 func (s *service) crmOptedOut(ctx context.Context, consumerID primitive.ObjectID, now time.Time) bool {
 	var a struct {
 		OptOutAt *time.Time `bson:"promo_opt_out_at"`
@@ -560,10 +580,25 @@ func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerI
 		delivered = append(delivered, ch.Name())
 	}
 	if ext := s.crmTransports(); len(ext) > 0 {
-		if phone, err := s.crmDeliveryPhone(ctx, consumerID); err != nil {
-			s.log.Warn("crm: no deliverable phone for external channels", "trigger", t.ID, "consumer", consumerID.Hex(), "err", err)
-		} else {
-			delivered = append(delivered, crmDeliverExternal(ctx, s.log, phone, t, tpl, std, ext)...)
+		if t.Category == "promotional" {
+			// G2b — channel-granular consent: the aggregate G2 already passed,
+			// but it ORs every marketing channel, so drop each transport whose
+			// OWN marketing_<channel> kind is not an active, unexpired grant.
+			// Fail closed: no per-channel consent row → that channel never sends.
+			for name := range ext {
+				if !s.crmHasChannelConsent(ctx, consumerID, name) {
+					s.log.Info("crm: channel suppressed — no channel-specific promo consent",
+						"trigger", t.ID, "channel", name, "guard", "G2b_channel_consent")
+					delete(ext, name)
+				}
+			}
+		}
+		if len(ext) > 0 {
+			if phone, err := s.crmDeliveryPhone(ctx, consumerID); err != nil {
+				s.log.Warn("crm: no deliverable phone for external channels", "trigger", t.ID, "consumer", consumerID.Hex(), "err", err)
+			} else {
+				delivered = append(delivered, crmDeliverExternal(ctx, s.log, phone, t, tpl, std, ext)...)
+			}
 		}
 	}
 	if len(delivered) == 0 {
