@@ -307,6 +307,58 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 		t.Fatalf("day-7 recharge (the advertised deadline) must unlock pack 2: %+v", o5)
 	}
 
+	// ── 7d) WALLET-HEALTH NUDGES for the GENERAL base (B-01 / B-02): a
+	// normal subscriber (never CRM-enrolled) with a low wallet must be told.
+	nAcct := &account{ID: primitive.NewObjectID(), Phone: "+919000000077", Status: "ACTIVE",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := repo.insertAccount(ctx, nAcct); err != nil {
+		t.Fatalf("normal subscriber account: %v", err)
+	}
+	nSub := &subscription{MongoID: primitive.NewObjectID(), SubscriptionID: newSubscriptionID(),
+		ConsumerID: nAcct.ID, ProductID: "gold-500ml", Name: "Full Cream Milk - Parag Gold",
+		Qty: 2, UnitPrice: 35, Frequency: "daily", Status: "active",
+		StartDate: istDay(time.Now()), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if _, err := repo.subscriptions.InsertOne(ctx, nSub); err != nil {
+		t.Fatalf("normal subscription: %v", err)
+	}
+	if _, err := svc.creditTopup(ctx, nAcct.ID, 50, "razorpay", "e2e-rzp-n1"); err != nil {
+		t.Fatalf("normal topup: %v", err)
+	}
+	svc.crmProcessEvents(ctx) // consume the recharge event (no offer → no-op)
+	// ₹50 wallet vs ₹70/day burn: cover 0.7 days < 4 → B-01 at the 09:00 sweep.
+	bday := time.Date(2026, 8, 25, 9, 5, 0, 0, istZone)
+	svc.crmProcessSchedules(ctx, bday)
+	if n := inboxCount(t, db, nAcct.ID, "B-01"); n != 1 {
+		t.Fatalf("B-01 low-balance nudge = %d rows, want 1", n)
+	}
+	svc.crmProcessSchedules(ctx, bday.Add(10*time.Minute)) // same day again — sweep claim dedupes
+	if n := inboxCount(t, db, nAcct.ID, "B-01"); n != 1 {
+		t.Fatalf("B-01 must not repeat within the day: %d", n)
+	}
+	// 17:00: ₹50 cannot cover tomorrow's ₹70 → the critical B-02 cut-off alert.
+	svc.crmProcessSchedules(ctx, time.Date(2026, 8, 25, 17, 5, 0, 0, istZone))
+	if n := inboxCount(t, db, nAcct.ID, "B-02"); n != 1 {
+		t.Fatalf("B-02 shortfall alert = %d rows, want 1", n)
+	}
+	// Next day, still short: B-01 stays quiet (once per 7 days) but the
+	// critical B-02 fires again — the spec's critical_exempt_from_daily_cap.
+	nday := time.Date(2026, 8, 26, 17, 5, 0, 0, istZone)
+	svc.crmProcessSchedules(ctx, time.Date(2026, 8, 26, 9, 5, 0, 0, istZone))
+	svc.crmProcessSchedules(ctx, nday)
+	if n := inboxCount(t, db, nAcct.ID, "B-01"); n != 1 {
+		t.Fatalf("B-01 repeated inside its 7-day cycle: %d", n)
+	}
+	if n := inboxCount(t, db, nAcct.ID, "B-02"); n != 2 {
+		t.Fatalf("critical B-02 must re-fire daily while short: %d rows, want 2", n)
+	}
+	// A LIVE Welcome Litre household is excluded — the campaign owns its nudges.
+	if !svc.crmInLiveWelcomeJourney(ctx, cid3) {
+		t.Fatal("household #3 (pack2 pending) must count as a live welcome journey")
+	}
+	if svc.crmInLiveWelcomeJourney(ctx, nAcct.ID) {
+		t.Fatal("a never-enrolled subscriber must not count as a welcome journey")
+	}
+
 	// ── 8) OFF SWITCH: with CRM disabled, dispatch + schedules are inert ──
 	t.Setenv("CRM_ENABLED", "")
 	before := inboxTotal(t, db)

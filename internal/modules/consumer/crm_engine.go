@@ -508,6 +508,14 @@ func crmRender(body string, params map[string]string) string {
 // per-offer caps → render → channel send → log. Safe to call from anywhere;
 // every failure mode lands in the dispatch log.
 func (s *service) crmDispatch(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string) {
+	s.crmDispatchAt(ctx, triggerID, consumerID, params, time.Now().UTC())
+}
+
+// crmDispatchAt is crmDispatch with the tick's clock injected: the scheduler
+// passes its own `now` so the exactly-once (trigger, consumer, IST-day) claim
+// keys on the SAME day the schedule condition was evaluated on — event-driven
+// callers keep the wall clock via crmDispatch.
+func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string, now time.Time) {
 	if !crmEnabled() {
 		return
 	}
@@ -517,7 +525,6 @@ func (s *service) crmDispatch(ctx context.Context, triggerID string, consumerID 
 		s.log.Warn("crm: unknown trigger", "id", triggerID)
 		return
 	}
-	now := time.Now().UTC()
 	row, won := s.crmClaimDispatch(ctx, t, consumerID, istDay(now))
 	if !won {
 		return // already handled today (exactly-once)
@@ -727,14 +734,14 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 		if hm >= "10:30" {
 			if day == 0 && o.Pack1State == pack1Delivered {
 				if bal, err := s.wallet(ctx, o.ConsumerID); err == nil && bal.Cash == 0 {
-					s.crmDispatch(ctx, "W-03a", o.ConsumerID, nil)
+					s.crmDispatchAt(ctx, "W-03a", o.ConsumerID, nil, now)
 				}
 			}
 			if day == 0 && o.Pack2State == pack2Locked && hm >= "10:32" {
-				s.crmDispatch(ctx, "W-03b", o.ConsumerID, nil) // promotional — guards decide
+				s.crmDispatchAt(ctx, "W-03b", o.ConsumerID, nil, now) // promotional — guards decide
 			}
 			if (day == 3 || day == 5) && o.Pack2State == pack2Locked {
-				s.crmDispatch(ctx, "W-06", o.ConsumerID, nil)
+				s.crmDispatchAt(ctx, "W-06", o.ConsumerID, nil, now)
 			}
 			// Expiry fires from the day AFTER the advertised window: W-06 names
 			// day <grace>'s DATE, and the recharge unlock honours that whole
@@ -747,17 +754,135 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 				// leaves the state locked, so the next tick retries BOTH —
 				// dispatch-then-expire is at-least-once, expire-then-dispatch
 				// silently lost the spec's one non-negotiable message.
-				s.crmDispatch(ctx, "W-07", o.ConsumerID, nil)
+				s.crmDispatchAt(ctx, "W-07", o.ConsumerID, nil, now)
 				if moved, _ := s.repo.transitionPack(ctx, o.ConsumerID, 2, pack2Locked, pack2Expired, "grace window elapsed", nil); moved {
 					s.emitCRMEvent(ctx, "offer_pack_state_change", o.ConsumerID, map[string]any{"pack_no": 2, "from": pack2Locked, "to": pack2Expired})
 				}
 			}
 		}
 	}
+	// Wallet-health nudges for the WHOLE base (not just Welcome Litre):
+	// B-01 low balance at 09:00, B-02 insufficient-for-tomorrow at 17:00.
+	s.crmWalletHealthSweep(ctx, now, hm)
+
 	// 18:00 — W-10 reconciliation stop-loss (one row per day via the claim).
 	if hm >= "18:00" {
 		s.crmReconcile(ctx, istDay(now))
 	}
+}
+
+// crmWalletHealthSweep drives the spec's B-section wallet triggers for every
+// ACTIVE subscriber ("if balance is low then a message must be hit" — the
+// founder's words, and the spec's B-01/B-02):
+//
+//	B-01 (09:00 IST, service_implicit): days-of-cover below 4 → "Wallet is
+//	     running low" — at most once per 7 days per customer (per_cycle).
+//	B-02 (17:00 IST, service_implicit, critical): spendable balance cannot
+//	     cover TOMORROW's subscription day → "recharge by 12 noon tomorrow" —
+//	     once per day, every day it stays true (critical_exempt_from_daily_cap).
+//
+// Households inside a LIVE Welcome Litre journey (pack 2 locked/pending) are
+// excluded — W-03a/W-06 own their recharge messaging until the offer settles.
+// Each block scans once per IST day via a NilObjectID sweep claim, so the
+// per-minute scheduler tick costs one indexed query, not a collection walk.
+func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm string) {
+	day := istDay(now)
+	if hm >= "09:00" {
+		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-01-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
+			s.crmSweepWalletCover(ctx, now)
+		}
+	}
+	if hm >= "17:00" {
+		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-02-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
+			s.crmSweepTomorrowShortfall(ctx, now)
+		}
+	}
+}
+
+// crmSubsByConsumer groups the active subscriptions by owner — one wallet
+// check per customer however many plans they run.
+func (s *service) crmSubsByConsumer(ctx context.Context) map[primitive.ObjectID][]subscription {
+	subs, err := s.repo.listActiveSubscriptions(ctx)
+	if err != nil {
+		return nil
+	}
+	by := map[primitive.ObjectID][]subscription{}
+	for i := range subs {
+		by[subs[i].ConsumerID] = append(by[subs[i].ConsumerID], subs[i])
+	}
+	return by
+}
+
+// crmInLiveWelcomeJourney reports whether the campaign currently owns this
+// customer's recharge messaging (pack 2 still locked or pending).
+func (s *service) crmInLiveWelcomeJourney(ctx context.Context, consumerID primitive.ObjectID) bool {
+	o, err := s.repo.findOffer(ctx, consumerID)
+	if err != nil || o == nil {
+		return false
+	}
+	return o.Pack2State == pack2Locked || o.Pack2State == pack2Pending
+}
+
+// B-01: days of cover = spendable / daily burn; below 4 days → nudge, at most
+// once per 7 days (the config's per_cycle cap for a daily-milk cycle).
+func (s *service) crmSweepWalletCover(ctx context.Context, now time.Time) {
+	for cid, subs := range s.crmSubsByConsumer(ctx) {
+		daily := 0.0
+		for i := range subs {
+			if subs[i].Frequency == "daily" {
+				daily += subs[i].UnitPrice*float64(subs[i].Qty) + subscriptionDeliveryFee
+			}
+		}
+		if daily <= 0 {
+			continue
+		}
+		wv, err := s.wallet(ctx, cid)
+		if err != nil || wv.Available/daily >= 4 {
+			continue
+		}
+		if s.crmInLiveWelcomeJourney(ctx, cid) {
+			continue
+		}
+		if s.crmCountTriggerSentSince(ctx, cid, "B-01", now.Add(-7*24*time.Hour)) > 0 {
+			continue // per_cycle: one nudge a week is a reminder, more is nagging
+		}
+		s.crmDispatchAt(ctx, "B-01", cid, nil, now)
+	}
+}
+
+// B-02: tomorrow's due subscription day costs more than the spendable balance
+// → the critical cut-off alert. The (trigger, consumer, IST-day) dispatch
+// claim caps it at one per day; it re-fires each further day the shortfall
+// persists — that is the spec's critical_exempt_from_daily_cap.
+func (s *service) crmSweepTomorrowShortfall(ctx context.Context, now time.Time) {
+	tomorrow := istDay(now.Add(24 * time.Hour))
+	for cid, subs := range s.crmSubsByConsumer(ctx) {
+		cost := 0.0
+		for i := range subs {
+			if subscriptionDueOn(&subs[i], tomorrow) {
+				cost += subs[i].UnitPrice*float64(subs[i].Qty) + subscriptionDeliveryFee
+			}
+		}
+		if cost <= 0 {
+			continue
+		}
+		wv, err := s.wallet(ctx, cid)
+		if err != nil || wv.Available >= cost {
+			continue
+		}
+		if s.crmInLiveWelcomeJourney(ctx, cid) {
+			continue
+		}
+		s.crmDispatchAt(ctx, "B-02", cid, nil, now)
+	}
+}
+
+func (s *service) crmCountTriggerSentSince(ctx context.Context, consumerID primitive.ObjectID, triggerID string, since time.Time) int {
+	n, _ := s.repo.crmDispatchCol().CountDocuments(ctx, bson.D{
+		{Key: "consumer_id", Value: consumerID}, {Key: "trigger_id", Value: triggerID},
+		{Key: "status", Value: "SENT"}, {Key: "created_at", Value: bson.D{{Key: "$gte", Value: since}}},
+	})
+	return int(n)
 }
 
 // crmReconcile compares promotional packs issued with consumers created for
