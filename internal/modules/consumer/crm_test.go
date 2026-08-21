@@ -10,8 +10,7 @@ import (
 // parses and carries everything the engine dereferences, so a bad config
 // replacement fails in CI, never at 10:30 IST in production.
 func TestCRMConfigParses(t *testing.T) {
-	crmCfg = nil // force a fresh parse
-	c := crmConfigLoad()
+	c := crmConfigLoad() // sync.Once — parse happens exactly once per process
 	if len(c.Triggers) != 54 {
 		t.Fatalf("triggers: got %d want 54", len(c.Triggers))
 	}
@@ -49,7 +48,6 @@ func TestCRMConfigParses(t *testing.T) {
 // W-07's "nothing has been charged" line is MANDATORY and must never be
 // shortened out by a template edit — in either language (spec §5.3).
 func TestW07MandatoryNoChargeLine(t *testing.T) {
-	crmCfg = nil
 	c := crmConfigLoad()
 	tpl := c.Templates["T-W07"]
 	if !strings.Contains(tpl.EN, "Nothing has been charged") {

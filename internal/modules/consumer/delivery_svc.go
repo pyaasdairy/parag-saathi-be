@@ -628,11 +628,15 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 			// price by the member's own app. The gate row makes any later debit
 			// on this ref dedupe into a no-op, and gives the member a ₹0 "free
 			// day" line in their ledger to boot.
+			remark := "Delivery " + d.OrderCode + " (trial free day)" // pre-CRM wording, unchanged
+			if parent != nil && parent.OfferPack > 0 {
+				remark = "Delivery " + d.OrderCode + " (free delivery)" // Welcome Litre pack
+			}
 			gate := walletTxn{
 				ID: primitive.NewObjectID(), ConsumerID: cid,
 				Type: "DEBIT", Bucket: "CASH", Amount: 0, RefType: "order",
 				RefID: "delivery:" + d.OrderID, Status: "SUCCESS",
-				Remark: "Delivery " + d.OrderCode + " (free delivery)", CreatedAt: time.Now().UTC(),
+				Remark: remark, CreatedAt: time.Now().UTC(),
 			}
 			if _, e := s.repo.insertWalletTxnGate(ctx, gate); e != nil {
 				return nil, e // must not deliver without consuming the ref

@@ -214,7 +214,8 @@ func (r *repository) transitionPack(ctx context.Context, consumerID primitive.Ob
 // ensureCRMIndexes creates the CRM collections' indexes OUTSIDE the fatal boot
 // path — a failed campaign index must never take the platform down (the main
 // ensureIndexes panics on failure by design; this one logs and continues).
-func (s *service) ensureCRMIndexes(ctx context.Context) {
+func (s *service) ensureCRMIndexes(ctx context.Context) bool {
+	ok := true
 	offers := s.repo.offers()
 	_, err := offers.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "consumer_id", Value: 1}, {Key: "offer_id", Value: 1}},
@@ -225,6 +226,7 @@ func (s *service) ensureCRMIndexes(ctx context.Context) {
 	})
 	if err != nil {
 		s.log.Warn("crm: offers index setup failed (continuing)", "err", err)
+		ok = false
 	}
 	disp := s.repo.accounts.Database().Collection(collCRMDispatch)
 	if _, err := disp.Indexes().CreateMany(ctx, []mongo.IndexModel{
@@ -234,19 +236,23 @@ func (s *service) ensureCRMIndexes(ctx context.Context) {
 		{Keys: bson.D{{Key: "consumer_id", Value: 1}, {Key: "created_at", Value: -1}}},
 	}); err != nil {
 		s.log.Warn("crm: dispatch index setup failed (continuing)", "err", err)
+		ok = false
 	}
 	ev := s.repo.accounts.Database().Collection(collCRMEvents)
 	if _, err := ev.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "status", Value: 1}, {Key: "created_at", Value: 1}},
 	}); err != nil {
 		s.log.Warn("crm: events index setup failed (continuing)", "err", err)
+		ok = false
 	}
 	inbox := s.repo.accounts.Database().Collection(collConsumerInbox)
 	if _, err := inbox.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "consumer_id", Value: 1}, {Key: "created_at", Value: -1}},
 	}); err != nil {
 		s.log.Warn("crm: inbox index setup failed (continuing)", "err", err)
+		ok = false
 	}
+	return ok
 }
 
 // ── Enrolment ───────────────────────────────────────────────────────────────
@@ -326,15 +332,23 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		}
 	}
 
-	// 2) eligibility — each check is a plain read; the unique (consumer, offer)
-	// index is the final race-proof arbiter.
+	// 2) eligibility — plain reads first; the unique (consumer, offer) index on
+	// the offer INSERT below is the race-proof arbiter (nothing is minted until
+	// this consumer owns the offer doc).
 	if acct.HasPaidOrder {
 		return nil, errUnprocessable("NOT_ELIGIBLE", "this customer has already paid for an order")
 	}
-	if existing, e := s.repo.findOffer(ctx, acct.ID); e != nil {
-		return nil, e
-	} else if existing != nil {
-		return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+existing.OfferID)
+	// has_paid_order only exists from this release forward — a PRE-CRM paying
+	// customer carries none, so also refuse anyone with real order history.
+	// (Campaign spec: the Welcome Litre is for households that have never paid.)
+	if n, cerr := s.repo.orders.CountDocuments(ctx, bson.D{
+		{Key: "user_id", Value: acct.ID.Hex()},
+		{Key: "total", Value: bson.D{{Key: "$gt", Value: 0}}},
+		{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+	}); cerr != nil {
+		return nil, errInternal("order history check failed")
+	} else if n > 0 {
+		return nil, errUnprocessable("NOT_ELIGIBLE", "this customer already has paid order history")
 	}
 	if t, terr := s.repo.getOrCreateTrial(ctx, acct.ID); terr == nil && (t.DeliveredPaid > 0 || t.DeliveredFree > 0) {
 		return nil, errUnprocessable("NOT_ELIGIBLE", "this customer already has welcome-trial activity")
@@ -347,7 +361,36 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		flagged = true
 	}
 
-	// 4) offer exclusivity: exhaust the 2+2 so the offers can never stack.
+	// 4) THE ARBITRATION POINT — insert the offer FIRST, before any minting.
+	// Two concurrent enrols both reach here; the unique (consumer_id, offer_id)
+	// index lets exactly one through, and the loser has created NOTHING yet —
+	// no orphan subscription, no orphan ₹0 order, no double free milk.
+	// A crash between here and the finalize below leaves an INCOMPLETE offer
+	// (pack1_order_id "") which the next enrol call RESUMES instead of refusing.
+	now := time.Now().UTC()
+	offer := &consumerOffer{
+		ConsumerID: acct.ID, OfferID: offerWelcomeLitre, EnrolledAt: now,
+		Pack1State: pack1Pending, Pack2State: pack2Locked,
+		SocietyID: in.SocietyID, PromoterID: in.PromoterID, AssetType: in.AssetType,
+		AddressHash: hash, AbuseFlagged: flagged,
+		Transitions: []offerTransition{{PackNo: 1, From: "", To: pack1Pending, Reason: "enrolled by " + actor, At: now}},
+		CreatedAt:   now, UpdatedAt: now,
+	}
+	freshOffer := true
+	if err := s.repo.insertOffer(ctx, offer); err != nil {
+		existing, e2 := s.repo.findOffer(ctx, acct.ID)
+		if e2 != nil || existing == nil {
+			return nil, err // real conflict surfaced as-is
+		}
+		if existing.Pack1OrderID != "" {
+			return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+existing.OfferID)
+		}
+		// Incomplete twin (crashed or racing mid-mint) — resume it.
+		offer, freshOffer = existing, false
+		flagged = existing.AbuseFlagged
+	}
+
+	// 5) offer exclusivity: exhaust the 2+2 so the offers can never stack.
 	// (Campaign-only blast radius: touches ONLY this consumer's trial doc.)
 	if _, err := s.repo.trials.UpdateOne(ctx,
 		bson.D{{Key: "consumer_id", Value: acct.ID}},
@@ -361,7 +404,8 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		return nil, errInternal("trial exclusivity mark failed")
 	}
 
-	// 5) address (only if the account has none) + the normal subscription.
+	// 6) address (only if the account has none), then the normal subscription
+	// and the standalone ₹0 pack-1 order for the next IST morning.
 	addr, aerr := s.subscriptionAddress(ctx, acct.ID)
 	if aerr != nil || addr == nil || addr.Lat == nil || addr.Lng == nil {
 		lat, lng := in.Lat, in.Lng
@@ -377,43 +421,59 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 	}
 	sub, serr := s.crmCreateSubscription(ctx, acct.ID, cfg)
 	if serr != nil {
-		return nil, serr
+		return nil, serr // offer stays incomplete — a retry resumes right here
 	}
-
-	// 6) the standalone ₹0 pack-1 order for the next IST morning.
 	packDay := istDay(time.Now().Add(24 * time.Hour))
 	pack1, perr := s.mintPromoPackOrder(ctx, acct, addr, packDay, 1)
 	if perr != nil {
+		s.crmDeleteSubscription(ctx, sub.SubscriptionID) // never shipped — safe to retract
 		return nil, perr
 	}
 
-	now := time.Now().UTC()
-	offer := &consumerOffer{
-		ConsumerID: acct.ID, OfferID: offerWelcomeLitre, EnrolledAt: now,
-		Pack1State: pack1Pending, Pack2State: pack2Locked,
-		SocietyID: in.SocietyID, PromoterID: in.PromoterID, AssetType: in.AssetType,
-		AddressHash: hash, AbuseFlagged: flagged,
-		SubscriptionID: sub.SubscriptionID, Pack1OrderID: pack1.OrderID,
-		Transitions: []offerTransition{{PackNo: 1, From: "", To: pack1Pending, Reason: "enrolled by " + actor, At: now}},
-		CreatedAt:   now, UpdatedAt: now,
+	// 7) FINALIZE — exactly one resumer/creator wins the empty-ids slot; a
+	// loser retracts its own scaffolding so no duplicate free milk can ship.
+	res, uerr := s.repo.offers().UpdateOne(ctx,
+		bson.D{
+			{Key: "consumer_id", Value: acct.ID}, {Key: "offer_id", Value: offerWelcomeLitre},
+			{Key: "pack1_order_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+		},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "subscription_id", Value: sub.SubscriptionID},
+			{Key: "pack1_order_id", Value: pack1.OrderID},
+			{Key: "updated_at", Value: time.Now().UTC()},
+		}}})
+	if uerr != nil {
+		return nil, errInternal("offer finalize failed")
 	}
-	if err := s.repo.insertOffer(ctx, offer); err != nil {
-		// Lost the unique-index race (double submit): surface the conflict; the
-		// minted order/subscription belong to the winning enrolment's twin flow.
-		return nil, err
+	if res.ModifiedCount == 0 {
+		// A concurrent resume finalized first — retract our duplicates and
+		// report the winner's result.
+		s.crmDeleteSubscription(ctx, sub.SubscriptionID)
+		s.crmRetractPromoOrder(ctx, pack1.OrderID)
+		winner, werr := s.repo.findOffer(ctx, acct.ID)
+		if werr != nil || winner == nil || winner.Pack1OrderID == "" {
+			return nil, errConflict("ALREADY_ENROLLED", "enrolment finished on a concurrent request")
+		}
+		return &crmEnrolResult{
+			ConsumerID: acct.ID.Hex(), OfferID: offerWelcomeLitre,
+			SubscriptionID: winner.SubscriptionID, Pack1OrderID: winner.Pack1OrderID,
+			Pack1For: packDay, AbuseFlagged: winner.AbuseFlagged,
+		}, nil
 	}
 
-	s.emitCRMEvent(ctx, "offer_enrolled", acct.ID, map[string]any{
-		"offer_id": offerWelcomeLitre, "society_id": in.SocietyID,
-		"promoter_id": in.PromoterID, "asset_type": in.AssetType,
-	})
-	if flagged {
-		s.crmNotifyAdmins(ctx, "CRM_ABUSE_FLAG", map[string]string{
-			"phone": phone, "reason": "address_hash match — second offer at the same address (review, do not auto-reject)",
+	if freshOffer {
+		s.emitCRMEvent(ctx, "offer_enrolled", acct.ID, map[string]any{
+			"offer_id": offerWelcomeLitre, "society_id": in.SocietyID,
+			"promoter_id": in.PromoterID, "asset_type": in.AssetType,
 		})
-		s.emitCRMEvent(ctx, "abuse_flag_raised", acct.ID, map[string]any{"rule": "address_match", "entity": "offer"})
+		if flagged {
+			s.crmNotifyAdmins(ctx, "CRM_ABUSE_FLAG", map[string]string{
+				"phone": phone, "reason": "address_hash match — second offer at the same address (review, do not auto-reject)",
+			})
+			s.emitCRMEvent(ctx, "abuse_flag_raised", acct.ID, map[string]any{"rule": "address_match", "entity": "offer"})
+		}
 	}
-	// W-01 — welcome confirmation, straight through the guard chain.
+	// W-01 — welcome confirmation; the dispatch-log claim dedupes a resume.
 	s.crmDispatch(ctx, "W-01", acct.ID, map[string]string{})
 
 	return &crmEnrolResult{
@@ -421,6 +481,39 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		SubscriptionID: sub.SubscriptionID, Pack1OrderID: pack1.OrderID,
 		Pack1For: packDay, AbuseFlagged: flagged,
 	}, nil
+}
+
+// crmDeleteSubscription retracts a campaign subscription that lost the enrol
+// finalize race — it has never shipped (start date is tomorrow) and nothing
+// references it, so a hard delete is the honest cleanup.
+func (s *service) crmDeleteSubscription(ctx context.Context, subscriptionID string) {
+	if subscriptionID == "" {
+		return
+	}
+	if _, err := s.repo.subscriptions.DeleteOne(ctx, bson.D{{Key: "subscription_id", Value: subscriptionID}}); err != nil {
+		s.log.Warn("crm: losing-subscription retract failed", "subscription", subscriptionID, "err", err)
+	}
+}
+
+// crmRetractPromoOrder cancels a ₹0 promo order (and fails its delivery task)
+// that lost the enrol/unlock finalize race, so the store never ships two free
+// packs to one household.
+func (s *service) crmRetractPromoOrder(ctx context.Context, orderID string) {
+	if orderID == "" {
+		return
+	}
+	if _, err := s.repo.orders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: orderID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "cancelled"}, {Key: "updated_at", Value: time.Now().UTC()}}}},
+	); err != nil {
+		s.log.Warn("crm: losing-order retract failed", "order", orderID, "err", err)
+	}
+	if _, err := s.repo.deliveries.UpdateMany(ctx,
+		bson.D{{Key: "order_id", Value: orderID}, {Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: "duplicate promo pack retracted"}, {Key: "updated_at", Value: time.Now().UTC()}}}},
+	); err != nil {
+		s.log.Warn("crm: losing-delivery retract failed", "order", orderID, "err", err)
+	}
 }
 
 // crmCreateSubscription creates the campaign's NORMAL daily plan: the offer
@@ -500,74 +593,132 @@ func (s *service) mintPromoPackOrder(ctx context.Context, acct *account, addr *a
 }
 
 // crmOnPackDelivered advances the state machine when a promotional order
-// settles as delivered. Compare-and-set: replays are no-ops.
-func (s *service) crmOnPackDelivered(ctx context.Context, consumerID primitive.ObjectID, packNo int, orderID string) {
+// settles as delivered. Compare-and-set: replays are no-ops. A transient error
+// returns non-nil so the outbox retries the event (the CAS makes that safe).
+func (s *service) crmOnPackDelivered(ctx context.Context, consumerID primitive.ObjectID, packNo int, orderID string) error {
 	now := time.Now().UTC()
 	switch packNo {
 	case 1:
 		moved, err := s.repo.transitionPack(ctx, consumerID, 1, pack1Pending, pack1Delivered,
 			"promotional order "+orderID+" delivered",
 			bson.D{{Key: "first_delivery_at", Value: now}})
-		if err != nil || !moved {
-			return
+		if err != nil {
+			return err
+		}
+		if !moved {
+			return nil // replay — already delivered
 		}
 		s.emitCRMEvent(ctx, "offer_pack_state_change", consumerID, map[string]any{"pack_no": 1, "from": pack1Pending, "to": pack1Delivered})
 		s.crmDispatch(ctx, "W-02", consumerID, map[string]string{})
 	case 2:
 		moved, err := s.repo.transitionPack(ctx, consumerID, 2, pack2Pending, pack2Delivered,
 			"promotional order "+orderID+" delivered", nil)
-		if err != nil || !moved {
-			return
+		if err != nil {
+			return err
+		}
+		if !moved {
+			return nil
 		}
 		s.emitCRMEvent(ctx, "offer_pack_state_change", consumerID, map[string]any{"pack_no": 2, "from": pack2Pending, "to": pack2Delivered})
-		s.crmDispatch(ctx, "W-05", consumerID, map[string]string{})
+		// C-01 product labelling: the token resolves from the ORDER LINE, never
+		// the customer record — "{product_name} — delivered by PYAAS".
+		s.crmDispatch(ctx, "W-05", consumerID, map[string]string{
+			"labelled_product": s.crmLabelledProduct(ctx, orderID),
+		})
 	}
+	return nil
+}
+
+// crmLabelledProduct renders the C-01 supply-source label from the order line.
+func (s *service) crmLabelledProduct(ctx context.Context, orderID string) string {
+	name := "500 ml Parag Full Cream"
+	if o, err := s.repo.findOrderAnyUser(ctx, orderID); err == nil && o != nil && len(o.Items) > 0 && o.Items[0].Name != "" {
+		name = o.Items[0].Name
+	}
+	return name + " — delivered by PYAAS"
 }
 
 // crmOnRechargeSettled is the W-04 release: SETTLED funds only (the caller sits
 // past the wallet's exactly-once gate), threshold from config in paise
-// converted here once, grace window measured from first delivery.
-func (s *service) crmOnRechargeSettled(ctx context.Context, consumerID primitive.ObjectID, amountRupees float64) {
+// converted here once. The grace window uses the SAME IST-day arithmetic as
+// the expiry sweep (one predicate family — no wall-clock/day-boundary gap):
+//   - recharge BEFORE pack 1 lands (the excited signup) → unlocks;
+//   - recharge any time up to and including day <grace> (the very date the
+//     W-06 nudge advertises) → unlocks;
+//   - the sweep expires only from day grace+1, so no settled recharge inside
+//     the advertised window can ever be discarded.
+//
+// A transient error returns non-nil so the outbox retries; a pack stuck
+// PENDING with no order (mint failed mid-flight) is RESUMED on the retry.
+func (s *service) crmOnRechargeSettled(ctx context.Context, consumerID primitive.ObjectID, amountRupees float64) error {
 	cfg := crmOfferConfig()
 	threshold := float64(cfg.Pack2MinRechargePaise) / 100.0
 	if amountRupees+1e-9 < threshold {
-		return
+		return nil
 	}
 	o, err := s.repo.findOffer(ctx, consumerID)
-	if err != nil || o == nil || o.OfferID != offerWelcomeLitre {
-		return
+	if err != nil {
+		return err
+	}
+	if o == nil || o.OfferID != offerWelcomeLitre {
+		return nil
 	}
 	if cfg.PacksInEntitlement < 2 {
-		return // single-pack configuration: W-04..W-07 no-op by design
+		return nil // single-pack configuration: W-04..W-07 no-op by design
 	}
-	if o.Pack2State != pack2Locked || o.FirstDeliveryAt == nil {
-		return
+	if o.FirstDeliveryAt != nil && daysSinceFirstDelivery(o, time.Now()) > cfg.Pack2GraceDays {
+		return nil // grace passed; the sweep owns the expiry + message
 	}
-	if time.Since(*o.FirstDeliveryAt) > time.Duration(cfg.Pack2GraceDays)*24*time.Hour {
-		return // grace passed; the day-7 sweep owns the expiry + message
+	switch o.Pack2State {
+	case pack2Locked:
+		moved, terr := s.repo.transitionPack(ctx, consumerID, 2, pack2Locked, pack2Pending,
+			fmt.Sprintf("settled recharge ₹%.2f >= ₹%.2f", amountRupees, threshold), nil)
+		if terr != nil {
+			return terr
+		}
+		if !moved {
+			return nil // raced with a twin event — that one owns the mint
+		}
+		s.emitCRMEvent(ctx, "offer_pack_state_change", consumerID, map[string]any{"pack_no": 2, "from": pack2Locked, "to": pack2Pending})
+	case pack2Pending:
+		if o.Pack2OrderID != "" {
+			return nil // fully unlocked already — pure replay
+		}
+		// pending-without-order: a previous attempt died after the CAS — resume.
+	default:
+		return nil // delivered/expired — nothing to do
 	}
-	moved, err := s.repo.transitionPack(ctx, consumerID, 2, pack2Locked, pack2Pending,
-		fmt.Sprintf("settled recharge ₹%.2f >= ₹%.2f", amountRupees, threshold), nil)
-	if err != nil || !moved {
-		return
-	}
-	s.emitCRMEvent(ctx, "offer_pack_state_change", consumerID, map[string]any{"pack_no": 2, "from": pack2Locked, "to": pack2Pending})
 
 	// Schedule pack 2 as its own ₹0 order for the next morning ("scheduled onto
 	// the next delivery" — the rider carries it with that morning's paid order).
 	acct, aerr := s.repo.findAccountByID(ctx, consumerID)
-	addr, derr := s.subscriptionAddress(ctx, consumerID)
-	if aerr == nil && derr == nil && acct != nil && addr != nil {
-		day := istDay(time.Now().Add(24 * time.Hour))
-		if p2, perr := s.mintPromoPackOrder(ctx, acct, addr, day, 2); perr == nil {
-			_, _ = s.repo.offers().UpdateOne(ctx,
-				bson.D{{Key: "consumer_id", Value: consumerID}},
-				bson.D{{Key: "$set", Value: bson.D{{Key: "pack2_order_id", Value: p2.OrderID}, {Key: "updated_at", Value: time.Now().UTC()}}}})
-		} else {
-			s.log.Warn("crm: pack2 mint failed", "consumer", consumerID.Hex(), "err", perr)
-		}
+	if aerr != nil || acct == nil {
+		return errInternal("crm: pack2 account lookup failed")
 	}
+	addr, derr := s.subscriptionAddress(ctx, consumerID)
+	if derr != nil || addr == nil {
+		return errInternal("crm: pack2 address lookup failed")
+	}
+	day := istDay(time.Now().Add(24 * time.Hour))
+	p2, perr := s.mintPromoPackOrder(ctx, acct, addr, day, 2)
+	if perr != nil {
+		return perr // event retries; state=pending resumes here
+	}
+	res, uerr := s.repo.offers().UpdateOne(ctx,
+		bson.D{
+			{Key: "consumer_id", Value: consumerID},
+			{Key: "pack2_order_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+		},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "pack2_order_id", Value: p2.OrderID}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+	if uerr != nil || res.ModifiedCount == 0 {
+		// Lost to a concurrent resume — retract our duplicate pack.
+		s.crmRetractPromoOrder(ctx, p2.OrderID)
+		return nil
+	}
+	// W-04 only AFTER the pack is really minted (never promise milk that has no
+	// order behind it); the dispatch-log claim dedupes retries.
 	s.crmDispatch(ctx, "W-04", consumerID, map[string]string{})
+	return nil
 }
 
 // markHasPaidOrder sets the CH-19 fact on the first order whose SETTLED value
@@ -575,6 +726,9 @@ func (s *service) crmOnRechargeSettled(ctx context.Context, consumerID primitive
 // guarantees amount > 0). Fire-and-forget; a miss self-heals on the next paid
 // settle.
 func (s *service) markHasPaidOrder(ctx context.Context, consumerID primitive.ObjectID) {
+	if !crmEnabled() {
+		return // CRM off → zero extra writes on the settle path
+	}
 	_, _ = s.repo.accounts.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: consumerID}, {Key: "has_paid_order", Value: bson.D{{Key: "$ne", Value: true}}}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "has_paid_order", Value: true}, {Key: "updated_at", Value: time.Now().UTC()}}}})

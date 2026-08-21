@@ -128,8 +128,19 @@ func (h *handler) crmMyOffer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enrolled": false, "entitled_free_deliveries": 0})
 		return
 	}
+	// WHITELISTED view — the raw doc carries abuse_flagged, operator party ids
+	// in the transition log, and promoter attribution: fraud-relevant internals
+	// a customer must never read off their own wire traffic. The operator
+	// route (crmOfferByPhone) keeps the full document.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enrolled": true, "offer": o,
+		"enrolled": true,
+		"offer": map[string]any{
+			"offer_id":        o.OfferID,
+			"enrolled_at":     o.EnrolledAt,
+			"pack1_state":     o.Pack1State,
+			"pack2_state":     o.Pack2State,
+			"subscription_id": o.SubscriptionID,
+		},
 		"entitled_free_deliveries": entitledFreeDeliveries(o),
 	})
 }
@@ -137,6 +148,10 @@ func (h *handler) crmMyOffer(w http.ResponseWriter, r *http.Request) {
 // ── Operator console (the handover profile) ────────────────────────────────
 
 func (h *handler) crmEnrolHandler(w http.ResponseWriter, r *http.Request) {
+	if !crmEnabled() {
+		writeErr(w, errForbidden("CRM is not enabled"))
+		return
+	}
 	actor, _ := operatorActor(r)
 	var in crmEnrolInput
 	if err := decode(r, &in); err != nil {
@@ -179,8 +194,12 @@ func (h *handler) crmComposeMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errNotFound("no customer with that phone"))
 		return
 	}
-	cat := in.Category
-	if cat == "" {
+	// Category decides which guards apply, so it is a CLOSED enum: an operator
+	// send is promotional (full consent/opt-out/quiet-hours/caps chain) unless
+	// explicitly declared service_implicit. Unknown values fail CLOSED into
+	// promotional — never into a guard-free lane.
+	cat := "promotional"
+	if in.Category == "service_implicit" || in.Category == "service" {
 		cat = "service_implicit"
 	}
 	t := crmTrigger{
@@ -213,6 +232,10 @@ func (h *handler) crmComposeMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) crmOfferByPhone(w http.ResponseWriter, r *http.Request) {
+	if !crmEnabled() {
+		writeErr(w, errForbidden("CRM is not enabled"))
+		return
+	}
 	acct, err := h.svc.repo.findAccountByPhone(r.Context(), crmCanonicalPhone(normalizePhone(chi.URLParam(r, "phone"))))
 	if err != nil || acct == nil {
 		writeErr(w, errNotFound("no customer with that phone"))
@@ -233,6 +256,10 @@ func (h *handler) crmOfferByPhone(w http.ResponseWriter, r *http.Request) {
 // (spec: "Delivery exceptions happen and support must be able to honour a
 // pack without a developer"). Every override lands in the transition log.
 func (h *handler) crmOverrideOffer(w http.ResponseWriter, r *http.Request) {
+	if !crmEnabled() {
+		writeErr(w, errForbidden("CRM is not enabled"))
+		return
+	}
 	actor, _ := operatorActor(r)
 	var in struct {
 		PackNo int    `json:"pack_no"`
@@ -273,6 +300,10 @@ func (h *handler) crmOverrideOffer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) crmDispatchLog(w http.ResponseWriter, r *http.Request) {
+	if !crmEnabled() {
+		writeErr(w, errForbidden("CRM is not enabled"))
+		return
+	}
 	acct, err := h.svc.repo.findAccountByPhone(r.Context(), crmCanonicalPhone(normalizePhone(chi.URLParam(r, "phone"))))
 	if err != nil || acct == nil {
 		writeErr(w, errNotFound("no customer with that phone"))
@@ -305,6 +336,10 @@ func (h *handler) crmDispatchLog(w http.ResponseWriter, r *http.Request) {
 // deploy, restricted to the crm.* namespace so this route can never touch
 // platform flags.
 func (h *handler) crmSetFlag(w http.ResponseWriter, r *http.Request) {
+	if !crmEnabled() {
+		writeErr(w, errForbidden("CRM is not enabled"))
+		return
+	}
 	actor, _ := operatorActor(r)
 	var in struct {
 		TriggerID string `json:"trigger_id"`

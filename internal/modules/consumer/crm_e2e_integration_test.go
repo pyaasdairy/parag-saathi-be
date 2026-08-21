@@ -269,6 +269,44 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 		t.Fatal("duplicate-address enrolment must carry the abuse flag")
 	}
 
+	// ── 7b) RECHARGE BEFORE DELIVERY (the excited signup): household #3 has
+	// pack 1 still pending — a settled ₹500 must unlock pack 2 anyway. The
+	// grace window can't have started before the first delivery exists.
+	cid3, _ := primitive.ObjectIDFromHex(res3.ConsumerID)
+	if _, err := svc.creditTopup(ctx, cid3, 500, "razorpay", "e2e-rzp-3"); err != nil {
+		t.Fatalf("pre-delivery topup: %v", err)
+	}
+	svc.crmProcessEvents(ctx)
+	off3 := mustOffer(t, ctx, svc, cid3)
+	if off3.Pack2State != pack2Pending || off3.Pack2OrderID == "" {
+		t.Fatalf("recharge BEFORE pack-1 delivery must still unlock pack 2: %+v", off3)
+	}
+
+	// ── 7c) DAY-7 BOUNDARY: the W-06 nudge advertises day 7's DATE, so a
+	// day-7 recharge must unlock and the sweep must NOT expire until day 8.
+	res5, err := svc.crmEnrol(ctx, "e2e-operator", crmEnrolInput{
+		Phone: "9000000045", Name: "Boundary Household", Line1: "Flat 901, E2E Tower",
+		Pincode: "226030", Lat: 26.7729, Lng: 81.0161,
+	})
+	if err != nil {
+		t.Fatalf("enrol #5: %v", err)
+	}
+	cid5, _ := primitive.ObjectIDFromHex(res5.ConsumerID)
+	deliverOrder(t, ctx, svc, repo, db, res5.Pack1OrderID)
+	svc.crmProcessEvents(ctx)
+	forceFirstDelivery(t, db, cid5, time.Now().In(istZone).AddDate(0, 0, -7)) // today = day 7
+	svc.crmProcessSchedules(ctx, time.Now().In(istZone))                      // must NOT expire on day 7
+	if o5 := mustOffer(t, ctx, svc, cid5); o5.Pack2State != pack2Locked {
+		t.Fatalf("sweep expired pack 2 ON day 7 — the advertised recharge day: %s", o5.Pack2State)
+	}
+	if _, err := svc.creditTopup(ctx, cid5, 500, "razorpay", "e2e-rzp-5"); err != nil {
+		t.Fatalf("day-7 topup: %v", err)
+	}
+	svc.crmProcessEvents(ctx)
+	if o5 := mustOffer(t, ctx, svc, cid5); o5.Pack2State != pack2Pending || o5.Pack2OrderID == "" {
+		t.Fatalf("day-7 recharge (the advertised deadline) must unlock pack 2: %+v", o5)
+	}
+
 	// ── 8) OFF SWITCH: with CRM disabled, dispatch + schedules are inert ──
 	t.Setenv("CRM_ENABLED", "")
 	before := inboxTotal(t, db)

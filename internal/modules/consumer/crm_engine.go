@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -133,21 +134,28 @@ type crmConfig struct {
 		PromoPerDay     int
 		PromoPerWeek    int
 		DedupMinutes    int
+		ConsentTTLDays  int // TCCCPR: explicit promo consent expires after N days
 	}
 	Triggers  map[string]crmTrigger
 	Templates map[string]crmTemplate
 	Offer     crmOffer
 }
 
-var crmCfg *crmConfig
+var (
+	crmCfg     *crmConfig
+	crmCfgOnce sync.Once
+)
 
-// crmConfigLoad parses the embedded JSON once. Panics on a malformed embed at
-// BOOT (a broken config must never reach runtime silently) — but only when the
-// CRM is actually enabled; a disabled binary never parses it.
+// crmConfigLoad parses the embedded JSON once (sync.Once — the worker
+// goroutine and HTTP handlers race here on first use). Panics on a malformed
+// embed (a broken config must never reach runtime silently) — but only when
+// the CRM is actually enabled; a disabled binary never parses it.
 func crmConfigLoad() *crmConfig {
-	if crmCfg != nil {
-		return crmCfg
-	}
+	crmCfgOnce.Do(crmConfigParse)
+	return crmCfg
+}
+
+func crmConfigParse() {
 	var raw struct {
 		Guards map[string]json.RawMessage `json:"guards"`
 		Config struct {
@@ -193,6 +201,15 @@ func crmConfigLoad() *crmConfig {
 			c.Guards.PromoPerDay, c.Guards.PromoPerWeek = f.Promotional.PerDay, f.Promotional.PerWeek
 		}
 	}
+	c.Guards.ConsentTTLDays = 7
+	if g, ok := raw.Guards["G2_consent"]; ok {
+		var t struct {
+			TTLDays int `json:"explicit_consent_ttl_days"`
+		}
+		if json.Unmarshal(g, &t) == nil && t.TTLDays > 0 {
+			c.Guards.ConsentTTLDays = t.TTLDays
+		}
+	}
 	if g, ok := raw.Guards["G8_dedup_window"]; ok {
 		var d struct {
 			WindowMinutes int `json:"window_minutes"`
@@ -220,7 +237,6 @@ func crmConfigLoad() *crmConfig {
 		c.Offer.Pack2GraceDays = 7
 	}
 	crmCfg = c
-	return c
 }
 
 func crmOfferConfig() crmOffer { return crmConfigLoad().Offer }
@@ -232,7 +248,9 @@ type crmEvent struct {
 	Topic      string             `bson:"topic"`
 	ConsumerID primitive.ObjectID `bson:"consumer_id,omitempty"`
 	Payload    map[string]any     `bson:"payload,omitempty"`
-	Status     string             `bson:"status"` // NEW | DONE
+	Status     string             `bson:"status"` // NEW | PROCESSING | DONE | FAILED
+	Attempts   int                `bson:"attempts,omitempty"`
+	ClaimedAt  *time.Time         `bson:"claimed_at,omitempty"`
 	CreatedAt  time.Time          `bson:"created_at"`
 }
 
@@ -335,10 +353,15 @@ func (s *service) crmTriggerKilled(ctx context.Context, triggerID string) bool {
 }
 
 func (s *service) crmHasPromoConsent(ctx context.Context, consumerID primitive.ObjectID) bool {
+	// C-04 / TCCCPR: explicit promotional consent EXPIRES — only a grant made
+	// within the configured TTL counts. Fail closed on any error.
+	ttl := crmConfigLoad().Guards.ConsentTTLDays
+	since := time.Now().UTC().AddDate(0, 0, -ttl)
 	n, err := s.repo.consents.CountDocuments(ctx, bson.D{
 		{Key: "consumer_id", Value: consumerID},
 		{Key: "kind", Value: "promotional"},
 		{Key: "revoked_at", Value: nil},
+		{Key: "created_at", Value: bson.D{{Key: "$gte", Value: since}}},
 	})
 	return err == nil && n > 0
 }
@@ -598,8 +621,14 @@ func (s *service) crmWorker(ctx context.Context) {
 		return
 	}
 	s.log.Info("crm worker armed (self-gates on CRM_ENABLED each tick)")
+	indexed := false
 	for {
 		if crmEnabled() {
+			// The exactly-once machinery RIDES the unique indexes — a boot-time
+			// failure (cold Mongo, deploy blip) must be retried, not accepted.
+			if !indexed {
+				indexed = s.ensureCRMIndexes(ctx)
+			}
 			s.crmProcessEvents(ctx)
 			s.crmProcessSchedules(ctx, time.Now())
 		}
@@ -611,24 +640,47 @@ func (s *service) crmWorker(ctx context.Context) {
 	}
 }
 
-// crmProcessEvents drains the outbox: claim NEW → route → DONE. Event rows
-// are claimed one-by-one with a CAS so replicas cannot double-process.
+// crmProcessEvents drains the outbox AT-LEAST-ONCE: claim NEW → PROCESSING
+// (a lease, so replicas cannot double-process and a crash cannot lose the
+// event) → route → DONE on success, back to NEW on a transient error (capped
+// at 5 attempts → FAILED + log). All route side effects are CAS/claim-
+// idempotent, so replays are harmless — losing an event was not.
 func (s *service) crmProcessEvents(ctx context.Context) {
 	col := s.repo.accounts.Database().Collection(collCRMEvents)
+	now := time.Now().UTC()
+	// Crash recovery: a PROCESSING lease older than 10 minutes belongs to a
+	// dead worker — hand the event back to the queue.
+	_, _ = col.UpdateMany(ctx,
+		bson.D{{Key: "status", Value: "PROCESSING"}, {Key: "claimed_at", Value: bson.D{{Key: "$lt", Value: now.Add(-10 * time.Minute)}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "NEW"}}}})
 	for i := 0; i < 200; i++ { // bounded per tick
 		var ev crmEvent
 		err := col.FindOneAndUpdate(ctx,
 			bson.D{{Key: "status", Value: "NEW"}},
-			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "DONE"}}}},
+			bson.D{
+				{Key: "$set", Value: bson.D{{Key: "status", Value: "PROCESSING"}, {Key: "claimed_at", Value: time.Now().UTC()}}},
+				{Key: "$inc", Value: bson.D{{Key: "attempts", Value: 1}}},
+			},
 			options.FindOneAndUpdate().SetSort(bson.D{{Key: "created_at", Value: 1}})).Decode(&ev)
 		if err != nil {
 			return // drained (or transient — next tick retries)
 		}
-		s.crmRouteEvent(ctx, ev)
+		if rerr := s.crmRouteEvent(ctx, ev); rerr != nil {
+			next := "NEW"
+			if ev.Attempts >= 5 {
+				next = "FAILED"
+				s.log.Warn("crm: event failed permanently", "topic", ev.Topic, "consumer", ev.ConsumerID.Hex(), "err", rerr)
+			}
+			_, _ = col.UpdateOne(ctx, bson.D{{Key: "_id", Value: ev.ID}},
+				bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: next}}}})
+			continue
+		}
+		_, _ = col.UpdateOne(ctx, bson.D{{Key: "_id", Value: ev.ID}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "DONE"}}}})
 	}
 }
 
-func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) {
+func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) error {
 	switch ev.Topic {
 	case "order.delivered":
 		packNo, _ := ev.Payload["offer_pack"].(int32)
@@ -637,20 +689,18 @@ func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) {
 		n := int(packNo) + int(packNo64) + int(packF)
 		orderID, _ := ev.Payload["order_id"].(string)
 		if n > 0 {
-			s.crmOnPackDelivered(ctx, ev.ConsumerID, n, orderID)
+			return s.crmOnPackDelivered(ctx, ev.ConsumerID, n, orderID)
 		}
 	case "wallet.recharge_settled":
 		amt, _ := ev.Payload["amount"].(float64)
-		s.crmOnRechargeSettled(ctx, ev.ConsumerID, amt)
+		return s.crmOnRechargeSettled(ctx, ev.ConsumerID, amt)
 	case "waitlist.joined":
-		// W-08 — one message, ever, and only when the phone maps to an account
-		// (the inbox is account-keyed; SMS to non-customers arrives in Phase B).
-		if phone, _ := ev.Payload["phone"].(string); phone != "" {
-			if acct, err := s.repo.findAccountByPhone(ctx, crmCanonicalPhone(normalizePhone(phone))); err == nil && acct != nil {
-				s.crmDispatch(ctx, "W-08", acct.ID, nil)
-			}
-		}
+		// Recorded for analytics only. The W-08 message ships in Phase B over
+		// SMS with its own rate limits — the join endpoint is UNAUTHENTICATED,
+		// so writing into an existing account's inbox keyed on an attacker-
+		// supplied phone would be a spam vector, not a feature.
 	}
+	return nil
 }
 
 // crmProcessSchedules evaluates every time-based W trigger for every LIVE
@@ -686,12 +736,20 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 			if (day == 3 || day == 5) && o.Pack2State == pack2Locked {
 				s.crmDispatch(ctx, "W-06", o.ConsumerID, nil)
 			}
-			if day >= crmOfferConfig().Pack2GraceDays && o.Pack2State == pack2Locked {
-				// W-07 closes the offer: expire FIRST (CAS), then the mandatory
-				// "nothing has been charged" message.
+			// Expiry fires from the day AFTER the advertised window: W-06 names
+			// day <grace>'s DATE, and the recharge unlock honours that whole
+			// day (same IST-day predicate) — so the sweep may only close the
+			// offer from day grace+1.
+			if day > crmOfferConfig().Pack2GraceDays && o.Pack2State == pack2Locked {
+				// The MANDATORY "nothing has been charged" message goes FIRST
+				// (the dispatch-log claim + per-offer cap make it exactly-once);
+				// only then the irreversible CAS. A transient send failure
+				// leaves the state locked, so the next tick retries BOTH —
+				// dispatch-then-expire is at-least-once, expire-then-dispatch
+				// silently lost the spec's one non-negotiable message.
+				s.crmDispatch(ctx, "W-07", o.ConsumerID, nil)
 				if moved, _ := s.repo.transitionPack(ctx, o.ConsumerID, 2, pack2Locked, pack2Expired, "grace window elapsed", nil); moved {
 					s.emitCRMEvent(ctx, "offer_pack_state_change", o.ConsumerID, map[string]any{"pack_no": 2, "from": pack2Locked, "to": pack2Expired})
-					s.crmDispatch(ctx, "W-07", o.ConsumerID, nil)
 				}
 			}
 		}
@@ -713,8 +771,12 @@ func (s *service) crmReconcile(ctx context.Context, day string) {
 	}
 	start, _ := time.ParseInLocation("2006-01-02", day, istZone)
 	end := start.Add(24 * time.Hour)
+	// Pack-1 orders ONLY: pack-2 mints follow recharges days after enrolment,
+	// so counting them against same-day enrolments would page the admins with
+	// a false stop-loss alert on every healthy pack-2 day.
 	packs, _ := s.repo.orders.CountDocuments(ctx, bson.D{
 		{Key: "offer_id", Value: offerWelcomeLitre},
+		{Key: "offer_pack", Value: 1},
 		{Key: "created_at", Value: bson.D{{Key: "$gte", Value: start.UTC()}, {Key: "$lt", Value: end.UTC()}}},
 	})
 	consumers, _ := s.repo.offers().CountDocuments(ctx, bson.D{
