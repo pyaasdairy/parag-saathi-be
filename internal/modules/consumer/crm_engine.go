@@ -66,6 +66,10 @@ type crmTrigger struct {
 	Template     crmTemplateRef `json:"template"`
 	Section      string         `json:"section"`
 	FrequencyCap map[string]any `json:"frequency_cap"`
+	// Delivery is the config's per-trigger channel routing (primary / parallel /
+	// fallback) — consumed by the Phase B transports in crm_channels.go. The
+	// in-app inbox is NOT listed there; it always runs (Phase A behaviour).
+	Delivery crmDelivery `json:"delivery"`
 }
 
 // crmTemplateRef tolerates the three shapes the Rev3 config actually uses for
@@ -543,12 +547,30 @@ func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerI
 	for k, v := range params {
 		std[k] = v
 	}
+	// The in-app inbox ALWAYS runs (Phase A behaviour, audit-visible), then the
+	// Phase B transports (SMS / WhatsApp) run the trigger's delivery routing.
+	// With no channel keys set crmTransports() is nil, delivered is exactly
+	// {"inapp"} (or empty on an inbox error) and both the SENT and SUPPRESSED
+	// rows are byte-identical to Phase A.
+	// (No log on an inbox failure — HEAD had none, and the keys-unset path must
+	// stay byte-identical; the SUPPRESSED G9 row below is the audit record.)
 	ch := inappChannel{}
-	if err := ch.Send(ctx, s, consumerID, t, tpl, std); err != nil {
+	delivered := make([]string, 0, 3)
+	if err := ch.Send(ctx, s, consumerID, t, tpl, std); err == nil {
+		delivered = append(delivered, ch.Name())
+	}
+	if ext := s.crmTransports(); len(ext) > 0 {
+		if phone, err := s.crmDeliveryPhone(ctx, consumerID); err != nil {
+			s.log.Warn("crm: no deliverable phone for external channels", "trigger", t.ID, "consumer", consumerID.Hex(), "err", err)
+		} else {
+			delivered = append(delivered, crmDeliverExternal(ctx, s.log, phone, t, tpl, std, ext)...)
+		}
+	}
+	if len(delivered) == 0 {
 		s.crmFinishDispatch(ctx, row, "SUPPRESSED", "G9_channel_availability", ch.Name())
 		return
 	}
-	s.crmFinishDispatch(ctx, row, "SENT", "", ch.Name())
+	s.crmFinishDispatch(ctx, row, "SENT", "", strings.Join(delivered, "+"))
 }
 
 // crmStandardParams resolves the placeholders every template may carry.
