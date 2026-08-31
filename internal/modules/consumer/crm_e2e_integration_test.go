@@ -622,3 +622,155 @@ func forceFirstDelivery(t *testing.T, db *mongo.Database, cid primitive.ObjectID
 func e2eActor(partyID string) auth.Actor {
 	return auth.Actor{PartyID: partyID, Kind: "role", RoleCode: "DELIVERY_RIDER"}
 }
+
+// TestCommerceFunnelE2E walks the COMMERCE lifecycle — product buy → rider
+// claim → pickup → delivered → wallet settle — for a NEW user and an EXISTING
+// user, asserting the SALES-FUNNEL state (GET /crm/eligibility's answer) at
+// every checkpoint. Proves the Welcome Litre engine and the ordinary shop
+// coexist without touching each other's money or state.
+func TestCommerceFunnelE2E(t *testing.T) {
+	uri := os.Getenv("CONSUMER_MONGO_TEST_URI")
+	if uri == "" {
+		t.Skip("set CONSUMER_MONGO_TEST_URI to run the commerce E2E")
+	}
+	t.Setenv("CRM_ENABLED", "true")
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
+	if err != nil {
+		t.Fatalf("mongo connect: %v", err)
+	}
+	defer client.Disconnect(ctx)
+	db := client.Database("consumer_commerce_e2e_test")
+	_ = db.Drop(ctx)
+	defer db.Drop(ctx)
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d := &deps.Deps{Cfg: &config.Config{JWTSecret: "commerce-e2e"}, Log: log, DB: db,
+		Flags: flags.NewService(db), Bus: eventbus.New(log)}
+	repo := newRepository(db)
+	svc := newService(d, repo, log)
+	svc.ensureCRMIndexes(ctx)
+	if _, err := db.Collection("org_units").InsertOne(ctx, bson.D{
+		{Key: "type", Value: "STORE"}, {Key: "active", Value: true},
+		{Key: "name", Value: "PYAAS Commerce Store"},
+		{Key: "geo_lat", Value: 26.7700}, {Key: "geo_lng", Value: 81.0100},
+	}); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	price := 35.0
+	if _, err := db.Collection(collCatalog).InsertOne(ctx, catalogDoc{
+		SkuID: "gold-500ml", Kind: catalogKindProduct, Price: &price,
+		Name: "Full Cream Milk - Parag Gold", Category: "milk",
+	}); err != nil {
+		t.Fatalf("seed catalog: %v", err)
+	}
+
+	// buyAndDeliver drives the REAL instant-lane lifecycle: order → OFFERED
+	// task → first-accept-wins claim → pickup → deliver (proof + settle).
+	buyAndDeliver := func(t *testing.T, cid primitive.ObjectID, rider string) *order {
+		t.Helper()
+		o, err := svc.createOrder(ctx, cid.Hex(), orderInput{
+			Items:         []orderItem{{ProductID: "gold-500ml", Name: "x", Price: 1, Qty: 2}},
+			PaymentMethod: "wallet", Lane: "instant", Priority: "normal",
+			Geo: &geoPoint{Lat: 26.7712, Lng: 81.0123},
+		})
+		if err != nil {
+			t.Fatalf("createOrder: %v", err)
+		}
+		if o.Total != 85 { // server repricing: 2 × ₹35 + ₹15 instant fee; client price ignored
+			t.Fatalf("server reprice: total=%v want 85", o.Total)
+		}
+		var task delivery
+		if err := db.Collection(collDeliveries).FindOne(ctx, bson.D{{Key: "order_id", Value: o.OrderID}}).Decode(&task); err != nil {
+			t.Fatalf("delivery task missing: %v", err)
+		}
+		if task.Status != "OFFERED" {
+			t.Fatalf("instant task must broadcast OFFERED: %s", task.Status)
+		}
+		ra := e2eActor(rider)
+		if _, err := svc.claimOfferedDelivery(ctx, ra, task.ID); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		// Second rider loses the first-accept-wins race.
+		if _, err := svc.claimOfferedDelivery(ctx, e2eActor("late-rider"), task.ID); err == nil {
+			t.Fatal("second claim must be refused")
+		}
+		if _, err := svc.pickupDelivery(ctx, ra, task.ID); err != nil {
+			t.Fatalf("pickup: %v", err)
+		}
+		if _, err := svc.deliverDelivery(ctx, ra, task.ID, deliverInput{
+			ProofPhoto: "https://s3.example/p.jpg",
+			Geo:        &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true,
+		}); err != nil {
+			t.Fatalf("deliver: %v", err)
+		}
+		return o
+	}
+
+	// ── NEW USER: funded wallet, buys BEFORE ever touching the offer ──
+	newAcct := &account{ID: primitive.NewObjectID(), Phone: "+919000000060", Status: "ACTIVE",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := repo.insertAccount(ctx, newAcct); err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	nLat, nLng := 26.7712, 81.0123
+	_, _ = repo.addresses.InsertOne(ctx, &address{ID: primitive.NewObjectID(), ConsumerID: newAcct.ID,
+		Label: "Home", Line1: "Shop St 1", Pincode: "226030", IsDefault: true,
+		Lat: &nLat, Lng: &nLng, CreatedAt: time.Now().UTC()})
+	if _, err := svc.creditTopup(ctx, newAcct.ID, 500, "razorpay", "e2e-com-1"); err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+	svc.crmProcessEvents(ctx) // no offer → the recharge event is a clean no-op
+	// FUNNEL before buying: a fresh, in-zone household reads eligible.
+	if st, _ := svc.crmEligibility(ctx, newAcct.ID); st != "eligible" {
+		t.Fatalf("fresh funded user funnel = %q, want eligible", st)
+	}
+	o1 := buyAndDeliver(t, newAcct.ID, "rider-A")
+	// Wallet debited at the door, exactly once.
+	wv, _ := svc.wallet(ctx, newAcct.ID)
+	if wv.Available != 415 { // 500 - (70 + ₹15 instant fee)
+		t.Fatalf("wallet after paid delivery: %v want 415", wv.Available)
+	}
+	if !hasPaid(t, db, newAcct.ID) {
+		t.Fatal("paid settle must set has_paid_order")
+	}
+	// FUNNEL after buying: a PAYING household is no longer pitched the offer.
+	if st, _ := svc.crmEligibility(ctx, newAcct.ID); st != "not_eligible" {
+		t.Fatalf("paying user funnel = %q, want not_eligible", st)
+	}
+	// And self-enrol is refused server-side even if the app somehow asked.
+	if _, err := svc.crmSelfEnrol(ctx, newAcct.ID, crmEnrolInput{}); err == nil {
+		t.Fatal("paying customer self-enrol must be refused")
+	}
+	_ = o1
+
+	// ── EXISTING USER: same commerce path, funnel stays hidden throughout ──
+	oldAcct := &account{ID: primitive.NewObjectID(), Phone: "+919000000061", Status: "ACTIVE",
+		HasPaidOrder: true, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := repo.insertAccount(ctx, oldAcct); err != nil {
+		t.Fatalf("existing account: %v", err)
+	}
+	_, _ = repo.addresses.InsertOne(ctx, &address{ID: primitive.NewObjectID(), ConsumerID: oldAcct.ID,
+		Label: "Home", Line1: "Shop St 2", Pincode: "226030", IsDefault: true,
+		Lat: &nLat, Lng: &nLng, CreatedAt: time.Now().UTC()})
+	if _, err := svc.creditTopup(ctx, oldAcct.ID, 200, "razorpay", "e2e-com-2"); err != nil {
+		t.Fatalf("existing topup: %v", err)
+	}
+	svc.crmProcessEvents(ctx)
+	if st, _ := svc.crmEligibility(ctx, oldAcct.ID); st != "not_eligible" {
+		t.Fatalf("existing user funnel = %q, want not_eligible", st)
+	}
+	buyAndDeliver(t, oldAcct.ID, "rider-B")
+	wv2, _ := svc.wallet(ctx, oldAcct.ID)
+	if wv2.Available != 115 { // 200 - 85
+		t.Fatalf("existing wallet after delivery: %v want 115", wv2.Available)
+	}
+	if st, _ := svc.crmEligibility(ctx, oldAcct.ID); st != "not_eligible" {
+		t.Fatal("existing user funnel must stay hidden after another purchase")
+	}
+	// The recharge events for non-enrolled users must never create offer state.
+	if o, _ := repo.findOffer(ctx, oldAcct.ID); o != nil {
+		t.Fatal("a plain shopper must have NO offer document")
+	}
+}
