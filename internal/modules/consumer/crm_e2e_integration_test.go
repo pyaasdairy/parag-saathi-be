@@ -164,8 +164,11 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	}
 
 	// ── 3) SCHEDULES, day 0, unfunded: W-03a fires once and only once ──
-	sched := time.Date(2026, 8, 21, 11, 0, 0, 0, istZone)
-	// pin "today" to the delivery day so day-diff = 0
+	// Anchor on TODAY (not a frozen date): step 4's recharge runs on the real
+	// clock, and the IST-day grace predicate must see day 0 — a hardcoded
+	// date made this test rot after seven days.
+	nowIST := time.Now().In(istZone)
+	sched := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 11, 0, 0, 0, istZone)
 	forceFirstDelivery(t, db, cid, sched.Add(-6*time.Hour))
 	svc.crmProcessSchedules(ctx, sched)
 	svc.crmProcessSchedules(ctx, sched.Add(5*time.Minute)) // same day again — dedup
@@ -224,7 +227,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	svc.crmProcessEvents(ctx)
 	// Pretend pack 1 landed 8 days ago; day-3 nudge then day-7 expiry.
 	forceFirstDelivery(t, db, cid2, time.Now().In(istZone).AddDate(0, 0, -8))
-	svc.crmProcessSchedules(ctx, time.Date(2026, 8, 29, 11, 0, 0, 0, istZone))
+	svc.crmProcessSchedules(ctx, sched.AddDate(0, 0, 8))
 	off2 := mustOffer(t, ctx, svc, cid2)
 	if off2.Pack2State != pack2Expired {
 		t.Fatalf("pack2 must expire past the grace window: %s", off2.Pack2State)
@@ -326,7 +329,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	}
 	svc.crmProcessEvents(ctx) // consume the recharge event (no offer → no-op)
 	// ₹50 wallet vs ₹70/day burn: cover 0.7 days < 4 → B-01 at the 09:00 sweep.
-	bday := time.Date(2026, 8, 25, 9, 5, 0, 0, istZone)
+	bday := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 9, 5, 0, 0, istZone).AddDate(0, 0, 4)
 	svc.crmProcessSchedules(ctx, bday)
 	if n := inboxCount(t, db, nAcct.ID, "B-01"); n != 1 {
 		t.Fatalf("B-01 low-balance nudge = %d rows, want 1", n)
@@ -336,14 +339,14 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 		t.Fatalf("B-01 must not repeat within the day: %d", n)
 	}
 	// 17:00: ₹50 cannot cover tomorrow's ₹70 → the critical B-02 cut-off alert.
-	svc.crmProcessSchedules(ctx, time.Date(2026, 8, 25, 17, 5, 0, 0, istZone))
+	svc.crmProcessSchedules(ctx, time.Date(bday.Year(), bday.Month(), bday.Day(), 17, 5, 0, 0, istZone))
 	if n := inboxCount(t, db, nAcct.ID, "B-02"); n != 1 {
 		t.Fatalf("B-02 shortfall alert = %d rows, want 1", n)
 	}
 	// Next day, still short: B-01 stays quiet (once per 7 days) but the
 	// critical B-02 fires again — the spec's critical_exempt_from_daily_cap.
-	nday := time.Date(2026, 8, 26, 17, 5, 0, 0, istZone)
-	svc.crmProcessSchedules(ctx, time.Date(2026, 8, 26, 9, 5, 0, 0, istZone))
+	nday := time.Date(bday.Year(), bday.Month(), bday.Day(), 17, 5, 0, 0, istZone).AddDate(0, 0, 1)
+	svc.crmProcessSchedules(ctx, time.Date(nday.Year(), nday.Month(), nday.Day(), 9, 5, 0, 0, istZone))
 	svc.crmProcessSchedules(ctx, nday)
 	if n := inboxCount(t, db, nAcct.ID, "B-01"); n != 1 {
 		t.Fatalf("B-01 repeated inside its 7-day cycle: %d", n)
