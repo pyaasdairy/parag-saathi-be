@@ -1,0 +1,18 @@
+# Keep the build context small and free of anything that is not source.
+# There was no .dockerignore at all, so every build uploaded the whole working
+# tree — the tracked `seed` binary included — to the Docker daemon.
+.git
+.github
+*.md
+!README.md
+docs/
+scripts/
+seed
+saathi-server
+saathi-seed
+.env
+.env.*
+!.env.example
+.air.toml
+*.log
+.DS_Store

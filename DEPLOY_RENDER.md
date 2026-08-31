@@ -16,8 +16,11 @@ ONBOARDING_EXECUTIVE `9876500014` — both with the fixture profile photo).
    `mongodb+srv://<user>:<password>@cluster0.gqgvsoc.mongodb.net`
    (credentials are in the local `backend/.env`; `MONGO_DB` is already
    `saathi_dev`.)
-   ⚠️ Atlas → Network Access → add `0.0.0.0/0` (or Render's egress IPs) so the
-   service can reach the cluster.
+   ⚠️ Atlas → Network Access: add **Render's static egress IPs**, listed on the
+   service's Connect page. `0.0.0.0/0` opens the cluster to the entire internet
+   — with a production database holding farmer PII and settlement records, the
+   Atlas username and password become the only thing standing in front of it,
+   and that pair sits in a `.env` on a laptop. Use the egress IPs.
 4. Deploy. Render builds the Dockerfile and starts `saathi-server`; the
    health check is `GET /healthz`.
 5. Verify: `curl https://saathi-backend.onrender.com/healthz` →
@@ -54,9 +57,18 @@ In `parag-saathi-fe`:
      (add `"preview": {"android": {"buildType": "apk"}}` under `build` in
      `eas.json` if not present).
 3. Install on any phone: `adb install app-release.apk` (or share the file).
-4. Smoke: log in as `9999999999` (Super Admin) — the OTP shows on-screen
-   (dev mode). Onboard everything else through the app as
-   `9876500014` (Onboarding Executive, Neha Tripathi).
+4. Smoke: log in as `9999999999` (Super Admin). **The OTP no longer shows
+   on-screen** — with `ENV=prod` the service refuses to start with
+   `OTP_DEV_MODE=true`, and it now also refuses to start without
+   `MSG91_AUTHKEY` + `MSG91_TEMPLATE_ID`, so the code arrives by real SMS.
+   Onboard everything else through the app as `9876500014`
+   (Onboarding Executive).
+
+   ⚠️ `9999999999` is a guessable phone on a SUPER_ADMIN party in the
+   production database. Once real SMS is live, anyone who knows the number can
+   request an OTP for it — the account's safety then rests entirely on nobody
+   else holding that SIM. Move the super admin to a real, controlled number
+   (`SEED_ADMIN_PHONE`) before go-live.
 
 ## 3 · What is intentionally left as env seams (add later, zero code changes)
 - Real SMS / push provider (`SMS_PROVIDER`, `PUSH_PROVIDER=expo` is free)

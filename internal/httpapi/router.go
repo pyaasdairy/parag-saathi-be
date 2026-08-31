@@ -32,7 +32,11 @@ func New(d *deps.Deps) http.Handler {
 	r.Use(middleware.RequestLogger(d.Log))
 	r.Use(middleware.RateLimit(d.RateLimiter))
 	r.Use(chimw.Recoverer)
-	r.Use(chimw.Timeout(30 * time.Second))
+	// NOTE: the 30s request deadline is applied to the MODULE routes only, not
+	// globally — see the /api/v1 mount below. Applied globally it also wrapped
+	// the SSE stream, whose whole purpose is to stay open: chimw.Timeout put a
+	// 30s deadline on r.Context(), sse.StreamHandler selects on ctx.Done(), and
+	// so every live dashboard was disconnected every 30 seconds.
 
 	// Unmatched routes and wrong methods must carry the same JSON error
 	// envelope every other response uses — never chi's plain-text defaults.
@@ -77,10 +81,20 @@ func New(d *deps.Deps) http.Handler {
 		// Live event stream (SSE) for already-open dashboards — any
 		// authenticated party; the hub targets events by role. Mounted here
 		// (cross-cutting, not owned by one domain module).
+		//
+		// Registered OUTSIDE the request-deadline group below: a long-lived
+		// stream must not carry a 30s deadline. Client disconnects still cancel
+		// it, because the request context is cancelled on connection close.
 		api.With(middleware.Authenticate(d.JWT), middleware.RequireSession).
 			Get("/events/stream", sse.StreamHandler(d.SSE))
 
-		RegisterModules(api, d)
+		// Every domain route gets the 30s deadline. Nothing under here is
+		// long-polling or streaming, so a request still running after 30s is
+		// stuck and should be shed.
+		api.Group(func(timed chi.Router) {
+			timed.Use(chimw.Timeout(30 * time.Second))
+			RegisterModules(timed, d)
+		})
 	})
 
 	return r

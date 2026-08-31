@@ -66,6 +66,13 @@ func TooManyRequests(msg string) *AppError {
 	return newErr(http.StatusTooManyRequests, "RATE_LIMITED", msg)
 }
 
+// TooManyRequestsCode is TooManyRequests with a specific machine-readable code,
+// for throttles the client must tell apart (an OTP resend cooldown reads very
+// differently to an attempt lockout, and the app words them differently).
+func TooManyRequestsCode(code, msg string) *AppError {
+	return newErr(http.StatusTooManyRequests, code, msg)
+}
+
 // Internal wraps an unexpected error. The cause is logged server-side but
 // never leaked to the client.
 func Internal(err error) *AppError {

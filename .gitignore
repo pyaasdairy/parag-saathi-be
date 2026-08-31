@@ -43,3 +43,12 @@ build-errors.log
 .terraform/
 .terraform.lock.hcl
 kubeconfig
+
+# Compiled binaries. `seed` (a 13 MB macOS arm64 build of cmd/seed) was tracked
+# at the repo root: it shipped a developer's local build to every clone, entered
+# every Docker build context, and embedded the demo roster it seeds. The
+# Dockerfile builds cmd/seed from source, so the binary never needed committing.
+/seed
+/saathi-server
+/saathi-seed
+*.exe

@@ -33,6 +33,14 @@ func Register(r chi.Router, d *deps.Deps) {
 		log.Error("consumer index setup failed — refusing to boot", slog.Any("err", err))
 		panic("consumer: index setup failed: " + err.Error())
 	}
+	// Rider-console indexes (rider_ops.go). Deliberately NON-fatal, unlike the
+	// money-gate indexes above: these are query indexes plus the unique
+	// (rider, day) attendance guard. A transient failure here degrades the
+	// rider console's speed, it does not put money at risk, so it must not
+	// take the whole backend down.
+	if err := repo.ensureRiderOpsIndexes(ctx); err != nil {
+		log.Warn("rider-ops index setup incomplete", slog.Any("err", err))
+	}
 
 	// Seed the baseline catalog products (idempotent, single BulkWrite). Runs
 	// AFTER the money-gate indexes and is deliberately NON-FATAL: unlike the
@@ -303,6 +311,13 @@ func Register(r chi.Router, d *deps.Deps) {
 				dr.Post("/delivery/tasks/{deliveryId}/location", h.riderLocation)
 				dr.Post("/delivery/tasks/{deliveryId}/deliver", h.riderDeliver)
 				dr.Post("/delivery/tasks/{deliveryId}/fail", h.riderFail)
+
+				// The rest of the rider console — duty attendance, route, cash,
+				// inventory, earnings, penalties, performance, documents,
+				// support, referral, emergency contacts, plus the per-task
+				// extras (customer OTP, product scan, door photo, undo).
+				// Declared in rider_ops.go; handlers in rider_ops_*.go.
+				registerRiderOps(dr, h)
 			})
 		})
 	})

@@ -120,6 +120,17 @@ func Load() (*Config, error) {
 		if cfg.OTPDevMode {
 			return nil, fmt.Errorf("refusing to start in prod with OTP_DEV_MODE=true (OTPs would leak in API responses)")
 		}
+		// With OTP_DEV_MODE off, MSG91 is the ONLY way an OTP reaches a human.
+		// Without these two values the service booted happily, every
+		// /auth/otp/request returned 200, and no SMS was ever sent — so nobody
+		// could log in and nothing said why. Fail at boot instead, where it is
+		// one clear line in the deploy log.
+		if os.Getenv("MSG91_AUTHKEY") == "" || os.Getenv("MSG91_TEMPLATE_ID") == "" {
+			return nil, fmt.Errorf(
+				"refusing to start in prod without MSG91_AUTHKEY and MSG91_TEMPLATE_ID: " +
+					"OTP_DEV_MODE is off, so SMS is the only OTP delivery path and login would " +
+					"silently fail for every user")
+		}
 	}
 	return cfg, nil
 }

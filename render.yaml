@@ -9,6 +9,14 @@ services:
     # Pin the deploy branch so a redeploy can't silently fall back to a branch
     # without the consumer order→dispatch feature (OFFERED broadcast, claim,
     # reject, /delivery/tasks/available). Keep in sync with the active release.
+    #
+    # ⚠ THIS PIN IS STALE. release/26.07.03 is behind feature/crm-welcome-litre
+    # and does NOT contain: the money-truth persistence fixes (bonus leak,
+    # erasure cascade), the DPDP consents API, the CRM Welcome Litre campaign,
+    # or the rider console's 36 endpoints (/consumer/delivery/rider/*) that the
+    # Saathi app now depends on. Until this pin moves, the rider console 404s in
+    # production exactly as before. Repointing it is a release decision, so it
+    # is left to a human — but it MUST move before the Saathi app ships.
     branch: release/26.07.03
     plan: free # upgrade to starter for always-on (free spins down when idle)
     dockerfilePath: ./Dockerfile
@@ -23,8 +31,26 @@ services:
       # MongoDB Atlas — set these in the Render dashboard (kept out of git):
       - key: MONGO_URI
         sync: false # paste: mongodb+srv://<user>:<password>@<cluster-host>
+      # ⚠ The production service points at a database named `saathi_dev`, which
+      # DEPLOY_RENDER.md describes as already seeded with demo parties and a
+      # SUPER_ADMIN on the guessable phone 9999999999. Moving to a clean
+      # production database (and re-seeding only what production needs) is a
+      # data decision for a human, so the value is left as-is and flagged.
       - key: MONGO_DB
         value: saathi_dev
+      # ── Private media (Backblaze B2) ──
+      # WITHOUT THESE, EVERY PHOTO UPLOAD 500s. /uploads/presign refuses when
+      # B2 is unconfigured (uploads/module.go), and that is the seam behind
+      # proof-of-delivery photos, rider KYC documents, the collection parchi,
+      # analyzer photos, plant intake and the attendance selfie. They were not
+      # declared here at all, so a fresh deploy silently had no media storage.
+      # Paste the values in the Render dashboard.
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APP_KEY
+        sync: false
+      - key: B2_BUCKET
+        value: pyaas-saathi-media
       # Secrets — let Render generate strong values:
       - key: JWT_SECRET
         generateValue: true
@@ -47,25 +73,38 @@ services:
         sync: false
       - key: RAZORPAY_KEY_SECRET
         sync: false
-      # SMS OTP (MSG91) — set in the Render dashboard. Required for real SMS
-      # login once OTP_DEV_MODE=false; while OTP_DEV_MODE=true the dev seam
-      # handles OTP so these may stay unset for emulator testing.
+      # SMS OTP (MSG91) — set in the Render dashboard. REQUIRED: with ENV=prod
+      # and OTP_DEV_MODE=false the service now REFUSES TO BOOT without both of
+      # these (config.go). Previously it booted happily, every /auth/otp/request
+      # returned 200, no SMS was ever sent, and nobody could log in — with
+      # nothing in the logs saying why.
       - key: MSG91_AUTHKEY
         sync: false
       - key: MSG91_TEMPLATE_ID
         sync: false
       # PRODUCTION: OFF. With this false the login OTP is delivered ONLY over real
-      # MSG91 SMS (set MSG91_AUTHKEY + MSG91_TEMPLATE_ID in the dashboard first, or
-      # nobody can log in), the OTP is never echoed in the API response, and every
-      # dev money-mint seam (test top-up, promo credit, forged-payment verify) is
-      # closed. The fixed Play-review login is now gated on REVIEW_LOGIN_ENABLED
-      # ONLY — set that true for the review window, off after.
+      # MSG91 SMS, the OTP is never echoed in the API response, and every dev
+      # money-mint seam (test top-up, promo credit, forged-payment verify) is closed.
+      #
+      # ⚠ CORRECTION: an earlier version of this comment said the fixed
+      # Play-review login was "gated on REVIEW_LOGIN_ENABLED". THERE IS NO SUCH
+      # ENV VAR — nothing in the codebase reads it. reviewLoginEnabled()
+      # (consumer/service.go) returns true unconditionally, by explicit design:
+      # phone 9999900000 with code 123456 signs in with no challenge, no expiry
+      # and no SMS, and tops that account's wallet back up to ₹500 on every
+      # sign-in. That is a deliberate decision for Google Play review. It is
+      # recorded here so nobody goes looking for a switch that does not exist.
+      # NOTE: this repository is PUBLIC, so those credentials are published.
       - key: OTP_DEV_MODE
         value: "false"
-      # TESTING: offer ⚡ Instant wherever serviceable (before a store manager draws
-      # an instant zone). Flip OFF for production so instant is gated on the radius.
+      # TESTING ONLY: offer ⚡ Instant wherever serviceable, before a store
+      # manager has drawn an instant zone. This shipped as "true" in the
+      # production blueprint against its own instruction and against the code's
+      # comment (geofence.go: "OFF by default → production still gates instant
+      # strictly on the store's instant radius"), promising 20-minute doorstep
+      # delivery to addresses no store can reach.
       - key: INSTANT_TEST_OPEN
-        value: "true"
+        value: "false"
       - key: SEED_ADMIN_PHONE
         value: "9999999999"
       - key: ACCESS_TOKEN_TTL_MINUTES

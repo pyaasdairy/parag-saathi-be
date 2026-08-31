@@ -164,10 +164,40 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 		return nil, err
 	}
 	if registered == nil || isNotFound(err) {
-		s.log.InfoContext(ctx, "otp refused: number not registered", slog.String("phone", phone))
+		s.log.InfoContext(ctx, "otp refused: number not registered", slog.String("phone", maskPhone(phone)))
 		appErr := httpx.Unprocessable("NOT_REGISTERED",
 			"this mobile number is not registered yet — contact your onboarding executive")
 		return nil, appErr
+	}
+
+	// Per-phone throttle. The ONLY limiter in front of this route was the global
+	// per-IP one, and chi's RealIP takes the client-supplied True-Client-IP /
+	// X-Real-IP / first X-Forwarded-For entry with no trusted-proxy list — so a
+	// single header made it moot. Two things follow from that:
+	//
+	//  1. COOLDOWN — without one, any registered number (a farmer's, the seeded
+	//     super admin's) could be SMS-bombed at the rate limiter's ceiling, at
+	//     our cost and on their handset.
+	//  2. CARRY THE ATTEMPT COUNT — a fresh request used to mint a new challenge
+	//     with Attempts reset to 0, so the 5-attempt cap on a 6-digit code could
+	//     be reset at will and never actually bounded a brute-force.
+	prev, err := s.repo.latestOTPChallenge(ctx, phone, now)
+	if err != nil && !isNotFound(err) {
+		return nil, err
+	}
+	carriedAttempts := 0
+	if prev != nil {
+		issuedAt := prev.ExpiresAt.Add(-s.deps.Cfg.OTPTTL)
+		if wait := otpResendCooldown - now.Sub(issuedAt); wait > 0 {
+			return nil, httpx.TooManyRequestsCode("OTP_COOLDOWN",
+				fmt.Sprintf("a code was just sent — please wait %d seconds before asking for another",
+					int(wait.Seconds())+1))
+		}
+		carriedAttempts = prev.Attempts
+		if carriedAttempts >= otpMaxAttemptsPerWindow {
+			return nil, httpx.TooManyRequestsCode("OTP_LOCKED",
+				"too many incorrect codes for this number — wait a few minutes and try again")
+		}
 	}
 
 	code, err := auth.GenerateNumericOTP(otpLength)
@@ -181,21 +211,29 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 		Phone:     phone,
 		CodeHash:  auth.HMACHash(s.deps.Cfg.OTPHashSecret, phone, code),
 		ExpiresAt: now.Add(s.deps.Cfg.OTPTTL),
-		Attempts:  0,
+		Attempts:  carriedAttempts,
 	}
 	if err := s.repo.insertOTPChallenge(ctx, challenge); err != nil {
-		s.log.ErrorContext(ctx, "otp challenge insert failed", slog.String("phone", phone), slog.Any("err", err))
+		s.log.ErrorContext(ctx, "otp challenge insert failed", slog.String("phone", maskPhone(phone)), slog.Any("err", err))
 		return nil, err
 	}
 
-	// Outbox SMS: the plaintext code travels only inside the notification
-	// params so the sender can deliver it; the challenge stores the hash.
+	// Outbox row for audit. The PLAINTEXT CODE IS ONLY CARRIED WHEN THERE IS NO
+	// SMS PIPE — i.e. local development, where the outbox is the only way to
+	// read the code. The challenge itself stores only an HMAC and expires by TTL
+	// index; the notifications collection has neither, so writing the code here
+	// left every login OTP sitting in the database in cleartext, indefinitely,
+	// defeating the point of hashing the challenge in the first place.
+	params := map[string]string{}
+	if !s.sms.Enabled() {
+		params["otp"] = code
+	}
 	notification := domain.Notification{
 		Phone:       phone,
 		Channel:     domain.ChannelSMS,
 		TemplateKey: domain.TemplateOTP,
 		Language:    defaultLanguage,
-		Params:      map[string]string{"otp": code},
+		Params:      params,
 		Status:      domain.NotificationQueued,
 		QueuedAt:    now,
 	}
@@ -206,7 +244,7 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 		notification.Language = registered.PreferredLanguage
 	}
 	if err := s.repo.insertNotification(ctx, notification); err != nil {
-		s.log.ErrorContext(ctx, "otp notification queue failed", slog.String("phone", phone), slog.Any("err", err))
+		s.log.ErrorContext(ctx, "otp notification queue failed", slog.String("phone", maskPhone(phone)), slog.Any("err", err))
 		return nil, err
 	}
 
@@ -216,17 +254,38 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 	// through to dev echo below.
 	if s.sms.Enabled() {
 		if err := s.sms.SendOTP(ctx, phone, code); err != nil {
-			s.log.ErrorContext(ctx, "otp sms send failed", slog.String("phone", phone), slog.Any("err", err))
+			s.log.ErrorContext(ctx, "otp sms send failed", slog.String("phone", maskPhone(phone)), slog.Any("err", err))
 			return nil, httpx.Internal(fmt.Errorf("otp sms delivery failed: %w", err))
 		}
 	}
 
-	s.log.InfoContext(ctx, "otp requested", slog.String("phone", phone))
+	s.log.InfoContext(ctx, "otp requested", slog.String("phone", maskPhone(phone)))
 	resp := &otpRequestResponse{Phone: phone, ExpiresAt: challenge.ExpiresAt}
 	if s.deps.Cfg.OTPDevMode {
 		resp.DevOTP = code // dev only — config refuses OTP_DEV_MODE in prod
 	}
 	return resp, nil
+}
+
+// otpResendCooldown is the minimum gap between two OTP requests for the SAME
+// phone. It is what stops a registered number being SMS-bombed.
+const otpResendCooldown = 60 * time.Second
+
+// otpMaxAttemptsPerWindow caps wrong guesses for a phone across the whole
+// challenge window, carried forward when a new code is requested — so asking
+// for a fresh code cannot be used to reset the counter.
+const otpMaxAttemptsPerWindow = 5
+
+// maskPhone renders a mobile number for LOGS: last four digits only.
+//
+// LOG_LEVEL is info in production and these lines fire on every login attempt,
+// so logging the raw number wrote the mobile number of every farmer, rider and
+// operator into the hosted log stream, where it is retained and searchable.
+func maskPhone(phone string) string {
+	if len(phone) <= 4 {
+		return "****"
+	}
+	return "******" + phone[len(phone)-4:]
 }
 
 // verifyOTP checks the challenge and logs the phone in, creating the Party
@@ -237,7 +296,7 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 	challenge, err := s.repo.latestOTPChallenge(ctx, phone, now)
 	if err != nil {
 		if isNotFound(err) {
-			s.log.WarnContext(ctx, "otp verify rejected: no active challenge", slog.String("phone", phone))
+			s.log.WarnContext(ctx, "otp verify rejected: no active challenge", slog.String("phone", maskPhone(phone)))
 			appErr := httpx.Unauthorized("no active OTP for this phone — request a new code")
 			appErr.Code = "OTP_NOT_FOUND" // distinct code so the app can localise
 			return nil, appErr
@@ -245,7 +304,7 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 		return nil, err
 	}
 	if challenge.Attempts >= maxOTPAttempts {
-		s.log.WarnContext(ctx, "otp verify rejected: too many attempts", slog.String("phone", phone))
+		s.log.WarnContext(ctx, "otp verify rejected: too many attempts", slog.String("phone", maskPhone(phone)))
 		return nil, httpx.TooManyRequests("too many incorrect OTP attempts — request a new code")
 	}
 	expected := auth.HMACHash(s.deps.Cfg.OTPHashSecret, phone, otp)
@@ -253,7 +312,7 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 		if err := s.repo.incrementOTPAttempts(ctx, challenge.ID); err != nil {
 			return nil, err
 		}
-		s.log.WarnContext(ctx, "otp verify rejected: incorrect code", slog.String("phone", phone))
+		s.log.WarnContext(ctx, "otp verify rejected: incorrect code", slog.String("phone", maskPhone(phone)))
 		appErr := httpx.Unauthorized("incorrect OTP")
 		appErr.Code = "OTP_MISMATCH" // distinct code so the app can localise
 		return nil, appErr
@@ -270,7 +329,7 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 	}
 	if party.Status != domain.PartyStatusActive {
 		s.log.WarnContext(ctx, "otp verify rejected: party suspended",
-			slog.String("phone", phone), slog.String("party_id", party.ID.Hex()))
+			slog.String("phone", maskPhone(phone)), slog.String("party_id", party.ID.Hex()))
 		return nil, httpx.Forbidden("party is suspended")
 	}
 	tokens, err := s.issueLoginTokens(ctx, party, now)
@@ -278,7 +337,7 @@ func (s *service) verifyOTP(ctx context.Context, phone, otp string) (*authTokens
 		return nil, err
 	}
 	s.log.InfoContext(ctx, "party logged in",
-		slog.String("party_id", party.ID.Hex()), slog.String("phone", phone))
+		slog.String("party_id", party.ID.Hex()), slog.String("phone", maskPhone(phone)))
 	return tokens, nil
 }
 
