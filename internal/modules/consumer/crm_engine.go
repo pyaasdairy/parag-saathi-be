@@ -32,6 +32,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -243,7 +244,19 @@ func crmConfigParse() {
 	crmCfg = c
 }
 
-func crmOfferConfig() crmOffer { return crmConfigLoad().Offer }
+func crmOfferConfig() crmOffer {
+	off := crmConfigLoad().Offer
+	// Campaign doc §4: "if registration-to-recharge conversion runs below 25%,
+	// drop the gate to ₹300 and change nothing else." A Render env edit
+	// (CRM_PACK2_MIN_PAISE=30000) moves the gate WITHOUT a deploy — republish
+	// the offer terms first, the published number is the binding one.
+	if v := os.Getenv("CRM_PACK2_MIN_PAISE"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			off.Pack2MinRechargePaise = n
+		}
+	}
+	return off
+}
 
 // ── Event outbox ────────────────────────────────────────────────────────────
 
@@ -783,6 +796,24 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 	hm := ist.Format("15:04")
 	for i := range offers {
 		o := &offers[i]
+		// Pack-2 attach + 14-day lapse (terms §4.4–4.5) run on every tick and
+		// do NOT need the first-delivery anchor — a household that recharged
+		// before pack 1 landed has a pending pack too.
+		if o.Pack2State == pack2Pending && o.Pack2OrderID == "" {
+			if o.Pack2UnlockedAt != nil && now.Sub(*o.Pack2UnlockedAt) > 14*24*time.Hour {
+				// The paused subscription never delivered within 14 days of the
+				// recharge — the pack lapses (their money is untouched; the
+				// subscription itself continues normally when funded).
+				if moved, _ := s.repo.transitionPack(ctx, o.ConsumerID, 2, pack2Pending, pack2Expired,
+					"no delivery within 14 days of the recharge (terms §4.5)", nil); moved {
+					s.emitCRMEvent(ctx, "offer_pack_state_change", o.ConsumerID,
+						map[string]any{"pack_no": 2, "from": pack2Pending, "to": pack2Expired})
+				}
+			} else if _, aerr := s.crmTryAttachPack2(ctx, o.ConsumerID); aerr != nil {
+				s.log.Warn("crm: pack2 attach attempt failed (next tick retries)",
+					"consumer", o.ConsumerID.Hex(), "err", aerr)
+			}
+		}
 		day := daysSinceFirstDelivery(o, now)
 		if day < 0 {
 			continue // pack 1 not delivered yet — no schedule anchors
@@ -849,7 +880,11 @@ func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm st
 			s.crmSweepWalletCover(ctx, now)
 		}
 	}
-	if hm >= "17:00" {
+	// TERMS §5.3: "your wallet needs enough balance by 12 NOON for the next
+	// morning's delivery. If it does not, WE TELL YOU" — so the shortfall
+	// notice fires right after noon, not at five o'clock. (Billing itself still
+	// locks after midnight — we promise noon and over-deliver.)
+	if hm >= "12:00" {
 		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-02-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
 			s.crmSweepTomorrowShortfall(ctx, now)
 		}

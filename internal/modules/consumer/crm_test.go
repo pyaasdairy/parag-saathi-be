@@ -176,3 +176,45 @@ func TestSanitizeDeliveryPrefs(t *testing.T) {
 		t.Fatalf("note cap breached: %d", len(long.Note))
 	}
 }
+
+// The plan menu is a CLOSED validator — pin the gate table (terms §6.3 + the
+// 1 L/day floor).
+func TestCRMValidatePlan(t *testing.T) {
+	s := &service{}
+	cfg := crmOffer{SeedSKU: "gold-500ml", SubscriptionQty: 2}
+	// empty input → campaign default
+	p, q, f, err := s.crmValidatePlan(crmEnrolInput{}, cfg)
+	if err != nil || p != "gold-500ml" || q != 2 || f != "daily" {
+		t.Fatalf("default plan: %s %d %s (%v)", p, q, f, err)
+	}
+	// menu SKU + auto-qty honours the floor (500ml → 2, 1l → 1)
+	if _, q, _, _ := s.crmValidatePlan(crmEnrolInput{PlanProductID: "taaza-500ml"}, cfg); q != 2 {
+		t.Fatalf("auto qty for 500ml: %d", q)
+	}
+	if _, q, _, _ := s.crmValidatePlan(crmEnrolInput{PlanProductID: "taaza-1l"}, cfg); q != 1 {
+		t.Fatalf("auto qty for 1l: %d", q)
+	}
+	// below the 1 L/day floor → refused
+	if _, _, _, err := s.crmValidatePlan(crmEnrolInput{PlanProductID: "gold-500ml", PlanQty: 1}, cfg); err == nil {
+		t.Fatal("500ml×1 must be refused (below the milk floor)")
+	}
+	// off-menu SKU and off-cadence frequency → refused
+	if _, _, _, err := s.crmValidatePlan(crmEnrolInput{PlanProductID: "paneer-200g"}, cfg); err == nil {
+		t.Fatal("off-menu SKU must be refused")
+	}
+	if _, _, _, err := s.crmValidatePlan(crmEnrolInput{PlanProductID: "gold-1l", PlanFrequency: "weekly"}, cfg); err == nil {
+		t.Fatal("weekly is not an offer cadence")
+	}
+}
+
+// The ₹300 knob: env override moves the gate without a deploy.
+func TestPack2GateEnvKnob(t *testing.T) {
+	t.Setenv("CRM_PACK2_MIN_PAISE", "30000")
+	if got := crmOfferConfig().Pack2MinRechargePaise; got != 30000 {
+		t.Fatalf("env knob ignored: %d", got)
+	}
+	t.Setenv("CRM_PACK2_MIN_PAISE", "")
+	if got := crmOfferConfig().Pack2MinRechargePaise; got != 50000 {
+		t.Fatalf("default gate: %d", got)
+	}
+}

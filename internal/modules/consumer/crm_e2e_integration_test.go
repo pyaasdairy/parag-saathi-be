@@ -74,12 +74,16 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-	price := 35.0
-	if _, err := db.Collection(collCatalog).InsertOne(ctx, catalogDoc{
-		SkuID: "gold-500ml", Kind: catalogKindProduct, Price: &price,
-		Name: "Full Cream Milk - Parag Gold", Category: "milk",
-	}); err != nil {
-		t.Fatalf("seed catalog: %v", err)
+	for sku, pr := range map[string]float64{
+		"gold-500ml": 35, "gold-1l": 69, "taaza-500ml": 29, "taaza-1l": 57,
+	} {
+		p := pr
+		if _, err := db.Collection(collCatalog).InsertOne(ctx, catalogDoc{
+			SkuID: sku, Kind: catalogKindProduct, Price: &p,
+			Name: "Milk " + sku, Category: "milk",
+		}); err != nil {
+			t.Fatalf("seed catalog %s: %v", sku, err)
+		}
 	}
 
 	const phone = "9000000042"
@@ -360,6 +364,175 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	}
 	if svc.crmInLiveWelcomeJourney(ctx, nAcct.ID) {
 		t.Fatal("a never-enrolled subscriber must not count as a welcome journey")
+	}
+
+	// ── 7e) SELF-SERVE ENROLMENT (terms §3.1 — the app's own funnel) ──
+	selfAcct := &account{ID: primitive.NewObjectID(), Phone: "+919000000050", Status: "ACTIVE",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := repo.insertAccount(ctx, selfAcct); err != nil {
+		t.Fatalf("self account: %v", err)
+	}
+	// Eligibility BEFORE an address: the funnel must route to address capture.
+	if st, err := svc.crmEligibility(ctx, selfAcct.ID); err != nil || st != "address_required" {
+		t.Fatalf("eligibility without address = %q (%v), want address_required", st, err)
+	}
+	sLat, sLng := 26.7726, 81.0152
+	if _, err := repo.addresses.InsertOne(ctx, &address{
+		ID: primitive.NewObjectID(), ConsumerID: selfAcct.ID, Label: "Home",
+		Line1: "Flat 202, Self Tower", Pincode: "226030", City: "Lucknow",
+		IsDefault: true, Lat: &sLat, Lng: &sLng, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("self address: %v", err)
+	}
+	if st, _ := svc.crmEligibility(ctx, selfAcct.ID); st != "eligible" {
+		t.Fatalf("eligibility with address = %q, want eligible", st)
+	}
+	// Plan choice honoured (§6.3): Toned 1 L, alternate mornings.
+	selfRes, err := svc.crmSelfEnrol(ctx, selfAcct.ID, crmEnrolInput{
+		PlanProductID: "taaza-1l", PlanQty: 1, PlanFrequency: "alternate",
+	})
+	if err != nil {
+		t.Fatalf("self-enrol: %v", err)
+	}
+	var selfSub subscription
+	if err := repo.subscriptions.FindOne(ctx, bson.D{{Key: "subscription_id", Value: selfRes.SubscriptionID}}).Decode(&selfSub); err != nil {
+		t.Fatalf("self subscription: %v", err)
+	}
+	if selfSub.ProductID != "taaza-1l" || selfSub.Qty != 1 || selfSub.Frequency != "alternate" {
+		t.Fatalf("plan not honoured: %+v", selfSub)
+	}
+	selfOffer := mustOffer(t, ctx, svc, selfAcct.ID)
+	if selfOffer.Source != "self" || selfOffer.Pack1OrderID == "" {
+		t.Fatalf("self offer shape: source=%q pack1=%q", selfOffer.Source, selfOffer.Pack1OrderID)
+	}
+	// The FREE pack stays the seed SKU regardless of the chosen plan.
+	sp1, _ := repo.findOrderAnyUser(ctx, selfRes.Pack1OrderID)
+	if sp1 == nil || len(sp1.Items) != 1 || sp1.Items[0].ProductID != "gold-500ml" {
+		t.Fatalf("free pack must be the seed SKU: %+v", sp1)
+	}
+	if st, _ := svc.crmEligibility(ctx, selfAcct.ID); st != "already_enrolled" {
+		t.Fatal("post-enrol eligibility must read already_enrolled")
+	}
+	// A plan below the 1 L/day milk floor is refused.
+	if _, err := svc.crmSelfEnrol(ctx, selfAcct.ID, crmEnrolInput{PlanProductID: "taaza-500ml", PlanQty: 1}); err == nil {
+		t.Fatal("below-floor plan must be refused (and re-enrol conflicts anyway)")
+	}
+	// A PAYING customer's eligibility is not_eligible — the funnel never shows.
+	if st, _ := svc.crmEligibility(ctx, cid); st == "eligible" {
+		t.Fatal("household #1 (recharged, enrolled) must never read eligible")
+	}
+	// Out-of-zone address → not_serviceable (funnel routes to the waitlist).
+	farAcct := &account{ID: primitive.NewObjectID(), Phone: "+919000000051", Status: "ACTIVE",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	_ = repo.insertAccount(ctx, farAcct)
+	fLat, fLng := 27.5000, 81.0000 // ~80 km north of the store fence
+	_, _ = repo.addresses.InsertOne(ctx, &address{
+		ID: primitive.NewObjectID(), ConsumerID: farAcct.ID, Label: "Home",
+		Line1: "Far Away House", Pincode: "261001", IsDefault: true,
+		Lat: &fLat, Lng: &fLng, CreatedAt: time.Now().UTC(),
+	})
+	if st, _ := svc.crmEligibility(ctx, farAcct.ID); st != "not_serviceable" {
+		t.Fatalf("far address eligibility = %q, want not_serviceable", st)
+	}
+	if _, err := svc.crmSelfEnrol(ctx, farAcct.ID, crmEnrolInput{}); err == nil {
+		t.Fatal("out-of-zone self-enrol must be refused")
+	}
+
+	// ── 7f) PACK-2 RIDES THE NEXT DELIVERY (terms §4.4–4.5) ──
+	// Deliver the self household's pack 1, PAUSE their plan, then recharge:
+	// the pack must unlock but NOT mint a lone-drop order until a real
+	// delivery morning exists again.
+	deliverOrder(t, ctx, svc, repo, db, selfRes.Pack1OrderID)
+	svc.crmProcessEvents(ctx)
+	if _, err := repo.subscriptions.UpdateOne(ctx,
+		bson.D{{Key: "subscription_id", Value: selfRes.SubscriptionID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "paused"}}}}); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if _, err := svc.creditTopup(ctx, selfAcct.ID, 500, "razorpay", "e2e-rzp-self"); err != nil {
+		t.Fatalf("self topup: %v", err)
+	}
+	svc.crmProcessEvents(ctx)
+	selfOffer = mustOffer(t, ctx, svc, selfAcct.ID)
+	if selfOffer.Pack2State != pack2Pending || selfOffer.Pack2OrderID != "" {
+		t.Fatalf("paused plan: pack2 must be pending WITHOUT an order (no lone drop): %+v", selfOffer)
+	}
+	if selfOffer.Pack2UnlockedAt == nil {
+		t.Fatal("pack2_unlocked_at must anchor the 14-day window")
+	}
+	// Sweep ticks while paused: still no order.
+	svc.crmProcessSchedules(ctx, time.Now().In(istZone))
+	if o := mustOffer(t, ctx, svc, selfAcct.ID); o.Pack2OrderID != "" {
+		t.Fatal("sweep must not attach while the plan is paused")
+	}
+	// RESUME → the next tick attaches the pack to tomorrow's delivery + W-04.
+	if _, err := repo.subscriptions.UpdateOne(ctx,
+		bson.D{{Key: "subscription_id", Value: selfRes.SubscriptionID}},
+		bson.D{{Key: "$set", Value: bson.D{
+			// Re-anchor on TOMORROW — the app's reactivate does exactly this, and
+			// an alternate-day plan anchored today would (correctly) not be due
+			// tomorrow, so the attach would keep waiting for its next due morning.
+			{Key: "status", Value: "active"}, {Key: "start_date", Value: istDay(time.Now().Add(24 * time.Hour))},
+		}}}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	svc.crmProcessSchedules(ctx, time.Now().In(istZone))
+	selfOffer = mustOffer(t, ctx, svc, selfAcct.ID)
+	if selfOffer.Pack2OrderID == "" {
+		t.Fatal("resumed + funded: the sweep must attach pack 2 to tomorrow")
+	}
+	if n := inboxCount(t, db, selfAcct.ID, "W-04"); n != 1 {
+		t.Fatalf("W-04 fires at ATTACH time, once: %d", n)
+	}
+
+	// ── 7g) THE 14-DAY LAPSE: unlocked but never delivered within the window ──
+	lapseRes, err := svc.crmEnrol(ctx, "e2e-operator", crmEnrolInput{
+		Phone: "9000000052", Name: "Lapse Household", Line1: "Flat 303, Self Tower",
+		Pincode: "226030", Lat: 26.7727, Lng: 81.0159,
+	})
+	if err != nil {
+		t.Fatalf("enrol lapse household: %v", err)
+	}
+	lapseCid, _ := primitive.ObjectIDFromHex(lapseRes.ConsumerID)
+	deliverOrder(t, ctx, svc, repo, db, lapseRes.Pack1OrderID)
+	svc.crmProcessEvents(ctx)
+	_, _ = repo.subscriptions.UpdateOne(ctx,
+		bson.D{{Key: "subscription_id", Value: lapseRes.SubscriptionID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "paused"}}}})
+	if _, err := svc.creditTopup(ctx, lapseCid, 500, "razorpay", "e2e-rzp-lapse"); err != nil {
+		t.Fatalf("lapse topup: %v", err)
+	}
+	svc.crmProcessEvents(ctx)
+	// Pretend the recharge settled 15 days ago and the plan stayed paused.
+	old := time.Now().UTC().AddDate(0, 0, -15)
+	_, _ = repo.offers().UpdateOne(ctx,
+		bson.D{{Key: "consumer_id", Value: lapseCid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "pack2_unlocked_at", Value: old}}}})
+	svc.crmProcessSchedules(ctx, time.Now().In(istZone))
+	if o := mustOffer(t, ctx, svc, lapseCid); o.Pack2State != pack2Expired || o.Pack2OrderID != "" {
+		t.Fatalf("14-day lapse must expire the pending pack: %+v", o)
+	}
+
+	// ── 7h) ERASE → RE-SIGNUP CANNOT RE-ARM (the household claim registry) ──
+	if err := svc.erase(ctx, selfAcct.ID); err != nil {
+		t.Fatalf("erase: %v", err)
+	}
+	rebornAcct := &account{ID: primitive.NewObjectID(), Phone: "+919000000050", Status: "ACTIVE",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := repo.insertAccount(ctx, rebornAcct); err != nil {
+		t.Fatalf("reborn account: %v", err)
+	}
+	rLat, rLng := 26.7726, 81.0152
+	_, _ = repo.addresses.InsertOne(ctx, &address{
+		ID: primitive.NewObjectID(), ConsumerID: rebornAcct.ID, Label: "Home",
+		Line1: "Flat 202, Self Tower", Pincode: "226030", IsDefault: true,
+		Lat: &rLat, Lng: &rLng, CreatedAt: time.Now().UTC(),
+	})
+	if st, _ := svc.crmEligibility(ctx, rebornAcct.ID); st != "not_eligible" {
+		t.Fatalf("erase-and-resignup eligibility = %q, want not_eligible (claim survives)", st)
+	}
+	if _, err := svc.crmSelfEnrol(ctx, rebornAcct.ID, crmEnrolInput{}); err == nil {
+		t.Fatal("erase-and-resignup self-enrol must be refused — one welcome per household, forever")
 	}
 
 	// ── 8) OFF SWITCH: with CRM disabled, dispatch + schedules are inert ──

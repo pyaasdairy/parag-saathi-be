@@ -159,6 +159,8 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Get("/crm/inbox", h.crmInbox)
 			pr.Post("/crm/inbox/{id}/read", h.crmInboxRead)
 			pr.Get("/crm/offer", h.crmMyOffer)
+			pr.Get("/crm/eligibility", h.crmEligibilityHandler)
+			pr.Post("/crm/enrol/self", h.crmSelfEnrolHandler)
 
 			// Profile — support the FE's /users/me and the note's /me alias.
 			for _, base := range []string{"/users/me", "/me"} {

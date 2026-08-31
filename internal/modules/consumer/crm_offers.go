@@ -38,6 +38,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -107,8 +108,15 @@ type consumerOffer struct {
 	// The subscription and promo orders this enrolment created — for support,
 	// reconciliation and idempotent re-entry.
 	SubscriptionID string `bson:"subscription_id,omitempty" json:"subscription_id,omitempty"`
-	Pack1OrderID   string `bson:"pack1_order_id,omitempty"  json:"pack1_order_id,omitempty"`
-	Pack2OrderID   string `bson:"pack2_order_id,omitempty"  json:"pack2_order_id,omitempty"`
+	// Source — who founded the enrolment: "promoter" (ops console) or "self"
+	// (the app's own funnel). Analytics + promoter-quality tracking only.
+	Source string `bson:"source,omitempty" json:"source,omitempty"`
+	// Pack2UnlockedAt — when the qualifying recharge SETTLED. Anchors the
+	// terms' 14-day attach window ("delivered with your next delivery,
+	// provided that takes place within 14 days of the recharge").
+	Pack2UnlockedAt *time.Time `bson:"pack2_unlocked_at,omitempty" json:"-"`
+	Pack1OrderID    string     `bson:"pack1_order_id,omitempty"  json:"pack1_order_id,omitempty"`
+	Pack2OrderID    string     `bson:"pack2_order_id,omitempty"  json:"pack2_order_id,omitempty"`
 
 	Transitions []offerTransition `bson:"transitions,omitempty" json:"transitions,omitempty"`
 	CreatedAt   time.Time         `bson:"created_at" json:"-"`
@@ -266,7 +274,13 @@ type crmEnrolInput struct {
 	Lng        float64 `json:"lng"`
 	SocietyID  string  `json:"society_id"`
 	PromoterID string  `json:"promoter_id"`
-	AssetType  string  `json:"asset_type"` // poster|standee|hanger|whatsapp|promoter
+	AssetType  string  `json:"asset_type"` // poster|standee|hanger|whatsapp|promoter|self
+	// Plan choice (offer terms §6.3: daily or alternate-day, Toned or Full
+	// Cream, 500 ml or 1 L). Empty → the campaign default (2 × FCM 500 ml
+	// daily). The FREE packs are always the seed SKU regardless of plan.
+	PlanProductID string `json:"plan_product_id"`
+	PlanQty       int    `json:"plan_qty"`
+	PlanFrequency string `json:"plan_frequency"` // daily | alternate
 }
 
 type crmEnrolResult struct {
@@ -303,7 +317,6 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 	if strings.TrimSpace(in.Line1) == "" {
 		return nil, errBadRequest("the delivery address line is required")
 	}
-	cfg := crmOfferConfig()
 
 	// 1) account by CANONICAL phone (+91…) — the OTP login path keys accounts
 	// by this exact form, so the household's later app login MUST land on the
@@ -332,6 +345,79 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		}
 	}
 
+	// Address: create the promoter-captured one only if the account has none
+	// with coordinates (the pin is what store routing + the sweep read).
+	addr, aerr := s.subscriptionAddress(ctx, acct.ID)
+	if aerr != nil || addr == nil || addr.Lat == nil || addr.Lng == nil {
+		lat, lng := in.Lat, in.Lng
+		na := &address{
+			ID: primitive.NewObjectID(), ConsumerID: acct.ID, Label: "Home",
+			Line1: strings.TrimSpace(in.Line1), Pincode: strings.TrimSpace(in.Pincode),
+			City: "Lucknow", IsDefault: true, Lat: &lat, Lng: &lng, CreatedAt: time.Now().UTC(),
+		}
+		if _, ierr := s.repo.addresses.InsertOne(ctx, na); ierr != nil {
+			return nil, errInternal("address store failed")
+		}
+		addr = na
+	}
+	return s.crmEnrolCore(ctx, actor, acct, addr, in, "promoter")
+}
+
+// crmSelfEnrol — THE APP'S OWN FUNNEL (offer terms §3.1: "Start a subscription
+// in the app. No payment and no wallet balance is required."). The signed-in
+// customer enrols themselves: identity from the JWT, address from their saved
+// default, zone check from the same serviceability engine checkout uses.
+// Everything else — eligibility, arbitration, resume, minting — is
+// byte-identical to the promoter path: ONE enrolment state machine, forever.
+func (s *service) crmSelfEnrol(ctx context.Context, consumerID primitive.ObjectID, in crmEnrolInput) (*crmEnrolResult, error) {
+	if !crmEnabled() {
+		return nil, errForbidden("CRM is not enabled")
+	}
+	acct, err := s.repo.findAccountByID(ctx, consumerID)
+	if err != nil {
+		return nil, err
+	}
+	if acct == nil {
+		return nil, errUnauthorized("account not found")
+	}
+	// The saved address IS the enrolment address (terms §1.2: the app checks
+	// the area the moment the address is entered — both exist by subscribe).
+	addr, aerr := s.subscriptionAddress(ctx, consumerID)
+	if aerr != nil {
+		return nil, aerr
+	}
+	if addr == nil || addr.Lat == nil || addr.Lng == nil {
+		return nil, errUnprocessable("ADDRESS_REQUIRED", "save your delivery address (with the map pin) before starting the offer")
+	}
+	sv, serr := s.serviceability(ctx, *addr.Lat, *addr.Lng, addr.Pincode)
+	if serr != nil {
+		return nil, serr
+	}
+	if !sv.Serviceable {
+		return nil, errUnprocessable("NOT_SERVICEABLE", "we don't deliver to this address yet — join the waitlist and the offer stays available for you")
+	}
+	// Abuse hash + audit fields derive from the STORED address so a self and a
+	// promoter enrolment at the same door collide on the same household key.
+	in.Line1, in.Pincode = addr.Line1, addr.Pincode
+	in.Lat, in.Lng = *addr.Lat, *addr.Lng
+	in.Phone = acct.Phone
+	if in.AssetType == "" {
+		in.AssetType = "self"
+	}
+	return s.crmEnrolCore(ctx, "self:"+consumerID.Hex(), acct, addr, in, "self")
+}
+
+// crmEnrolCore is the single enrolment state machine both entries share.
+func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account, addr *address, in crmEnrolInput, source string) (*crmEnrolResult, error) {
+	cfg := crmOfferConfig()
+	phone := normalizePhone(acct.Phone)
+
+	// Plan choice (validated) — defaults to the campaign plan when absent.
+	planProduct, planQty, planFreq, perr := s.crmValidatePlan(in, cfg)
+	if perr != nil {
+		return nil, perr
+	}
+
 	// 2) eligibility — plain reads first; the unique (consumer, offer) index on
 	// the offer INSERT below is the race-proof arbiter (nothing is minted until
 	// this consumer owns the offer doc).
@@ -353,6 +439,14 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 	if t, terr := s.repo.getOrCreateTrial(ctx, acct.ID); terr == nil && (t.DeliveredPaid > 0 || t.DeliveredFree > 0) {
 		return nil, errUnprocessable("NOT_ELIGIBLE", "this customer already has welcome-trial activity")
 	}
+	// ONE WELCOME PER HOUSEHOLD, FOREVER: the free_pack_claims registry is
+	// keyed by PHONE and deliberately SURVIVES account erasure, so
+	// delete-account → re-signup cannot re-arm this offer (or the 2+2 — both
+	// welcome offers share the registry). Read-only here; the registry is
+	// WRITTEN only after the offer doc wins arbitration below.
+	if claimed, ok := s.crmHouseholdClaimed(ctx, acct.ID, acct.Phone); ok && claimed {
+		return nil, errUnprocessable("NOT_ELIGIBLE", "this household has already used a welcome offer")
+	}
 
 	// 3) abuse signals — flag, never reject.
 	hash := crmAddressHash(in.Line1, in.Pincode, in.Lat, in.Lng)
@@ -370,7 +464,7 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 	now := time.Now().UTC()
 	offer := &consumerOffer{
 		ConsumerID: acct.ID, OfferID: offerWelcomeLitre, EnrolledAt: now,
-		Pack1State: pack1Pending, Pack2State: pack2Locked,
+		Pack1State: pack1Pending, Pack2State: pack2Locked, Source: source,
 		SocietyID: in.SocietyID, PromoterID: in.PromoterID, AssetType: in.AssetType,
 		AddressHash: hash, AbuseFlagged: flagged,
 		Transitions: []offerTransition{{PackNo: 1, From: "", To: pack1Pending, Reason: "enrolled by " + actor, At: now}},
@@ -404,22 +498,9 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		return nil, errInternal("trial exclusivity mark failed")
 	}
 
-	// 6) address (only if the account has none), then the normal subscription
-	// and the standalone ₹0 pack-1 order for the next IST morning.
-	addr, aerr := s.subscriptionAddress(ctx, acct.ID)
-	if aerr != nil || addr == nil || addr.Lat == nil || addr.Lng == nil {
-		lat, lng := in.Lat, in.Lng
-		na := &address{
-			ID: primitive.NewObjectID(), ConsumerID: acct.ID, Label: "Home",
-			Line1: strings.TrimSpace(in.Line1), Pincode: strings.TrimSpace(in.Pincode),
-			City: "Lucknow", IsDefault: true, Lat: &lat, Lng: &lng, CreatedAt: time.Now().UTC(),
-		}
-		if _, ierr := s.repo.addresses.InsertOne(ctx, na); ierr != nil {
-			return nil, errInternal("address store failed")
-		}
-		addr = na
-	}
-	sub, serr := s.crmCreateSubscription(ctx, acct.ID, cfg)
+	// 6) the customer's chosen plan (a NORMAL subscription — ships only when
+	// funded) and the standalone ₹0 pack-1 order for the next IST morning.
+	sub, serr := s.crmCreateSubscription(ctx, acct.ID, planProduct, planQty, planFreq)
 	if serr != nil {
 		return nil, serr // offer stays incomplete — a retry resumes right here
 	}
@@ -461,9 +542,14 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		}, nil
 	}
 
+	// Register the household claim NOW that this consumer owns the offer.
+	// Idempotent (same consumer re-claims fine); the impossible different-
+	// consumer case (phone is unique on accounts) logs and never unwinds.
+	s.crmRegisterHouseholdClaim(ctx, acct.ID, acct.Phone)
+
 	if freshOffer {
 		s.emitCRMEvent(ctx, "offer_enrolled", acct.ID, map[string]any{
-			"offer_id": offerWelcomeLitre, "society_id": in.SocietyID,
+			"offer_id": offerWelcomeLitre, "source": source, "society_id": in.SocietyID,
 			"promoter_id": in.PromoterID, "asset_type": in.AssetType,
 		})
 		if flagged {
@@ -520,20 +606,20 @@ func (s *service) crmRetractPromoOrder(ctx context.Context, orderID string) {
 // SKU at the server-authoritative price, quantity honouring the app's
 // 1 L/day milk floor (2 × 500 ml). It intentionally reuses the plain
 // subscription document — the sweep treats it identically to any other plan.
-func (s *service) crmCreateSubscription(ctx context.Context, consumerID primitive.ObjectID, cfg crmOffer) (*subscription, error) {
+func (s *service) crmCreateSubscription(ctx context.Context, consumerID primitive.ObjectID, productID string, qty int, frequency string) (*subscription, error) {
 	ix, err := s.loadPriceIndex(ctx)
 	if err != nil {
 		return nil, err
 	}
-	unit, ok := ix.priceFor(cfg.SeedSKU, "")
+	unit, ok := ix.priceFor(productID, "")
 	if !ok {
-		return nil, errUnprocessable("SKU_UNAVAILABLE", "the campaign product is not sellable right now")
+		return nil, errUnprocessable("SKU_UNAVAILABLE", "the chosen milk is not sellable right now")
 	}
 	now := time.Now().UTC()
 	sub := &subscription{
 		MongoID: primitive.NewObjectID(), SubscriptionID: newSubscriptionID(),
-		ConsumerID: consumerID, ProductID: cfg.SeedSKU, Name: ix.nameFor(cfg.SeedSKU),
-		Qty: cfg.SubscriptionQty, UnitPrice: round2(unit), Frequency: "daily",
+		ConsumerID: consumerID, ProductID: productID, Name: ix.nameFor(productID),
+		Qty: qty, UnitPrice: round2(unit), Frequency: frequency,
 		Status: "active", StartDate: istDay(time.Now().Add(24 * time.Hour)),
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -541,6 +627,163 @@ func (s *service) crmCreateSubscription(ctx context.Context, consumerID primitiv
 		return nil, errInternal("subscription store failed")
 	}
 	return sub, nil
+}
+
+// crmPlanSKUs — the offer terms' plan menu (§6.3: Toned or Full Cream, 500 ml
+// or 1 L), with each pack's millilitres so the app's 1 L/day milk floor holds
+// per DELIVERY DAY. Config-shaped next to SeedSKU; extend here when the menu
+// grows — nothing else changes.
+var crmPlanSKUs = map[string]int{
+	"gold-500ml":  500,
+	"gold-1l":     1000,
+	"taaza-500ml": 500,
+	"taaza-1l":    1000,
+}
+
+// crmValidatePlan resolves the enrolment's subscription plan. Empty input →
+// the campaign default. Anything supplied is validated CLOSED: menu SKU,
+// sane quantity, a cadence the backend worker actually runs, and at least
+// one litre per delivery day (the app-wide milk floor).
+func (s *service) crmValidatePlan(in crmEnrolInput, cfg crmOffer) (string, int, string, error) {
+	product := strings.TrimSpace(in.PlanProductID)
+	freq := strings.TrimSpace(in.PlanFrequency)
+	qty := in.PlanQty
+	if product == "" && qty == 0 && freq == "" {
+		return cfg.SeedSKU, cfg.SubscriptionQty, "daily", nil
+	}
+	if product == "" {
+		product = cfg.SeedSKU
+	}
+	ml, ok := crmPlanSKUs[product]
+	if !ok {
+		return "", 0, "", errBadRequest("plan_product_id must be one of the offer's milk options")
+	}
+	if freq == "" {
+		freq = "daily"
+	}
+	if freq != "daily" && freq != "alternate" {
+		return "", 0, "", errBadRequest("plan_frequency must be daily or alternate")
+	}
+	if qty == 0 {
+		qty = 1
+		if ml < 1000 {
+			qty = 2
+		}
+	}
+	if qty < 1 || qty > 8 {
+		return "", 0, "", errBadRequest("plan_qty must be between 1 and 8")
+	}
+	if qty*ml < 1000 {
+		return "", 0, "", errUnprocessable("BELOW_MILK_FLOOR", "a delivery day must total at least 1 litre")
+	}
+	return product, qty, freq, nil
+}
+
+// ── One welcome per household (free_pack_claims, shared with the 2+2 gate) ──
+
+// crmHouseholdClaimed reports whether this phone's welcome entitlement is
+// already held by a DIFFERENT consumer (erase-and-resignup, or the 2+2 was
+// used on a previous account). ok=false → the read failed; callers FAIL OPEN
+// on the read (never block a signup on a transient) — the write-side unique
+// index remains the hard guarantee.
+func (s *service) crmHouseholdClaimed(ctx context.Context, consumerID primitive.ObjectID, canonicalPhone string) (claimed bool, ok bool) {
+	if canonicalPhone == "" {
+		return false, true
+	}
+	var prior struct {
+		ConsumerID primitive.ObjectID `bson:"consumer_id"`
+	}
+	err := s.repo.accounts.Database().Collection("free_pack_claims").
+		FindOne(ctx, bson.D{{Key: "phone", Value: canonicalPhone}}).Decode(&prior)
+	if err != nil {
+		if isNoDocs(err) {
+			return false, true
+		}
+		return false, false
+	}
+	return prior.ConsumerID != consumerID, true
+}
+
+// crmEligibility is the SERVER-TRUTH answer the app's funnel renders from —
+// no AsyncStorage gate, no local guess. Read-only, ordered so the FIRST
+// failing gate names the state the FE should show:
+//
+//	eligible          → show the Welcome Litre funnel
+//	already_enrolled  → show the offer progress card instead
+//	not_eligible      → existing/paying household: no funnel, normal app
+//	address_required  → funnel visible, CTA routes to address capture first
+//	not_serviceable   → funnel visible, CTA routes to the waitlist
+func (s *service) crmEligibility(ctx context.Context, consumerID primitive.ObjectID) (status string, err error) {
+	if !crmEnabled() {
+		return "not_eligible", nil // CRM off → the app shows nothing new
+	}
+	if o, oerr := s.repo.findOffer(ctx, consumerID); oerr != nil {
+		return "", oerr
+	} else if o != nil {
+		return "already_enrolled", nil
+	}
+	acct, aerr := s.repo.findAccountByID(ctx, consumerID)
+	if aerr != nil || acct == nil {
+		return "", errUnauthorized("account not found")
+	}
+	if acct.HasPaidOrder {
+		return "not_eligible", nil
+	}
+	if n, cerr := s.repo.orders.CountDocuments(ctx, bson.D{
+		{Key: "user_id", Value: consumerID.Hex()},
+		{Key: "total", Value: bson.D{{Key: "$gt", Value: 0}}},
+		{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+	}); cerr != nil {
+		return "", errInternal("order history check failed")
+	} else if n > 0 {
+		return "not_eligible", nil
+	}
+	if t, terr := s.repo.getOrCreateTrial(ctx, consumerID); terr == nil && (t.DeliveredPaid > 0 || t.DeliveredFree > 0) {
+		return "not_eligible", nil
+	}
+	if claimed, ok := s.crmHouseholdClaimed(ctx, consumerID, acct.Phone); ok && claimed {
+		return "not_eligible", nil
+	}
+	addr, derr := s.subscriptionAddress(ctx, consumerID)
+	if derr != nil || addr == nil || addr.Lat == nil || addr.Lng == nil {
+		// subscriptionAddress reports "no usable address" as ADDRESS_REQUIRED —
+		// for the funnel that IS a state, not a failure.
+		if derr == nil || crmErrCode(derr) == "ADDRESS_REQUIRED" {
+			return "address_required", nil
+		}
+		return "", derr
+	}
+	if sv, verr := s.serviceability(ctx, *addr.Lat, *addr.Lng, addr.Pincode); verr != nil {
+		return "", verr
+	} else if !sv.Serviceable {
+		return "not_serviceable", nil
+	}
+	return "eligible", nil
+}
+
+// crmErrCode extracts the API error code ("" for foreign errors).
+func crmErrCode(err error) string {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return ae.Code
+	}
+	return ""
+}
+
+// crmRegisterHouseholdClaim writes the phone's claim after the offer doc won
+// arbitration. Idempotent; a dup by the SAME consumer is fine, and a dup by a
+// different consumer is impossible while accounts are unique per phone.
+func (s *service) crmRegisterHouseholdClaim(ctx context.Context, consumerID primitive.ObjectID, canonicalPhone string) {
+	if canonicalPhone == "" {
+		return
+	}
+	_, err := s.repo.accounts.Database().Collection("free_pack_claims").InsertOne(ctx, bson.D{
+		{Key: "phone", Value: canonicalPhone}, {Key: "consumer_id", Value: consumerID},
+		{Key: "claimed_at", Value: time.Now().UTC()},
+	})
+	if err != nil && !mongo.IsDuplicateKeyError(err) {
+		s.log.Warn("crm: household claim write failed (registry catches up on trial advancement)", "err", err)
+	}
 }
 
 // mintPromoPackOrder mints the STANDALONE zero-value promotional order —
@@ -671,8 +914,10 @@ func (s *service) crmOnRechargeSettled(ctx context.Context, consumerID primitive
 	}
 	switch o.Pack2State {
 	case pack2Locked:
+		unlockedAt := time.Now().UTC()
 		moved, terr := s.repo.transitionPack(ctx, consumerID, 2, pack2Locked, pack2Pending,
-			fmt.Sprintf("settled recharge ₹%.2f >= ₹%.2f", amountRupees, threshold), nil)
+			fmt.Sprintf("settled recharge ₹%.2f >= ₹%.2f", amountRupees, threshold),
+			bson.D{{Key: "pack2_unlocked_at", Value: unlockedAt}})
 		if terr != nil {
 			return terr
 		}
@@ -684,25 +929,70 @@ func (s *service) crmOnRechargeSettled(ctx context.Context, consumerID primitive
 		if o.Pack2OrderID != "" {
 			return nil // fully unlocked already — pure replay
 		}
-		// pending-without-order: a previous attempt died after the CAS — resume.
+		// pending-without-order: a previous attempt died after the CAS, or the
+		// attach conditions weren't met yet — try again now.
 	default:
 		return nil // delivered/expired — nothing to do
 	}
 
-	// Schedule pack 2 as its own ₹0 order for the next morning ("scheduled onto
-	// the next delivery" — the rider carries it with that morning's paid order).
+	// TERMS §4.4–4.5: the free pack is "delivered free with your NEXT DELIVERY
+	// after that recharge" — it RIDES a real morning, it never makes a lone
+	// ₹15 drop. The attach helper mints only when tomorrow actually delivers;
+	// for a paused/not-due subscription the pending pack waits (14-day cap,
+	// enforced by the sweep) and the sweep re-attempts every tick.
+	_, aerr := s.crmTryAttachPack2(ctx, consumerID)
+	return aerr
+}
+
+// crmTryAttachPack2 mints the pack-2 ₹0 order for TOMORROW iff tomorrow is a
+// real delivery morning for this household: subscription active, due
+// tomorrow, and the wallet covers that day (the noon rule would skip an
+// unfunded day, and a free pack alone at the door is exactly the lone drop
+// the campaign economics forbid). Idempotent: the pack2_order_id
+// empty-slot guard makes concurrent attempts converge on one order.
+// Returns (attached, error); a nil error with attached=false just means
+// "conditions not met yet — the sweep keeps trying".
+func (s *service) crmTryAttachPack2(ctx context.Context, consumerID primitive.ObjectID) (bool, error) {
+	o, err := s.repo.findOffer(ctx, consumerID)
+	if err != nil {
+		return false, err
+	}
+	if o == nil || o.Pack2State != pack2Pending || o.Pack2OrderID != "" {
+		return false, nil
+	}
+	// 14-day window (terms §4.5): past it the sweep expires the pack; never
+	// attach after the cap even if the sweep hasn't swept yet.
+	if o.Pack2UnlockedAt != nil && time.Since(*o.Pack2UnlockedAt) > 14*24*time.Hour {
+		return false, nil
+	}
+	var sub subscription
+	if err := s.repo.subscriptions.FindOne(ctx,
+		bson.D{{Key: "subscription_id", Value: o.SubscriptionID}}).Decode(&sub); err != nil {
+		if isNoDocs(err) {
+			return false, nil // subscription cancelled — §7.4: offer ends via the sweep
+		}
+		return false, errInternal("crm: pack2 subscription lookup failed")
+	}
+	tomorrow := istDay(time.Now().Add(24 * time.Hour))
+	if sub.Status != "active" || !subscriptionDueOn(&sub, tomorrow) {
+		return false, nil // paused or off-cadence — wait for a real morning
+	}
+	dayCost := round2(sub.UnitPrice*float64(sub.Qty)) + subscriptionDeliveryFee
+	if wv, werr := s.wallet(ctx, consumerID); werr != nil || wv.Available < dayCost {
+		return false, nil // unfunded tomorrow — the noon rule would skip it
+	}
+
 	acct, aerr := s.repo.findAccountByID(ctx, consumerID)
 	if aerr != nil || acct == nil {
-		return errInternal("crm: pack2 account lookup failed")
+		return false, errInternal("crm: pack2 account lookup failed")
 	}
 	addr, derr := s.subscriptionAddress(ctx, consumerID)
 	if derr != nil || addr == nil {
-		return errInternal("crm: pack2 address lookup failed")
+		return false, errInternal("crm: pack2 address lookup failed")
 	}
-	day := istDay(time.Now().Add(24 * time.Hour))
-	p2, perr := s.mintPromoPackOrder(ctx, acct, addr, day, 2)
+	p2, perr := s.mintPromoPackOrder(ctx, acct, addr, tomorrow, 2)
 	if perr != nil {
-		return perr // event retries; state=pending resumes here
+		return false, perr // outbox/sweep retries; state=pending resumes here
 	}
 	res, uerr := s.repo.offers().UpdateOne(ctx,
 		bson.D{
@@ -711,14 +1001,14 @@ func (s *service) crmOnRechargeSettled(ctx context.Context, consumerID primitive
 		},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "pack2_order_id", Value: p2.OrderID}, {Key: "updated_at", Value: time.Now().UTC()}}}})
 	if uerr != nil || res.ModifiedCount == 0 {
-		// Lost to a concurrent resume — retract our duplicate pack.
+		// Lost to a concurrent attach — retract our duplicate pack.
 		s.crmRetractPromoOrder(ctx, p2.OrderID)
-		return nil
+		return false, nil
 	}
-	// W-04 only AFTER the pack is really minted (never promise milk that has no
-	// order behind it); the dispatch-log claim dedupes retries.
+	// W-04 only AFTER the pack is really minted and riding tomorrow's delivery
+	// ("scheduled free with tomorrow's delivery" is now literally true).
 	s.crmDispatch(ctx, "W-04", consumerID, map[string]string{})
-	return nil
+	return true, nil
 }
 
 // markHasPaidOrder sets the CH-19 fact on the first order whose SETTLED value

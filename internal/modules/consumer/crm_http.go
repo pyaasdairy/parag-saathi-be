@@ -145,6 +145,46 @@ func (h *handler) crmMyOffer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// crmSelfEnrolHandler — POST /crm/enrol/self: the app's own funnel (terms
+// §3.1). Identity from the consumer JWT; body carries only the plan choice.
+func (h *handler) crmSelfEnrolHandler(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var in crmEnrolInput
+	if err := decode(r, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Self-serve NEVER carries promoter attribution or another phone/address —
+	// those fields are operator-console inputs; scrub whatever the client sent.
+	in.Phone, in.Name, in.Line1, in.Pincode, in.Lat, in.Lng = "", "", "", "", 0, 0
+	in.PromoterID = ""
+	res, err := h.svc.crmSelfEnrol(r.Context(), id, in)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// crmEligibilityHandler — GET /crm/eligibility: the server-truth funnel gate.
+func (h *handler) crmEligibilityHandler(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	status, err := h.svc.crmEligibility(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": status})
+}
+
 // ── Operator console (the handover profile) ────────────────────────────────
 
 func (h *handler) crmEnrolHandler(w http.ResponseWriter, r *http.Request) {
