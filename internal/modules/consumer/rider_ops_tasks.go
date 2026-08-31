@@ -397,7 +397,29 @@ func (r *repository) riderBindScanCode(ctx context.Context, b riderScanBinding) 
 		if e != nil {
 			return false, httpx.Internal(fmt.Errorf("read scan binding: %w", e))
 		}
-		return existing.DeliveryID == b.DeliveryID, nil
+		if existing.DeliveryID == b.DeliveryID {
+			return true, nil // re-scan of a label already on this task
+		}
+		// SELF-HEAL: crates are REUSED every morning, but a binding released
+		// only on undo made each label single-use — one delivered task and the
+		// physical crate was unscannable forever. A label whose holding task is
+		// already CLOSED (delivered/failed/cancelled) is stale by definition:
+		// steal it for the live task. The delete is guarded on the exact
+		// (code, delivery_id) pair, so racing scanners fall through to a plain
+		// rejected and simply re-scan.
+		if holder, herr := r.findDeliveryByID(ctx, existing.DeliveryID); herr == nil && holder != nil {
+			switch holder.Status {
+			case "DELIVERED", "FAILED", "CANCELLED":
+				if _, derr := coll.DeleteOne(ctx, bson.D{
+					{Key: "code", Value: b.Code}, {Key: "delivery_id", Value: existing.DeliveryID},
+				}); derr == nil {
+					if _, ierr := coll.InsertOne(ctx, b); ierr == nil {
+						return true, nil
+					}
+				}
+			}
+		}
+		return false, nil
 	}
 	return true, nil
 }
@@ -846,16 +868,25 @@ func (s *service) riderReverseDeliveryDebit(ctx context.Context, d *delivery, ma
 // idempotent per (customer, IST day), so re-delivering the same day re-uses the
 // same decision and never burns a second free day.
 func (s *service) riderRestoreOrderOutForDelivery(ctx context.Context, d *delivery) {
-	_, _ = s.repo.orders.UpdateOne(ctx,
-		bson.D{{Key: "order_id", Value: d.OrderID}, {Key: "status", Value: "delivered"}},
-		bson.D{
-			{Key: "$set", Value: bson.D{
-				{Key: "status", Value: "out_for_delivery"},
-				{Key: "can_review", Value: false},
-				{Key: "updated_at", Value: time.Now().UTC()},
-			}},
-			{Key: "$unset", Value: bson.D{{Key: "proof_photo_url", Value: ""}}},
-		})
+	// LOAD-BEARING, so a failure is retried once and then logged at ERROR: an
+	// order left "delivered" while its task is undone is exactly what the
+	// consumer app's settle sweep bills — a silent miss here charges the
+	// customer for milk the rider took back.
+	filter := bson.D{{Key: "order_id", Value: d.OrderID}, {Key: "status", Value: "delivered"}}
+	update := bson.D{
+		{Key: "$set", Value: bson.D{
+			{Key: "status", Value: "out_for_delivery"},
+			{Key: "can_review", Value: false},
+			{Key: "updated_at", Value: time.Now().UTC()},
+		}},
+		{Key: "$unset", Value: bson.D{{Key: "proof_photo_url", Value: ""}}},
+	}
+	if _, err := s.repo.orders.UpdateOne(ctx, filter, update); err != nil {
+		if _, err2 := s.repo.orders.UpdateOne(ctx, filter, update); err2 != nil {
+			s.log.ErrorContext(ctx, "UNDO ORDER RESTORE FAILED — order still shows delivered; the settle sweep may bill it (fix by hand)",
+				slog.String("order_id", d.OrderID), slog.Any("err", err2))
+		}
+	}
 }
 
 // ── 2.5 Per-order compliance steps ──────────────────────────────────────────

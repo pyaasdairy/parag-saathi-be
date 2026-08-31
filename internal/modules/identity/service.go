@@ -185,7 +185,6 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 	if err != nil && !isNotFound(err) {
 		return nil, err
 	}
-	carriedAttempts := 0
 	if prev != nil {
 		issuedAt := prev.ExpiresAt.Add(-s.deps.Cfg.OTPTTL)
 		if wait := otpResendCooldown - now.Sub(issuedAt); wait > 0 {
@@ -193,12 +192,20 @@ func (s *service) requestOTP(ctx context.Context, phone string) (*otpRequestResp
 				fmt.Sprintf("a code was just sent — please wait %d seconds before asking for another",
 					int(wait.Seconds())+1))
 		}
-		carriedAttempts = prev.Attempts
-		if carriedAttempts >= otpMaxAttemptsPerWindow {
-			return nil, httpx.TooManyRequestsCode("OTP_LOCKED",
-				"too many incorrect codes for this number — wait a few minutes and try again")
-		}
 	}
+	// Attempts deliberately RESET to zero on every new challenge. Carrying
+	// them forward looked like a stronger brute-force bound, but it handed
+	// any UNAUTHENTICATED caller a lockout weapon: five wrong verifies
+	// against a victim's live challenge locked the victim's own login (an
+	// SMS-bombing fix that became a login-DoS). The brute-force math does
+	// not need the carry: every challenge mints a FRESH 6-digit code, so
+	// with the 60-second resend cooldown an attacker gets at most
+	// otpMaxAttemptsPerWindow guesses per minute against a code that
+	// ROTATES each round — ~10^6/5 rounds to expect a hit, i.e. months of
+	// sustained traffic that the per-IP limiter and the cooldown both
+	// throttle. Per-challenge capping keeps the bound; resetting restores
+	// the real owner's ability to log in with a fresh code.
+	carriedAttempts := 0
 
 	code, err := auth.GenerateNumericOTP(otpLength)
 	if err != nil {

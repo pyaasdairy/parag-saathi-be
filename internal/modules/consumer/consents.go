@@ -212,12 +212,24 @@ func (r *repository) upsertConsentState(ctx context.Context, cid primitive.Objec
 		t := in.OccurredAt
 		doc.RevokedAt = &t
 	}
-	_, err = r.consents.UpdateOne(ctx,
+	up, err := r.consents.UpdateOne(ctx,
 		bson.D{{Key: "consumer_id", Value: cid}, {Key: "kind", Value: in.Type}},
 		bson.D{{Key: "$setOnInsert", Value: doc}},
 		options.Update().SetUpsert(true))
 	if err != nil && !mongo.IsDuplicateKeyError(err) {
 		return errInternal("consent upsert failed")
+	}
+	if err == nil && up.UpsertedCount == 1 {
+		return nil // we created the doc — our record IS the state
+	}
+	// 3) The doc existed after all (a concurrent writer created it between our
+	// step-1 miss and here). Absorbing that silently could DROP a NEWER revoke:
+	// the racer may have inserted an older grant. Re-run the guarded update —
+	// the ordering rule now decides against a real doc, so a newer record
+	// lands and an older replay stays a no-op. One retry suffices: the doc
+	// cannot disappear again (erasure aside), so step 1's guard is now total.
+	if _, err := r.consents.UpdateOne(ctx, cond, bson.D{{Key: "$set", Value: set}}); err != nil {
+		return errInternal("consent update failed")
 	}
 	return nil
 }
@@ -229,16 +241,39 @@ func (r *repository) upsertConsentState(ctx context.Context, cid primitive.Objec
 // any read/write error → errInternal (the guard itself already fails closed
 // on a missing/stale doc).
 func (r *repository) recomputePromoConsent(ctx context.Context, cid primitive.ObjectID, now time.Time) *apiError {
+	// CONVERGE-VERIFY: two concurrent recomputes (a grant batch racing a
+	// revoke batch) can each derive from a read the other's write invalidates,
+	// and the stale answer could land LAST — leaving the aggregate active
+	// after a full opt-out. So: derive+write, then re-derive from a fresh
+	// read; if the answer moved, write again (bounded). The last writer always
+	// re-checks, so the aggregate settles on the true final row state.
+	var lastState string
+	for pass := 0; pass < 3; pass++ {
+		state, aerr := r.recomputePromoConsentOnce(ctx, cid, now)
+		if aerr != nil {
+			return aerr
+		}
+		if state == lastState && pass > 0 {
+			return nil // stable across a re-read — converged
+		}
+		lastState = state
+	}
+	return nil
+}
+
+// recomputePromoConsentOnce derives the aggregate from one read and writes it;
+// returns "active"/"revoked" so the caller can detect convergence.
+func (r *repository) recomputePromoConsentOnce(ctx context.Context, cid primitive.ObjectID, now time.Time) (string, *apiError) {
 	cur, err := r.consents.Find(ctx, bson.D{
 		{Key: "consumer_id", Value: cid},
 		{Key: "kind", Value: bson.D{{Key: "$in", Value: marketingConsentKinds}}},
 	})
 	if err != nil {
-		return errInternal("consent read failed")
+		return "", errInternal("consent read failed")
 	}
 	var rows []consentDoc
 	if err := cur.All(ctx, &rows); err != nil {
-		return errInternal("consent decode failed")
+		return "", errInternal("consent decode failed")
 	}
 	var best *consentDoc // most recent ACTIVE grant across channels
 	for i := range rows {
@@ -258,9 +293,9 @@ func (r *repository) recomputePromoConsent(ctx context.Context, cid primitive.Ob
 			bson.D{{Key: "$set", Value: bson.D{
 				{Key: "revoked_at", Value: now}, {Key: "updated_at", Value: now},
 			}}}); err != nil {
-			return errInternal("consent aggregate update failed")
+			return "", errInternal("consent aggregate update failed")
 		}
-		return nil
+		return "revoked", nil
 	}
 	update := bson.D{{Key: "$set", Value: bson.D{
 		{Key: "revoked_at", Value: nil},
@@ -276,12 +311,12 @@ func (r *repository) recomputePromoConsent(ctx context.Context, cid primitive.Ob
 			// Lost an upsert race on the unique (consumer_id, kind) index —
 			// the doc exists now; re-apply as a plain update.
 			if _, err2 := r.consents.UpdateOne(ctx, filter, update); err2 == nil {
-				return nil
+				return "active", nil
 			}
 		}
-		return errInternal("consent aggregate update failed")
+		return "", errInternal("consent aggregate update failed")
 	}
-	return nil
+	return "active", nil
 }
 
 // Indexes for both collections live in ensureIndexes' FATAL specs table

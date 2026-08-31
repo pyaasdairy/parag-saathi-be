@@ -245,6 +245,25 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 	if _, err := r.deliveries.DeleteMany(ctx, bson.D{{Key: "consumer_id", Value: id.Hex()}}); err != nil {
 		return errInternal("erasure failed")
 	}
+	// Rider-console copies of consumer PII (DPDP): the door reference photo is
+	// pure PII — delete it. Cash dues are FINANCIAL records — the amounts and
+	// settlement state must survive reconciliation, so scrub the identity
+	// fields instead of deleting the row.
+	if _, err := db.Collection(collDoorReferencePic).DeleteMany(ctx,
+		bson.D{{Key: "consumer_id", Value: id.Hex()}}); err != nil {
+		return errInternal("erasure failed")
+	}
+	if acct, err := r.findAccountByID(ctx, id); err == nil && acct != nil && acct.Phone != "" {
+		phone10 := acct.Phone[len(acct.Phone)-10:]
+		if _, err := db.Collection(collRiderCash).UpdateMany(ctx,
+			bson.D{{Key: "phone", Value: bson.D{{Key: "$in", Value: bson.A{acct.Phone, phone10}}}}},
+			bson.D{
+				{Key: "$set", Value: bson.D{{Key: "customer_name", Value: "erased account"}, {Key: "address_line", Value: ""}}},
+				{Key: "$unset", Value: bson.D{{Key: "phone", Value: ""}}},
+			}); err != nil {
+			return errInternal("erasure failed")
+		}
+	}
 	// DELIBERATELY RETAINED: free_pack_claims (keyed by phone) — the 2+2
 	// one-per-household gate is fraud-prevention data; erase-and-resignup must
 	// not re-arm a marketing offer (DPDP permits retention for that purpose).
