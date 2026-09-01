@@ -132,15 +132,29 @@ func (h *handler) crmMyOffer(w http.ResponseWriter, r *http.Request) {
 	// in the transition log, and promoter attribution: fraud-relevant internals
 	// a customer must never read off their own wire traffic. The operator
 	// route (crmOfferByPhone) keeps the full document.
+	view := map[string]any{
+		"offer_id":        o.OfferID,
+		"enrolled_at":     o.EnrolledAt,
+		"pack1_state":     o.Pack1State,
+		"pack2_state":     o.Pack2State,
+		"subscription_id": o.SubscriptionID,
+	}
+	// The REAL deadline, server-computed (§16 allows stating real urgency and
+	// forbids inventing it): while pack 2 is still locked and the 7-day window
+	// is running, expose the last day a qualifying recharge counts, so the
+	// funnel can show "recharge by <date> · N days left" without any client
+	// clock arithmetic.
+	if o.Pack2State == pack2Locked && o.FirstDeliveryAt != nil {
+		cfg := crmOfferConfig()
+		if day := daysSinceFirstDelivery(o, time.Now()); day <= cfg.Pack2GraceDays {
+			deadline := o.FirstDeliveryAt.In(istZone).AddDate(0, 0, cfg.Pack2GraceDays)
+			view["pack2_recharge_by"] = deadline.Format("2006-01-02")
+			view["pack2_days_left"] = cfg.Pack2GraceDays - day
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enrolled": true,
-		"offer": map[string]any{
-			"offer_id":        o.OfferID,
-			"enrolled_at":     o.EnrolledAt,
-			"pack1_state":     o.Pack1State,
-			"pack2_state":     o.Pack2State,
-			"subscription_id": o.SubscriptionID,
-		},
+		"enrolled":                 true,
+		"offer":                    view,
 		"entitled_free_deliveries": entitledFreeDeliveries(o),
 	})
 }
