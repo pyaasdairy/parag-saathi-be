@@ -715,7 +715,12 @@ func (s *service) crmHouseholdClaimed(ctx context.Context, consumerID primitive.
 //	not_serviceable   → funnel visible, CTA routes to the waitlist
 func (s *service) crmEligibility(ctx context.Context, consumerID primitive.ObjectID) (status string, err error) {
 	if !crmEnabled() {
-		return "not_eligible", nil // CRM off → the app shows nothing new
+		// DISABLED must be indistinguishable from a backend that has no CRM at
+		// all: the app treats a 404 as "legacy rules apply" (the 2+2 pitch
+		// stays). Answering not_eligible here would hide BOTH offers — no
+		// acquisition pitch anywhere. The funnel switchover is therefore
+		// exactly one dashboard action: set CRM_ENABLED=true.
+		return "", errNotFound("route not found")
 	}
 	if o, oerr := s.repo.findOffer(ctx, consumerID); oerr != nil {
 		return "", oerr
