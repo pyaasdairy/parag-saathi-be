@@ -89,6 +89,8 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 		// A payment order id is globally unique — the top-up idempotency anchor.
 		{r.payOrders, bson.D{{Key: "order_id", Value: 1}}, options.Index().SetUnique(true)},
 		{r.payOrders, bson.D{{Key: "consumer_id", Value: 1}}, nil},
+		// The reconciliation sweep's scan: still-CREATED orders, oldest first.
+		{r.payOrders, bson.D{{Key: "status", Value: 1}, {Key: "created_at", Value: 1}}, nil},
 		// Consent current-state: ONE doc per (consumer, kind). LOAD-BEARING
 		// unique index — it is the opt-out-wins invariant: without it a racing
 		// upsert could leave a second ACTIVE grant doc behind that a revoke
@@ -568,6 +570,41 @@ func (r *repository) insertPaymentOrder(ctx context.Context, o *paymentOrder) er
 		return errInternal("payment order create failed")
 	}
 	return nil
+}
+
+// findPaymentOrderByID loads an order by its Razorpay id with NO consumer
+// scope. ONLY the recovery paths (razorpay_recovery.go) may use it: a webhook
+// and a gateway reconciliation have no authenticated caller, so the owner has
+// to come FROM the stored row. Every consumer-facing path keeps using
+// findPaymentOrder below, which binds the lookup to the caller.
+func (r *repository) findPaymentOrderByID(ctx context.Context, orderID string) (*paymentOrder, error) {
+	var o paymentOrder
+	err := r.payOrders.FindOne(ctx, bson.D{{Key: "order_id", Value: orderID}}).Decode(&o)
+	if isNoDocs(err) {
+		return nil, errNotFound("payment order not found")
+	}
+	if err != nil {
+		return nil, errInternal("payment order lookup failed")
+	}
+	return &o, nil
+}
+
+// listPendingPaymentOrders returns payment orders still at CREATED that are
+// older than `olderThan` (the settle grace) and newer than `notBefore` (the
+// horizon that keeps the sweep's cost bounded), oldest first.
+func (r *repository) listPendingPaymentOrders(ctx context.Context, olderThan, notBefore time.Time, limit int64) ([]paymentOrder, error) {
+	cur, err := r.payOrders.Find(ctx, bson.D{
+		{Key: "status", Value: "CREATED"},
+		{Key: "created_at", Value: bson.D{{Key: "$lt", Value: olderThan}, {Key: "$gt", Value: notBefore}}},
+	}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetLimit(limit))
+	if err != nil {
+		return nil, errInternal("pending payment scan failed")
+	}
+	var out []paymentOrder
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("pending payment decode failed")
+	}
+	return out, nil
 }
 
 // findPaymentOrder loads an order by its Razorpay id, scoped to the consumer so

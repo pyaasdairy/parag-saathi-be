@@ -86,6 +86,10 @@ func Register(r chi.Router, d *deps.Deps) {
 		svc.ensureCRMIndexes(ctx)
 	}()
 	go svc.crmWorker(context.Background())
+	// Second recovery net for captured-but-unconfirmed payments (the first is
+	// the webhook above). Inert without a real Razorpay key secret.
+	go svc.paymentReconcileWorker(context.Background())
+	log.Info(svc.rzpRecoveryStatus())
 
 	r.Route("/consumer", func(cr chi.Router) {
 		// Raw-JSON 404/405 so the FE apiClient reads {message}, not the
@@ -148,6 +152,12 @@ func Register(r chi.Router, d *deps.Deps) {
 		// COO can trigger a manual refresh from a browser bookmark.
 		cr.Post("/dolibarr/webhook", h.dolibarrWebhook)
 		cr.Get("/dolibarr/webhook", h.dolibarrWebhook)
+
+		// Razorpay server-to-server webhook — the gateway has no JWT, so the
+		// request is authenticated by its SIGNATURE over the raw body
+		// (razorpay_recovery.go). Without RAZORPAY_WEBHOOK_SECRET it rejects
+		// everything, so the route is inert until the dashboard is configured.
+		cr.Post("/payments/razorpay/webhook", h.razorpayWebhook)
 
 		// ── Authenticated (consumer JWT) ──
 		cr.Group(func(pr chi.Router) {

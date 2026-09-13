@@ -68,6 +68,11 @@ type service struct {
 	// razorpay.go. Empty secret → offline dev seam (gated by OTP dev mode).
 	rzpKeyID     string
 	rzpKeySecret string
+	// rzpWebhookSecret authenticates Razorpay's server-to-server webhook
+	// (razorpay_recovery.go). DIFFERENT from the key secret above: it is set in
+	// the Razorpay dashboard when the webhook URL is registered. Empty → the
+	// webhook endpoint rejects every request, so this ships inert.
+	rzpWebhookSecret string
 	// trace is the operator's public QR resolver, reused READ-ONLY for the
 	// consumer traceability bridge (tracebridge.go). Never mutates operator state.
 	trace *publictrace.Service
@@ -101,6 +106,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		consumerKey:        []byte(auth.HMACHash(d.Cfg.JWTSecret, "consumer-jwt-v1")),
 		rzpKeyID:           os.Getenv("RAZORPAY_KEY_ID"),
 		rzpKeySecret:       os.Getenv("RAZORPAY_KEY_SECRET"),
+		rzpWebhookSecret:   os.Getenv("RAZORPAY_WEBHOOK_SECRET"),
 		trace:              publictrace.NewService(d, log),
 		appKey:             os.Getenv("CONSUMER_APP_KEY"),
 		sms:                sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
