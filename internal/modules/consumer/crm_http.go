@@ -132,11 +132,27 @@ func (h *handler) crmMyOffer(w http.ResponseWriter, r *http.Request) {
 	// in the transition log, and promoter attribution: fraud-relevant internals
 	// a customer must never read off their own wire traffic. The operator
 	// route (crmOfferByPhone) keeps the full document.
+	// The 7-day window closes at the IST day boundary, but the sweep that flips
+	// pack 2 to expired only runs from 10:30 IST. In between, the stored state
+	// still says "locked" while crmOnRechargeSettled has ALREADY stopped
+	// honouring recharges (crm_offers.go: day > grace returns early) — so the
+	// card went on offering a free pack for ₹500 that could no longer earn one.
+	// The customer's money is never lost (the wallet credit happens before the
+	// CRM event), but §16 forbids stating an offer we cannot honour. Report the
+	// window as CLOSED the moment it is closed; the sweep makes the same call
+	// authoritative minutes later, and the app already renders no pitch for an
+	// expired pack. Entitlement is computed from the STORED state, untouched.
+	pack2View := o.Pack2State
+	windowClosed := o.Pack2State == pack2Locked && o.FirstDeliveryAt != nil &&
+		daysSinceFirstDelivery(o, time.Now()) > crmOfferConfig().Pack2GraceDays
+	if windowClosed {
+		pack2View = pack2Expired
+	}
 	view := map[string]any{
 		"offer_id":        o.OfferID,
 		"enrolled_at":     o.EnrolledAt,
 		"pack1_state":     o.Pack1State,
-		"pack2_state":     o.Pack2State,
+		"pack2_state":     pack2View,
 		"subscription_id": o.SubscriptionID,
 	}
 	// The REAL deadline, server-computed (§16 allows stating real urgency and
@@ -144,7 +160,7 @@ func (h *handler) crmMyOffer(w http.ResponseWriter, r *http.Request) {
 	// is running, expose the last day a qualifying recharge counts, so the
 	// funnel can show "recharge by <date> · N days left" without any client
 	// clock arithmetic.
-	if o.Pack2State == pack2Locked && o.FirstDeliveryAt != nil {
+	if !windowClosed && o.Pack2State == pack2Locked && o.FirstDeliveryAt != nil {
 		cfg := crmOfferConfig()
 		if day := daysSinceFirstDelivery(o, time.Now()); day <= cfg.Pack2GraceDays {
 			deadline := o.FirstDeliveryAt.In(istZone).AddDate(0, 0, cfg.Pack2GraceDays)

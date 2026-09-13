@@ -500,14 +500,22 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 
 	// 6) the customer's chosen plan (a NORMAL subscription — ships only when
 	// funded) and the standalone ₹0 pack-1 order for the next IST morning.
-	sub, serr := s.crmCreateSubscription(ctx, acct.ID, planProduct, planQty, planFreq)
+	sub, minted, serr := s.crmEnsureSubscription(ctx, acct.ID, planProduct, planQty, planFreq)
 	if serr != nil {
 		return nil, serr // offer stays incomplete — a retry resumes right here
+	}
+	// retractSub undoes ONLY a plan this call minted. A plan the household
+	// already had is theirs — deleting it on a failed enrolment would cancel
+	// the milk they were already expecting.
+	retractSub := func() {
+		if minted {
+			s.crmDeleteSubscription(ctx, sub.SubscriptionID)
+		}
 	}
 	packDay := istDay(time.Now().Add(24 * time.Hour))
 	pack1, perr := s.mintPromoPackOrder(ctx, acct, addr, packDay, 1)
 	if perr != nil {
-		s.crmDeleteSubscription(ctx, sub.SubscriptionID) // never shipped — safe to retract
+		retractSub() // never shipped — safe to retract
 		return nil, perr
 	}
 
@@ -529,7 +537,7 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 	if res.ModifiedCount == 0 {
 		// A concurrent resume finalized first — retract our duplicates and
 		// report the winner's result.
-		s.crmDeleteSubscription(ctx, sub.SubscriptionID)
+		retractSub()
 		s.crmRetractPromoOrder(ctx, pack1.OrderID)
 		winner, werr := s.repo.findOffer(ctx, acct.ID)
 		if werr != nil || winner == nil || winner.Pack1OrderID == "" {
@@ -600,6 +608,46 @@ func (s *service) crmRetractPromoOrder(ctx context.Context, orderID string) {
 	); err != nil {
 		s.log.Warn("crm: losing-delivery retract failed", "order", orderID, "err", err)
 	}
+}
+
+// crmEnsureSubscription returns the plan the offer should ride, ADOPTING one
+// the household already has instead of minting a second.
+//
+// THE BUG THIS CLOSES: enrolment used to call crmCreateSubscription
+// unconditionally. Eligibility only refuses on PAID order history, and a fresh
+// subscriber has none — createSubscription writes no order, and the sweep only
+// materialises tomorrow's preview from 13:00 IST. So a household that
+// subscribed this morning with an unfunded wallet still read as `eligible`,
+// was shown the funnel by the app, and on enrolling ended up with TWO active
+// daily plans. Both then locked every morning once funded: two deliveries
+// billed for milk they ordered once.
+//
+// Adopting (rather than refusing enrolment) is deliberate: such a household has
+// never PAID, so the campaign is genuinely theirs — they simply must not be
+// given a second plan to pay for. Their own choice of milk wins; the free packs
+// are the campaign SKU regardless of what they subscribed to.
+//
+// `minted` reports whether this call created the plan, so a failed enrolment
+// retracts only its own scaffolding and never cancels the customer's plan.
+func (s *service) crmEnsureSubscription(ctx context.Context, consumerID primitive.ObjectID, productID string, qty int, frequency string) (sub *subscription, minted bool, err error) {
+	existing, lerr := s.repo.listSubscriptions(ctx, consumerID)
+	if lerr != nil {
+		return nil, false, lerr
+	}
+	for i := range existing {
+		// listSubscriptions already excludes cancelled; a paused plan still
+		// belongs to the household and resumes on its own terms.
+		if existing[i].Status == "active" || existing[i].Status == "paused" {
+			s.log.Info("crm: adopting the household's existing plan instead of minting a second",
+				"consumer", consumerID.Hex(), "subscription", existing[i].SubscriptionID, "status", existing[i].Status)
+			return &existing[i], false, nil
+		}
+	}
+	created, cerr := s.crmCreateSubscription(ctx, consumerID, productID, qty, frequency)
+	if cerr != nil {
+		return nil, false, cerr
+	}
+	return created, true, nil
 }
 
 // crmCreateSubscription creates the campaign's NORMAL daily plan: the offer
