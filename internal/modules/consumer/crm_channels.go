@@ -66,6 +66,11 @@ const (
 	crmMSG91FlowEndpoint = "https://control.msg91.com/api/v5/flow/"
 	// Meta Graph API base for the WhatsApp Cloud API (POST {phone_id}/messages).
 	crmWAGraphBase = "https://graph.facebook.com/v19.0"
+	// crmDLTDeliveryBy fills the registered ##time## slot ("your free pack
+	// arrives tomorrow morning by ##time##"). It is the campaign's published
+	// delivery promise — crm_triggers.json config.delivery_by = "07:00" — in the
+	// customer-facing wording the body was approved with.
+	crmDLTDeliveryBy = "7 am"
 )
 
 // errCRMTransient marks a send failure whose outcome is UNKNOWN (network error,
@@ -404,6 +409,25 @@ func (c *smsChannel) deliver(ctx context.Context, phone string, t crmTrigger, tp
 			return fmt.Errorf("sms: variable %s carries Devanagari — SMS is roman-only", n)
 		}
 		rec[strings.ToLower(n)] = values[i]
+	}
+	// The DLT-approved body names its OWN variables, and those names need not
+	// match our template's tokens: the registered Welcome Litre bodies declare
+	// ##url## and ##time## where ours carry [LINK] and (for W-01) no token at
+	// all. MSG91 renders a declared variable it was never given as EMPTY —
+	// "arrives tomorrow morning by ." — so the registered vocabulary is supplied
+	// alongside our own names. Keys the body does not declare are ignored by the
+	// provider, and an alias NEVER overwrites a value the template itself
+	// resolved (our token wins — it is the one C-01 checked for a real value).
+	for alias, v := range map[string]string{
+		"url":  params["LINK"],
+		"time": crmDLTDeliveryBy,
+	} {
+		if v == "" || crmHasDevanagari(v) {
+			continue
+		}
+		if _, taken := rec[alias]; !taken {
+			rec[alias] = v
+		}
 	}
 	payload := map[string]any{
 		"template_id": c.dlt[t.ID].forLang(crmSMSLang(tpl)),

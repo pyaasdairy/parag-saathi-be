@@ -566,3 +566,57 @@ func TestCRMChannelsInertWithoutKeys(t *testing.T) {
 		t.Fatalf("malformed map must collapse to nil, got %v", m)
 	}
 }
+
+// THE DLT VOCABULARY GAP (live-verified 13 Sep 2026): the approved Welcome
+// Litre bodies declare ##url## and ##time##, while our templates carry [LINK]
+// and — for W-01 — no token at all. MSG91 renders a declared variable it was
+// never given as EMPTY ("arrives tomorrow morning by ."), so the registered
+// names must ride along with ours. W-01 is the worst case: zero tokens of our
+// own, both provider slots to fill.
+func TestCRMSMSSuppliesDLTVariableNames(t *testing.T) {
+	var got struct {
+		Recipients []map[string]string `json:"recipients"`
+	}
+	ch, _ := testSMSChannel(t, map[string]string{"W-01": "1207160000000011111"}, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Write([]byte(`{"type":"success","request_id":"x"}`))
+	})
+	// W-01's real shape: a body with NO tokens at all.
+	tr := crmTrigger{ID: "W-01", Category: "service_implicit"}
+	tpl := crmTemplate{
+		EN: "You're set. Tomorrow by 7 am: 500 ml Parag Full Cream, free.",
+		HI: "Ho gaya. Kal subah 7 baje tak 500 ml Parag Full Cream — muft.",
+	}
+	if err := ch.deliver(context.Background(), "919876543210", tr, tpl,
+		map[string]string{"LINK": "https://pyaas.app"}); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	rec := got.Recipients[0]
+	if rec["url"] != "https://pyaas.app" {
+		t.Fatalf("##url## would render blank: %+v", rec)
+	}
+	if rec["time"] != crmDLTDeliveryBy {
+		t.Fatalf("##time## would render blank: %+v", rec)
+	}
+}
+
+// The alias must never clobber a value the template itself resolved: when our
+// own body carries [URL], that value is the one C-01 verified is non-empty.
+func TestCRMSMSAliasNeverOverwritesOwnToken(t *testing.T) {
+	var got struct {
+		Recipients []map[string]string `json:"recipients"`
+	}
+	ch, _ := testSMSChannel(t, map[string]string{"W-07": "1207160000000022222"}, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Write([]byte(`{"type":"success","request_id":"x"}`))
+	})
+	tr := crmTrigger{ID: "W-07", Category: "service_implicit"}
+	tpl := crmTemplate{EN: "Window closed — [URL]", HI: "Window band — [URL]"}
+	if err := ch.deliver(context.Background(), "919876543210", tr, tpl,
+		map[string]string{"URL": "https://own.example", "LINK": "https://alias.example"}); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if rec := got.Recipients[0]; rec["url"] != "https://own.example" {
+		t.Fatalf("alias clobbered the template's own resolved token: %+v", rec)
+	}
+}
