@@ -318,6 +318,13 @@ func Register(r chi.Router, d *deps.Deps) {
 				sm.Put("/stores/{storeId}/zone", h.putZone)
 			})
 
+			// Where riders collect stock before a round. Both consoles read it;
+			// only a super admin sets it (/consumer/admin/delivery-settings).
+			op.Group(func(pr chi.Router) {
+				pr.Use(middleware.RequireRoles(domain.RoleDeliveryRider, domain.RoleStoreManager))
+				pr.Get("/delivery/pickup", h.pickupHandler)
+			})
+
 			// Delivery rider (DELIVERY_RIDER): the last-mile task lifecycle.
 			op.Group(func(dr chi.Router) {
 				dr.Use(middleware.RequireRoles(domain.RoleDeliveryRider))

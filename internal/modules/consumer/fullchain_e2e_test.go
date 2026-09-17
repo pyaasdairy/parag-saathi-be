@@ -260,7 +260,7 @@ func TestFullChainNewCustomerOrderToDelivered(t *testing.T) {
 	}
 	if _, err := w.svc.deliverDelivery(ctx, w.rider, task.ID, deliverInput{
 		ProofPhoto: "https://example.test/proof.jpg", ProofNote: "handed over",
-		Geo:        &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true,
+		Geo: &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true,
 	}); err != nil {
 		t.Fatalf("deliverDelivery: %v", err)
 	}

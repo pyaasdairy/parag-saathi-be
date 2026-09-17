@@ -12,6 +12,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 )
 
 // DELIVERY EXTRAS — things the store console, the rider console and the admin
@@ -103,18 +105,12 @@ func orderDeliveryDate(o *order) string {
 	return o.ScheduledFor
 }
 
-// deliveryDay reads a task's due day, falling back to the "YYYY-MM-DD · window"
-// slot label on tasks created before DeliveryDate existed.
-func deliveryDay(d *delivery) string {
-	if d.DeliveryDate != "" {
-		return d.DeliveryDate
-	}
-	if len(d.Slot) >= 10 {
-		if _, ok := parseDay(d.Slot[:10]); ok {
-			return d.Slot[:10]
-		}
-	}
-	return ""
+// pickupHandler — GET /consumer/delivery/pickup: where riders collect stock.
+// Readable by the two roles that act on it (rider, store manager); only a
+// super admin may CHANGE it (admin_crm.go). Without this the address was
+// settable but invisible to the people who need it.
+func (h *handler) pickupHandler(w http.ResponseWriter, r *http.Request) {
+	httpx.JSON(w, http.StatusOK, h.svc.pickupPoint(r.Context()))
 }
 
 // ── Proof photos (private bucket → short-lived per-file URL) ─────────────────
