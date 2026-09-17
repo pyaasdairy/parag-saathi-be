@@ -112,7 +112,13 @@ type order struct {
 	OfferPack     int               `bson:"offer_pack,omitempty" json:"offer_pack,omitempty"`
 	BuyerGSTIN    string            `bson:"buyer_gstin,omitempty"   json:"buyer_gstin,omitempty"`
 	ProofPhotoURL string            `bson:"proof_photo_url,omitempty" json:"proof_photo_url,omitempty"`
-	Lane          string            `bson:"lane"                    json:"lane,omitempty"`
+	// Tracking extras the consumer app already reads (app/order/[id].tsx):
+	// store_lat/store_lng is the pickup point the rider left from (the map's
+	// trip origin); delivered_at comes from the delivery task.
+	StoreLat    *float64 `bson:"store_lat,omitempty"      json:"store_lat,omitempty"`
+	StoreLng    *float64 `bson:"store_lng,omitempty"      json:"store_lng,omitempty"`
+	DeliveredAt string   `bson:"delivered_at,omitempty"   json:"delivered_at,omitempty"`
+	Lane        string   `bson:"lane"                    json:"lane,omitempty"`
 	// TrialFree marks a 2+2 free-day subscription delivery: the sticker Total
 	// stands, but the wallet charge at delivery is 0 (trialChargeFor). Set at
 	// creation from the trial phase — DISPLAY + ANALYTICS only, it never gates the
@@ -494,6 +500,14 @@ func (h *handler) getOrder(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// Tracking screen: the proof photo lives in a private bucket — hand the app
+	// a short-lived URL for this one file — and the map's trip origin is the
+	// pickup point the rider leaves from.
+	o.ProofPhotoURL = h.svc.proofPhotoURL(r.Context(), o.ProofPhotoURL)
+	if o.StoreLat == nil && o.Rider != nil {
+		p := h.svc.pickupPoint(r.Context())
+		o.StoreLat, o.StoreLng = &p.Lat, &p.Lng
 	}
 	writeJSON(w, http.StatusOK, o)
 }

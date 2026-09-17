@@ -1005,8 +1005,11 @@ func riderHandoverSubtitle(p *deliveryPrefsDoc) string {
 		case "RING_BELL":
 			return "Ring the bell and wait for the customer"
 		}
-		if p.RingBell {
-			return "Ring the bell and wait for the customer"
+		if p.RingBell != nil {
+			if *p.RingBell {
+				return "Ring the bell and wait for the customer"
+			}
+			return "Do NOT ring the bell"
 		}
 	}
 	return "Follow the customer's handover preference"

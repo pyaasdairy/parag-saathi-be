@@ -41,6 +41,10 @@ func Register(r chi.Router, d *deps.Deps) {
 	if err := repo.ensureRiderOpsIndexes(ctx); err != nil {
 		log.Warn("rider-ops index setup incomplete", slog.Any("err", err))
 	}
+	// Console + CRM query indexes (delivery_extras.go) — non-fatal.
+	if err := repo.ensureDeliveryQueryIndexes(ctx); err != nil {
+		log.Warn("delivery query index setup incomplete", slog.Any("err", err))
+	}
 
 	// Seed the baseline catalog products (idempotent, single BulkWrite). Runs
 	// AFTER the money-gate indexes and is deliberately NON-FATAL: unlike the
@@ -258,6 +262,10 @@ func Register(r chi.Router, d *deps.Deps) {
 			// Dev-gated until the order-pay verify/capture flow lands.
 			pr.Post("/orders/{id}/pay", h.payOrder)
 		})
+
+		// ── Admin delivery CRM + pickup-point setting (admin_crm.go) ──
+		// SUPER_ADMIN role token, or X-Admin-Key from the website's server.
+		registerAdminCRM(cr, h, d.JWT)
 
 		// ── Operator surfaces (SAATHI operator token + role) ──
 		// The store manager and delivery rider are Saathi operators; these routes

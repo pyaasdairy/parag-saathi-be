@@ -87,21 +87,29 @@ type delivery struct {
 	// Auto-dispatch (instant lane): the task is broadcast as OFFERED and the first
 	// rider to claim it wins. OfferedAt anchors the offer; RejectedBy lists riders
 	// who declined (never re-offered to them); ReofferCount counts re-broadcasts.
-	OfferedAt        string    `bson:"offered_at,omitempty"    json:"offeredAt,omitempty"`
-	AcceptedAt       string    `bson:"accepted_at,omitempty"   json:"acceptedAt,omitempty"`
-	RejectedBy       []string  `bson:"rejected_by,omitempty"   json:"-"`
-	ReofferCount     int       `bson:"reoffer_count,omitempty" json:"reofferCount,omitempty"`
-	OutForDeliveryAt string    `bson:"out_for_delivery_at,omitempty" json:"outForDeliveryAt,omitempty"`
-	DeliveredAt      string    `bson:"delivered_at,omitempty" json:"deliveredAt,omitempty"`
-	ProofNote        string    `bson:"proof_note,omitempty" json:"proofNote,omitempty"`
-	ProofPhotoURI    string    `bson:"proof_photo_uri,omitempty" json:"proofPhotoUri,omitempty"`
-	ProofGeo         *geoPt    `bson:"proof_geo,omitempty"  json:"proofGeo,omitempty"`
-	LastKnownGeo     *geoPt    `bson:"last_known_geo,omitempty" json:"lastKnownGeo,omitempty"`
-	LastLocationAt   string    `bson:"last_location_at,omitempty" json:"lastLocationAt,omitempty"`
-	FailureReason    string    `bson:"failure_reason,omitempty" json:"failureReason,omitempty"`
-	DeliveryEventID  string    `bson:"delivery_event_id,omitempty" json:"deliveryEventId,omitempty"`
-	CreatedAt        time.Time `bson:"created_at"           json:"-"`
-	UpdatedAt        time.Time `bson:"updated_at"           json:"-"`
+	OfferedAt        string   `bson:"offered_at,omitempty"    json:"offeredAt,omitempty"`
+	AcceptedAt       string   `bson:"accepted_at,omitempty"   json:"acceptedAt,omitempty"`
+	RejectedBy       []string `bson:"rejected_by,omitempty"   json:"-"`
+	ReofferCount     int      `bson:"reoffer_count,omitempty" json:"reofferCount,omitempty"`
+	OutForDeliveryAt string   `bson:"out_for_delivery_at,omitempty" json:"outForDeliveryAt,omitempty"`
+	DeliveredAt      string   `bson:"delivered_at,omitempty" json:"deliveredAt,omitempty"`
+	ProofNote        string   `bson:"proof_note,omitempty" json:"proofNote,omitempty"`
+	ProofPhotoURI    string   `bson:"proof_photo_uri,omitempty" json:"proofPhotoUri,omitempty"`
+	ProofGeo         *geoPt   `bson:"proof_geo,omitempty"  json:"proofGeo,omitempty"`
+	LastKnownGeo     *geoPt   `bson:"last_known_geo,omitempty" json:"lastKnownGeo,omitempty"`
+	LastLocationAt   string   `bson:"last_location_at,omitempty" json:"lastLocationAt,omitempty"`
+	FailureReason    string   `bson:"failure_reason,omitempty" json:"failureReason,omitempty"`
+	DeliveryEventID  string   `bson:"delivery_event_id,omitempty" json:"deliveryEventId,omitempty"`
+	// DeliveryDate is the IST day the drop is due ("" = as soon as possible).
+	// PickupAddress/PickupGeo snapshot the pickup point at pickup, so a task
+	// always records where the stock actually came from; ProofDistanceM is how
+	// far from the customer's pin the rider stood when the photo was taken.
+	DeliveryDate   string    `bson:"delivery_date,omitempty"    json:"deliveryDate,omitempty"`
+	PickupAddress  string    `bson:"pickup_address,omitempty"   json:"pickupAddress,omitempty"`
+	PickupGeo      *geoPt    `bson:"pickup_geo,omitempty"       json:"pickupGeo,omitempty"`
+	ProofDistanceM *float64  `bson:"proof_distance_m,omitempty" json:"proofDistanceM,omitempty"`
+	CreatedAt      time.Time `bson:"created_at"           json:"-"`
+	UpdatedAt      time.Time `bson:"updated_at"           json:"-"`
 }
 
 // riderSummary mirrors the FE RiderSummary (store roster).

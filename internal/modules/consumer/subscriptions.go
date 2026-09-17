@@ -38,9 +38,9 @@ import (
 // address edit re-points every future delivery automatically.
 //
 // EXACTLY-ONCE — at most one order per (subscription, IST day), enforced by an
-// atomic last_order_date claim (UpdateOne guarded on $ne day), the same pattern
-// as advanceMandateCharge. A crashed tick after the claim skips that day rather
-// than ever double-ordering milk.
+// atomic per-day claim (ordered_days, UpdateOne guarded on $ne day) plus a
+// no-live-order-for-that-day check (claimSubscriptionDay). A crashed tick after
+// the claim skips that day rather than ever double-ordering milk.
 
 const collSubscriptions = "consumer_subscriptions"
 
@@ -100,10 +100,25 @@ type subscription struct {
 	Vacations      []vacationRange    `bson:"vacations,omitempty"      json:"vacations,omitempty"`
 	// LastOrderDate is the exactly-once day claim (YYYY-MM-DD IST) — the worker
 	// creates at most one order per subscription per day.
-	LastOrderDate string    `bson:"last_order_date,omitempty" json:"last_order_date,omitempty"`
-	LastOrderID   string    `bson:"last_order_id,omitempty"   json:"last_order_id,omitempty"`
-	CreatedAt     time.Time `bson:"created_at"                json:"created_at"`
-	UpdatedAt     time.Time `bson:"updated_at"                json:"updated_at"`
+	LastOrderDate string `bson:"last_order_date,omitempty" json:"last_order_date,omitempty"`
+	LastOrderID   string `bson:"last_order_id,omitempty"   json:"last_order_id,omitempty"`
+	// OrderedDays lists every IST day already claimed (claimSubscriptionDay).
+	OrderedDays []string  `bson:"ordered_days,omitempty" json:"-"`
+	CreatedAt   time.Time `bson:"created_at"                json:"created_at"`
+	UpdatedAt   time.Time `bson:"updated_at"                json:"updated_at"`
+}
+
+// claimed reports whether this in-memory snapshot already holds day's claim.
+func (sub *subscription) claimed(day string) bool {
+	if sub.LastOrderDate == day {
+		return true
+	}
+	for _, d := range sub.OrderedDays {
+		if d == day {
+			return true
+		}
+	}
+	return false
 }
 
 func newSubscriptionID() string {
@@ -248,22 +263,55 @@ func (r *repository) updateSubscription(ctx context.Context, subID string, consu
 // the guard last_order_date != day admits exactly ONE winner per IST day —
 // the same exactly-once shape as advanceMandateCharge. Returns whether THIS
 // call won the claim.
+//
+// The claim is PER DAY (ordered_days), not just the single last_order_date:
+// with only the latter, scheduling tomorrow overwrote today's claim, so the
+// next tick claimed today again and the one after claimed tomorrow again — a
+// fresh duplicate order (and delivery task, and debit) every other tick. As a
+// second guard, a day that already has a live (non-cancelled) order is never
+// claimed, which also covers subscriptions claimed before ordered_days existed
+// and heals their claim list.
 func (r *repository) claimSubscriptionDay(ctx context.Context, subID, day string) (bool, error) {
+	live, err := r.orders.CountDocuments(ctx, bson.D{
+		{Key: "subscription_id", Value: subID},
+		{Key: "scheduled_for", Value: day},
+		{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+	}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, errInternal("subscription day check failed")
+	}
+	if live > 0 {
+		_, _ = r.subscriptions.UpdateOne(ctx,
+			bson.D{{Key: "subscription_id", Value: subID}, {Key: "ordered_days", Value: bson.D{{Key: "$ne", Value: day}}}},
+			bson.D{{Key: "$push", Value: bson.D{{Key: "ordered_days", Value: bson.D{
+				{Key: "$each", Value: bson.A{day}}, {Key: "$slice", Value: -orderedDaysKept},
+			}}}}})
+		return false, nil
+	}
 	res, err := r.subscriptions.UpdateOne(ctx,
 		bson.D{
 			{Key: "subscription_id", Value: subID},
 			{Key: "status", Value: "active"},
-			{Key: "last_order_date", Value: bson.D{{Key: "$ne", Value: day}}},
+			{Key: "ordered_days", Value: bson.D{{Key: "$ne", Value: day}}},
 		},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "last_order_date", Value: day},
-			{Key: "updated_at", Value: time.Now().UTC()},
-		}}})
+		bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "last_order_date", Value: day},
+				{Key: "updated_at", Value: time.Now().UTC()},
+			}},
+			{Key: "$push", Value: bson.D{{Key: "ordered_days", Value: bson.D{
+				{Key: "$each", Value: bson.A{day}}, {Key: "$slice", Value: -orderedDaysKept},
+			}}}},
+		})
 	if err != nil {
 		return false, errInternal("subscription day claim failed")
 	}
 	return res.ModifiedCount == 1, nil
 }
+
+// orderedDaysKept bounds the per-subscription claim list (claims are made in
+// day order, so the newest survive the slice).
+const orderedDaysKept = 60
 
 func (r *repository) setSubscriptionOrder(ctx context.Context, subID, orderID string) {
 	_, _ = r.subscriptions.UpdateOne(ctx,
@@ -277,6 +325,9 @@ func (r *repository) setSubscriptionOrder(ctx context.Context, subID, orderID st
 // that day again. A shopper's DIRECT order cancel deliberately keeps the claim:
 // that day stays skipped.
 func (r *repository) unclaimSubscriptionDay(ctx context.Context, subID, day string) {
+	_, _ = r.subscriptions.UpdateOne(ctx,
+		bson.D{{Key: "subscription_id", Value: subID}},
+		bson.D{{Key: "$pull", Value: bson.D{{Key: "ordered_days", Value: day}}}})
 	_, _ = r.subscriptions.UpdateOne(ctx,
 		bson.D{{Key: "subscription_id", Value: subID}, {Key: "last_order_date", Value: day}},
 		bson.D{{Key: "$set", Value: bson.D{
@@ -369,6 +420,9 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 		return nil, aerr
 	}
 	name := in.Name
+	if name == "" {
+		name = priceIx.nameFor(in.ProductID)
+	}
 	if name == "" {
 		name = in.ProductID
 	}
@@ -616,7 +670,6 @@ func (s *service) refreshSubOrder(ctx context.Context, o *order, sub *subscripti
 // Exactly-once per (subscription, day) via the claim; returns how many orders
 // went LIVE (locked) this tick.
 func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) int {
-	nowIST := now.In(istZone)
 	today := istToday(now)
 	tomorrow := addDaysIST(today, 1)
 	placed := 0
@@ -666,37 +719,7 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 		return placed
 	}
 	for i := range subs {
-		sub := &subs[i]
-		// 3) SAME-DAY — a subscription starting (or resumed) today that never got
-		//    a preview still delivers today: wallet floor, claim, create LOCKED.
-		if sub.LastOrderDate != today && subscriptionDueOn(sub, today) {
-			if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
-				lineTotal := round2(sub.UnitPrice * float64(sub.Qty))
-				cost := lineTotal + subscriptionDeliveryFee // affordability check must match the fee-free debit
-				if wv, werr := s.wallet(ctx, sub.ConsumerID); werr == nil && wv.Available >= cost {
-					if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, today); won {
-						if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, today, true, now); oerr == nil {
-							placed++
-						} else {
-							s.log.WarnContext(ctx, "subscription sweep: same-day order failed",
-								"subscription", sub.SubscriptionID, "day", today)
-						}
-					}
-				}
-			}
-		}
-		// 4) SCHEDULE — from 13:00 IST, materialise TOMORROW's delivery as a
-		//    visible, still-modifiable upcoming order (no delivery task, no
-		//    money, no wallet gate — the member can top up until midnight).
-		if nowIST.Hour() >= scheduleFromHourIST && sub.LastOrderDate != tomorrow && subscriptionDueOn(sub, tomorrow) {
-			if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
-				if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, tomorrow); won {
-					if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, tomorrow, false, now); oerr != nil {
-						s.repo.unclaimSubscriptionDay(ctx, sub.SubscriptionID, tomorrow) // retry next tick
-					}
-				}
-			}
-		}
+		placed += s.sweepOneSubscription(ctx, &subs[i], now)
 	}
 
 	// 5) RECONCILE — tomorrow's previews against their live subscriptions:
@@ -719,6 +742,50 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 
 	if placed > 0 {
 		s.log.InfoContext(ctx, "subscription sweep placed morning orders", "day", today, "orders", placed)
+	}
+	return placed
+}
+
+// sweepOneSubscription runs the per-subscription half of the sweep (steps 3
+// and 4) for ONE subscription. The worker calls it for every active
+// subscription; createSubscription's handler calls it right after the insert,
+// so a new subscriber's order reaches the riders at once instead of on the
+// next 15-minute tick. Same claims, same wallet floor — so the two callers can
+// never double-order a day. Returns how many orders went LIVE.
+func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, now time.Time) int {
+	nowIST := now.In(istZone)
+	today := istToday(now)
+	tomorrow := addDaysIST(today, 1)
+	placed := 0
+	// 3) SAME-DAY — a subscription starting (or resumed) today that never got
+	//    a preview still delivers today: wallet floor, claim, create LOCKED.
+	if !sub.claimed(today) && subscriptionDueOn(sub, today) {
+		if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
+			lineTotal := round2(sub.UnitPrice * float64(sub.Qty))
+			cost := lineTotal + subscriptionDeliveryFee // affordability check must match the fee-free debit
+			if wv, werr := s.wallet(ctx, sub.ConsumerID); werr == nil && wv.Available >= cost {
+				if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, today); won {
+					if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, today, true, now); oerr == nil {
+						placed++
+					} else {
+						s.log.WarnContext(ctx, "subscription sweep: same-day order failed",
+							"subscription", sub.SubscriptionID, "day", today)
+					}
+				}
+			}
+		}
+	}
+	// 4) SCHEDULE — materialise TOMORROW's delivery as a visible,
+	//    still-modifiable upcoming order (no delivery task, no money, no
+	//    wallet gate — the member can top up until midnight).
+	if nowIST.Hour() >= scheduleFromHourIST && !sub.claimed(tomorrow) && subscriptionDueOn(sub, tomorrow) {
+		if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
+			if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, tomorrow); won {
+				if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, tomorrow, false, now); oerr != nil {
+					s.repo.unclaimSubscriptionDay(ctx, sub.SubscriptionID, tomorrow) // retry next tick
+				}
+			}
+		}
 	}
 	return placed
 }
@@ -785,6 +852,12 @@ func (h *handler) createSubscription(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Place today's / schedule tomorrow's order NOW, so it reaches the riders
+	// without waiting for the next worker tick. Best-effort: the worker still
+	// covers anything this misses, and the day claims make a repeat a no-op.
+	kickCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
+	h.svc.sweepOneSubscription(kickCtx, sub, time.Now())
+	cancel()
 	writeJSON(w, http.StatusCreated, sub)
 }
 

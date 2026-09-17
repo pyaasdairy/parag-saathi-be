@@ -2,9 +2,11 @@ package consumer
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -65,27 +67,115 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	if o.Lane == "instant" {
 		status, offeredAt = "OFFERED", now.Format(time.RFC3339)
 	}
-	// Doorstep instructions for the rider: this order's own prefs win; the
-	// account's standing prefs (PATCH /me delivery_prefs) fill in otherwise —
-	// so the subscription worker's morning orders carry them too.
-	prefs := o.DeliveryPrefs
-	if prefs == nil {
-		if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
-			if acct, aerr := s.repo.findAccountByID(ctx, cid); aerr == nil && acct != nil {
-				prefs = acct.DeliveryPrefs
-			}
-		}
-	}
+	prefs := s.resolveDeliveryPrefs(ctx, o)
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
 		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
 		Slot: slotLabel(o), Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
-		DeliveryPrefs: prefs,
-		Status:        status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
+		DeliveryPrefs: prefs, DeliveryDate: orderDeliveryDate(o),
+		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
 	_ = s.repo.insertDelivery(ctx, del)
+}
+
+// resolveDeliveryPrefs collects the doorstep instructions the RIDER and the
+// STORE MANAGER act on ("don't ring the bell, baby sleeping", "hand it to the
+// guard", "call before you come"). Three sources, most specific per field wins:
+//
+//  1. the SAVED ADDRESS's doorstep capture (receiver_name / ring_bell /
+//     call_before / instructions) — where a customer actually sets this, and
+//     until now the one place nobody downstream ever read;
+//  2. the account's standing prefs (PATCH /me delivery_prefs);
+//  3. this order's own prefs (checkout).
+//
+// Merged rather than first-wins, so a standing "leave with the guard" survives
+// an order that only carried "call before".
+func (s *service) resolveDeliveryPrefs(ctx context.Context, o *order) *deliveryPrefsDoc {
+	merged := &deliveryPrefsDoc{}
+	any := false
+	overlay := func(p *deliveryPrefsDoc) {
+		if p == nil {
+			return
+		}
+		any = true
+		if p.Handover != "" {
+			merged.Handover = p.Handover
+		}
+		if p.Note != "" {
+			merged.Note = p.Note
+		}
+		if p.Receiver != "" {
+			merged.Receiver = p.Receiver
+		}
+		if p.CallBefore {
+			merged.CallBefore = true
+		}
+		if p.RingBell != nil {
+			merged.RingBell = p.RingBell
+		}
+	}
+	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
+		overlay(s.addressPrefs(ctx, cid, o.AddressLabel))
+		if acct, aerr := s.repo.findAccountByID(ctx, cid); aerr == nil && acct != nil {
+			overlay(acct.DeliveryPrefs)
+		}
+	}
+	overlay(o.DeliveryPrefs)
+	if !any {
+		return nil
+	}
+	return merged
+}
+
+// addressPrefs reads the doorstep capture stored on the saved address this
+// order ships to (matched by label, else the default address).
+func (s *service) addressPrefs(ctx context.Context, consumerID primitive.ObjectID, label string) *deliveryPrefsDoc {
+	addrs, err := s.repo.listAddresses(ctx, consumerID)
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+	pick := &addrs[0]
+	for i := range addrs {
+		a := &addrs[i]
+		if label != "" && strings.EqualFold(strings.TrimSpace(a.Label), strings.TrimSpace(label)) {
+			pick = a
+			break
+		}
+		if a.IsDefault {
+			pick = a
+		}
+	}
+	if len(pick.Preferences) == 0 {
+		return nil
+	}
+	str := func(k string) string {
+		v, _ := pick.Preferences[k].(string)
+		return strings.TrimSpace(v)
+	}
+	flag := func(k string) bool {
+		v, _ := pick.Preferences[k].(bool)
+		return v
+	}
+	// ring_bell is only an instruction when the customer actually set it —
+	// including setting it to FALSE ("do not ring").
+	var ring *bool
+	if v, ok := pick.Preferences["ring_bell"]; ok {
+		if x, isBool := v.(bool); isBool {
+			ring = &x
+		}
+	}
+	p := &deliveryPrefsDoc{
+		Note:       str("instructions"),
+		Receiver:   str("receiver_name"),
+		CallBefore: flag("call_before"),
+		RingBell:   ring,
+	}
+	if p.Note == "" && p.Receiver == "" && !p.CallBefore && p.RingBell == nil {
+		return nil
+	}
+	return p
 }
 
 // ── Store manager ───────────────────────────────────────────────────────────
@@ -664,12 +754,20 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	if note == "" {
 		note = "Delivered"
 	}
-	updated, err := s.repo.updateDelivery(ctx, id, bson.D{
+	set := bson.D{
 		{Key: "status", Value: "DELIVERED"}, {Key: "delivered_at", Value: now},
 		{Key: "proof_note", Value: note}, {Key: "proof_photo_uri", Value: in.ProofPhoto},
-		{Key: "proof_geo", Value: in.Geo}, {Key: "last_known_geo", Value: in.Geo}, {Key: "last_location_at", Value: now},
 		{Key: "delivery_event_id", Value: evt}, {Key: "geofence_ok", Value: true},
-	}, bson.D{{Key: "status", Value: "OUT_FOR_DELIVERY"}})
+	}
+	if in.Geo != nil {
+		set = append(set,
+			bson.E{Key: "proof_geo", Value: in.Geo}, bson.E{Key: "last_known_geo", Value: in.Geo},
+			bson.E{Key: "last_location_at", Value: now})
+		if geoSane(d.Geo.Lat, d.Geo.Lng) {
+			set = append(set, bson.E{Key: "proof_distance_m", Value: math.Round(haversineKm(*in.Geo, d.Geo) * 1000)})
+		}
+	}
+	updated, err := s.repo.updateDelivery(ctx, id, set, bson.D{{Key: "status", Value: "OUT_FOR_DELIVERY"}})
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +812,9 @@ func (s *service) syncOrderRiderLocation(ctx context.Context, d *delivery, lat, 
 
 func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "delivered"}, {Key: "can_review", Value: true}, {Key: "proof_photo_url", Value: d.ProofPhotoURI}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "delivered"}, {Key: "can_review", Value: true},
+			{Key: "proof_photo_url", Value: d.ProofPhotoURI}, {Key: "delivered_at", Value: d.DeliveredAt},
+			{Key: "updated_at", Value: time.Now().UTC()}}}})
 	// CRM (inert unless CRM_ENABLED): a delivered Welcome Litre pack advances
 	// the offer state machine via the event outbox — best-effort by contract.
 	if crmEnabled() {

@@ -58,9 +58,14 @@ type account struct {
 type deliveryPrefsDoc struct {
 	Handover   string `bson:"handover,omitempty"    json:"handover,omitempty"` // RING_BELL | HAND_TO_CUSTOMER | DROP
 	CallBefore bool   `bson:"call_before,omitempty" json:"call_before,omitempty"`
-	RingBell   bool   `bson:"ring_bell,omitempty"   json:"ring_bell,omitempty"`
-	Note       string `bson:"note,omitempty"        json:"note,omitempty"`
-	Receiver   string `bson:"receiver,omitempty"    json:"receiver,omitempty"`
+	// RingBell is a POINTER because "do not ring the bell" is a real
+	// instruction, not an absent one: as a plain bool, false is indistinguish-
+	// able from unset and omitempty dropped it from the wire entirely, so the
+	// one preference customers most often set never reached the rider.
+	// nil = never said · false = DO NOT ring · true = please ring.
+	RingBell *bool  `bson:"ring_bell,omitempty"   json:"ring_bell,omitempty"`
+	Note     string `bson:"note,omitempty"        json:"note,omitempty"`
+	Receiver string `bson:"receiver,omitempty"    json:"receiver,omitempty"`
 }
 
 // sanitizeDeliveryPrefs whitelists + caps client-supplied doorstep fields.
@@ -77,14 +82,25 @@ func sanitizeDeliveryPrefs(m map[string]any) *deliveryPrefsDoc {
 		return s
 	}
 	b := func(v any) bool { x, _ := v.(bool); return x }
+	// Tri-state: only present keys become an instruction.
+	var ring *bool
+	for _, k := range []string{"ringBell", "ring_bell"} {
+		if v, ok := m[k]; ok {
+			x, isBool := v.(bool)
+			if isBool {
+				ring = &x
+				break
+			}
+		}
+	}
 	d := &deliveryPrefsDoc{
 		Handover:   clip(m["handover"], 24),
 		CallBefore: b(m["callBefore"]) || b(m["call_before"]),
-		RingBell:   b(m["ringBell"]) || b(m["ring_bell"]),
+		RingBell:   ring,
 		Note:       clip(m["note"], 280),
 		Receiver:   clip(m["receiver"], 80),
 	}
-	if d.Handover == "" && !d.CallBefore && !d.RingBell && d.Note == "" && d.Receiver == "" {
+	if d.Handover == "" && !d.CallBefore && d.RingBell == nil && d.Note == "" && d.Receiver == "" {
 		return nil
 	}
 	return d

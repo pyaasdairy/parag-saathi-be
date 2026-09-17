@@ -117,3 +117,7 @@ services:
         value: "200"
       - key: RATE_LIMIT_BURST
         value: "500"
+      # Admin delivery CRM (docs/SIMPLE_DELIVERY.md): server-to-server key the
+      # pyaasdairy.com/admin route sends as X-Admin-Key. ≥ 32 chars; unset = off.
+      - key: ADMIN_API_KEY
+        sync: false
