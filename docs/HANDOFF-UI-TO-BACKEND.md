@@ -1,8 +1,9 @@
 # Handoff — the delivery UI, and what it needs from the API
 
 **For:** the backend co-dev.
-**From:** the UI pass on the Saathi app (repo `pyaas-saathi`, branch
-`feature/simple-delivery`, commit `0a9a4c7` + this round).
+**From:** the UI pass on the Saathi app — repo `pyaas-saathi`, branch
+**`UI-REVAMP`** (5 commits on top of `551e8ad`). Backend side: this repo,
+branch `feature/simple-delivery` off `release/26.07.03`.
 **Scope:** the store-manager → rider dispatch is UNCHANGED. Nothing about
 assignment, the state machine or money moved. This is the consoles, plus the
 small API changes they needed — those are listed in §3 for you to own.
@@ -14,6 +15,9 @@ small API changes they needed — those are listed in §3 for you to own.
 ### Rider (`lib/screens/rider/`)
 - **Tabs: Deliveries · Done · Cash.** The old *Priority* tab is gone — it
   listed the same stops a second time.
+- **Three sections inside Deliveries**: ⚡ Instant, 🌅 Morning and 📅 **Upcoming
+  days** (tomorrow onwards, with no route number — the numbering belongs to
+  today's round). Each carries a count.
 - **Two lane sections inside Deliveries**, each with a count: ⚡ **Instant**
   (`lane == "instant"`, or a `slot` beginning "by ") and 🌅 **Morning**
   (everything else). Same split on Done. An empty lane still prints a line, so
@@ -30,8 +34,12 @@ small API changes they needed — those are listed in §3 for you to own.
   pickup point sits on top of the day.
 
 ### Store manager (`lib/screens/store/`)
-- Orders tab splits into the same two lane sections, each with a count and how
-  many still need a rider; completed orders stay in their own section below.
+- Orders tab splits into the same sections — ⚡ Instant, 🌅 Morning, 📅 Upcoming
+  days — each with a count and how many still need a rider; completed orders
+  stay in their own section below.
+- Every card says **when the order is due**: "Instant · by 8:42 PM · in 12 min"
+  (amber inside ten minutes, red once late) or "Morning · Today / Tomorrow /
+  Thu 24 Sep · 05:00 - 07:30 AM". Lanes sort by that time.
 - Cards list the items in words and the customer's instructions; the order
   detail shows the same instructions panel the rider sees at the door.
 - An OFFERED (instant) order now reads *"broadcast to nearby riders"* instead
@@ -107,7 +115,43 @@ in production — worth running before the next release.
 
 ---
 
-## 4. Things for you to decide (the UI is honest about all of them today)
+## 4. The one that needs you: tomorrow's SUBSCRIPTION days are invisible
+
+Both consoles now have an **Upcoming days** section, and it works for scheduled
+one-time orders — those get a delivery task the moment they are placed, so
+`GET /consumer/stores/{id}/orders` returns them with a `delivery_date` and the
+UI files them under tomorrow.
+
+**A subscription day never appears there.** Today:
+
+- tomorrow's subscription order is only materialised from **13:00 IST**
+  (`scheduleFromHourIST`), and
+- it is a *preview*: `status "placed"`, `sub_locked_at` empty, and **no delivery
+  task exists** until the midnight lock — and the store console only ever sees
+  delivery tasks.
+
+So a manager planning tomorrow's round sees nothing, which is exactly the case
+the founder asked for. Two ways out, both yours to pick:
+
+1. **Expose the previews** — e.g. `GET /consumer/stores/{id}/upcoming` returning
+   scheduled subscription orders (customer, address, items, `scheduled_for`,
+   `delivery_prefs`) with a flag saying they are not yet confirmed. The UI would
+   list them in the same Upcoming section, read-only, marked "confirms at
+   midnight". Cheapest for the app: the shape can mirror the task shape.
+2. **Create the task earlier** (at schedule time rather than at the lock) and
+   keep it in a `SCHEDULED` state the rider cannot start. Bigger change: the
+   task is currently the thing that means "this is real and billable", and the
+   wallet floor is checked at the lock.
+
+Either way the app needs `lane`, `delivery_date`/`scheduled_for`, `slot`,
+`items`, `delivery_prefs` — the same fields it already reads.
+
+Also worth a look while you are there: `scheduleFromHourIST = 13` means nothing
+at all exists for tomorrow before 1 PM, even as a preview.
+
+---
+
+## 5. Other things for you to decide (the UI is honest about all of them today)
 
 1. **Nobody can hand-assign an unclaimed instant order.** `assignRider` guards on
    `status ∈ {ASSIGNED, FAILED}`, and instant tasks sit at `OFFERED`, so if no
@@ -130,7 +174,18 @@ in production — worth running before the next release.
 
 ---
 
-## 5. Running it
+## 6. A UI trap worth knowing (no backend work, just context)
+
+Two screens rendered completely blank — the rider home, then the store Catalog
+tab — with no error visible on the device. Both were the same thing: the app
+theme gives buttons `minimumSize: Size.fromHeight(52)`, i.e. an INFINITE minimum
+width (that is what makes them full-width in a column). Put such a button inside
+a `Row`, which hands its children unbounded width, and Flutter throws
+"BoxConstraints forces an infinite width" and the whole subtree fails to lay
+out. If a screen ever goes blank, run it with `flutter run` and read the first
+exception — logcat alone showed nothing.
+
+## 7. Running it
 
 ```bash
 # backend
