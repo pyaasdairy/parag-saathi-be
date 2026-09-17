@@ -46,7 +46,7 @@ Per task, off `GET /consumer/delivery/tasks` and `GET /consumer/stores/{id}/orde
 | Field | Used for |
 |---|---|
 | `lane` | which section the stop goes in (`instant` \| `morning`; absent → morning) |
-| `etaAt`, `slot` | the instant countdown chip / the morning window |
+| `deliveryDate`, `slot`, `etaAt` | **when it is due** — the chip on every card and both detail screens, and the sort order inside a lane. `deliveryDate` (YYYY-MM-DD IST) renders as Today / Tomorrow / Thu 24 Sep; `slot` supplies the window and may arrive as `"2026-09-18 · 05:00 - 07:30 AM"`; `etaAt` drives the instant countdown ("in 12 min", red once late). Keep sending all three — with none of them a card can only say which lane it is in. |
 | `items[]`, `amount`, `paymentMode` | "2 × Toned Milk", COD vs prepaid |
 | `geo`, `addressLine`, `addressLabel`, `landmark` | navigation + what is shown |
 | `phone` | the call button (never derived from `phoneMasked`) |
@@ -98,7 +98,8 @@ in production — worth running before the next release.
 - `delivery_extras.go` — pickup point, the due-day helper and short-lived signed
   URLs for proof photos (a private bucket the consumer app cannot authenticate
   against), split out of the delivery files.
-- Delivery tasks carry `delivery_date`; consumer orders carry `store_lat/lng`,
+- Delivery tasks carry `delivery_date` (the consoles' due chip reads it);
+  consumer orders carry `store_lat/lng`,
   `delivered_at` and a signed `proof_photo_url` (fields the shipped consumer app
   already reads).
 - Admin delivery CRM under `/consumer/admin/*` — see
