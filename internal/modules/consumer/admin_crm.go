@@ -97,8 +97,7 @@ type crmOrderRow struct {
 	MonsoonFee       float64    `json:"monsoonFee,omitempty"`
 	Total            float64    `json:"total"`
 	PaymentMethod    string     `json:"paymentMethod"`
-	PaymentStatus    string     `json:"paymentStatus"` // PENDING | PAID | DUE | FREE | NOT_CHARGED
-	AmountDue        float64    `json:"amountDue,omitempty"`
+	PaymentStatus    string     `json:"paymentStatus"` // PENDING | PAID | FREE | COD | NOT_CHARGED
 	TrialFree        bool       `json:"trialFree,omitempty"`
 	OfferPack        int        `json:"offerPack,omitempty"`
 	Rider            *crmPerson `json:"rider,omitempty"`
