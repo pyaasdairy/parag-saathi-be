@@ -306,8 +306,16 @@ func Register(r chi.Router, d *deps.Deps) {
 				// Support queue for the customer complaint register. Without
 				// these the register was write-only — a member could file and
 				// nothing in the product could answer them.
-				cm.Get("/complaints", h.opsListComplaints)
-				cm.Patch("/complaints/{ref}", h.opsUpdateComplaint)
+				//
+				// The path MUST NOT be "/complaints": this operator group and the
+				// member group are both mounted on the same /consumer router, so
+				// that pattern collides with the member's own list and the
+				// operator handler silently wins — chi does not panic on the
+				// duplicate, it just serves the last one, and members are then
+				// told their valid token is invalid. Hence the /ops prefix, which
+				// the neighbouring CRM routes get for free from their /crm one.
+				cm.Get("/ops/complaints", h.opsListComplaints)
+				cm.Patch("/ops/complaints/{ref}", h.opsUpdateComplaint)
 			})
 
 			// Store manager (STORE_MANAGER): orders in the store's vicinity, its

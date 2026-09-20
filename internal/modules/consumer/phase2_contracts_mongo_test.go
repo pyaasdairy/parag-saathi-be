@@ -7,6 +7,11 @@ package consumer
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -584,5 +589,61 @@ func TestPhase2ComplaintIdempotentWithoutTheIndex(t *testing.T) {
 	list, _ := w.svc.listComplaints(ctx, cid)
 	if len(list) != 1 {
 		t.Fatalf("index absent: one reference became %d rows", len(list))
+	}
+}
+
+// ROUTE COLLISION GUARD. The member group and the operator group are both
+// mounted on the same /consumer router. Registering the same pattern in both
+// does NOT panic in chi — it silently serves the last one registered, and a
+// member is then told their valid token is invalid. That is exactly what
+// happened to GET /consumer/complaints, so pin it: a member must be able to
+// read their own complaints through the real router, with a real consumer JWT.
+func TestPhase2MemberCanReadOwnComplaintsThroughTheRouter(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+
+	cid := w.customer(t, "9000006001", 0)
+	if _, err := w.svc.fileComplaint(ctx, cid, complaintInput{
+		Ref: "PYS-ROUTE1", Category: "late", Detail: "route collision guard",
+	}); err != nil {
+		t.Fatalf("file: %v", err)
+	}
+
+	// Drive the CONSUMER handler exactly as the member's request would.
+	req := httptest.NewRequest(http.MethodGet, "/consumer/complaints", nil)
+	req = req.WithContext(context.WithValue(req.Context(), consumerCtxKey,
+		consumerActor{ID: cid.Hex(), Phone: "+919000006001"}))
+	rec := httptest.NewRecorder()
+	(&handler{svc: w.svc}).listComplaints(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a member reading their own complaints: %d %s", rec.Code, rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["ref"] != "PYS-ROUTE1" {
+		t.Fatalf("member's own row not returned: %v", rows)
+	}
+}
+
+// And the operator surface must live somewhere that does NOT collide with it.
+func TestPhase2OperatorComplaintPathDoesNotCollide(t *testing.T) {
+	src, err := os.ReadFile("module.go")
+	if err != nil {
+		t.Fatalf("read module.go: %v", err)
+	}
+	s := string(src)
+	// The member routes.
+	if !strings.Contains(s, `pr.Get("/complaints", h.listComplaints)`) {
+		t.Fatal("the member complaint list route changed — update this guard")
+	}
+	// The operator routes must not reuse that pattern on the same router.
+	if strings.Contains(s, `cm.Get("/complaints"`) || strings.Contains(s, `cm.Patch("/complaints/`) {
+		t.Fatal("operator complaint routes collide with the member's /complaints — chi serves the last one and members get UNAUTHORIZED")
+	}
+	if !strings.Contains(s, `cm.Get("/ops/complaints", h.opsListComplaints)`) {
+		t.Fatal("operator complaint list is not under /ops")
 	}
 }
