@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -76,6 +77,14 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 			}
 		}
 	}
+	// Structured door for route grouping. An order carries only the FLATTENED
+	// address text, so we recompose each saved address exactly the way the app
+	// composed it ([line1, line2, city, pincode] joined with ", ") and use the
+	// structured parts only when EXACTLY ONE saved address reproduces the
+	// order's text. A near-miss or an ambiguous match yields nothing rather
+	// than a wrong tower — mis-grouping a route is worse than not grouping it.
+	soc := s.structuredDoorFor(ctx, o)
+
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
@@ -83,9 +92,68 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
 		Slot: slotLabel(o), Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
 		DeliveryPrefs: prefs,
-		Status:        status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
+		SocietyID:     soc.SocietyID, Society: soc.Society, Tower: soc.Tower, Floor: soc.Floor, Unit: soc.Unit,
+		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
 	_ = s.repo.insertDelivery(ctx, del)
+}
+
+// structuredDoor is the society/tower/floor/unit quartet copied onto a task.
+type structuredDoor struct {
+	Society   string
+	SocietyID string
+	Tower     string
+	Floor     *int
+	Unit      string
+}
+
+// composeAddressText reproduces the consumer app's own address_text exactly
+// (lib/api.ts: [line1, line2, city, pincode].filter(Boolean).join(", ")), so a
+// match is an identity, not a heuristic.
+func composeAddressText(a *address) string {
+	parts := make([]string, 0, 4)
+	for _, p := range []string{a.Line1, a.Line2, a.City, a.Pincode} {
+		if strings.TrimSpace(p) != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// structuredDoorFor finds the saved address this order was placed to and
+// returns its structured parts. Returns the zero value — every field empty —
+// whenever the answer is not certain: no consumer, no saved addresses, no
+// exact match, or more than one address that composes to the same text.
+func (s *service) structuredDoorFor(ctx context.Context, o *order) structuredDoor {
+	cid, err := primitive.ObjectIDFromHex(o.UserID)
+	if err != nil {
+		return structuredDoor{}
+	}
+	list, lerr := s.repo.listAddresses(ctx, cid)
+	if lerr != nil || len(list) == 0 {
+		return structuredDoor{}
+	}
+	want := strings.TrimSpace(o.AddressText)
+	if want == "" {
+		return structuredDoor{}
+	}
+	var hit *address
+	for i := range list {
+		if composeAddressText(&list[i]) != want {
+			continue
+		}
+		if hit != nil {
+			return structuredDoor{} // ambiguous — two addresses, same text
+		}
+		hit = &list[i]
+	}
+	if hit == nil || hit.SocietyID == "" {
+		return structuredDoor{}
+	}
+	return structuredDoor{
+		Society: hit.Society, SocietyID: hit.SocietyID,
+		Tower: hit.Tower, Floor: hit.Floor, Unit: hit.Unit,
+	}
 }
 
 // ── Store manager ───────────────────────────────────────────────────────────

@@ -10,13 +10,13 @@ services:
     # without the consumer order→dispatch feature (OFFERED broadcast, claim,
     # reject, /delivery/tasks/available). Keep in sync with the active release.
     #
-    # ⚠ THIS PIN IS STALE. release/26.07.03 is behind feature/crm-welcome-litre
-    # and does NOT contain: the money-truth persistence fixes (bonus leak,
-    # erasure cascade), the DPDP consents API, the CRM Welcome Litre campaign,
-    # or the rider console's 36 endpoints (/consumer/delivery/rider/*) that the
-    # Saathi app now depends on. Until this pin moves, the rider console 404s in
-    # production exactly as before. Repointing it is a release decision, so it
-    # is left to a human — but it MUST move before the Saathi app ships.
+    # This pin is CURRENT (verified 20 Sep 2026). release/26.07.03 and
+    # feature/crm-welcome-litre are the same commit — zero commits either way —
+    # so the money-truth fixes, the DPDP consents API, the CRM Welcome Litre
+    # campaign and the rider console's 36 endpoints are all on this branch and
+    # deployed. The earlier ⚠ telling a human to repoint this service was left
+    # behind after the merge and has been removed: acting on it would have
+    # repointed production for no reason.
     branch: release/26.07.03
     plan: free # upgrade to starter for always-on (free spins down when idle)
     dockerfilePath: ./Dockerfile

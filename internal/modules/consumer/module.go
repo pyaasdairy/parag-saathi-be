@@ -241,6 +241,16 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Get("/addresses", h.listAddresses)
 			pr.Post("/addresses", h.createAddress)
 			pr.Patch("/addresses/{id}", h.patchAddress)
+
+			// Complaint register (FE phase 2 §5). The app files locally first
+			// and retries offline rows, so POST is idempotent by the client's
+			// own reference — see complaints.go.
+			pr.Post("/complaints", h.createComplaint)
+			pr.Get("/complaints", h.listComplaints)
+
+			// Push device registry (FE phase 2 §3). Stores the token; sending
+			// is a separate piece of work (needs google-services.json).
+			pr.Post("/push/register", h.registerPushDevice)
 			pr.Post("/addresses/{id}/default", h.defaultAddress)
 			pr.Delete("/addresses/{id}", h.deleteAddress)
 

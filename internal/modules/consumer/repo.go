@@ -135,6 +135,12 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	if err := r.ensureSubscriptionIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer subscription indexes: %w", err)
 	}
+	if err := r.ensureComplaintIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer complaint indexes: %w", err)
+	}
+	if err := r.ensurePushIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer push indexes: %w", err)
+	}
 	if err := r.ensureTrialIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer trial indexes: %w", err)
 	}

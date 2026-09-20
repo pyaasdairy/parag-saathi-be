@@ -127,6 +127,14 @@ type address struct {
 	Lat         *float64           `bson:"lat,omitempty"        json:"lat,omitempty"`
 	Lng         *float64           `bson:"lng,omitempty"        json:"lng,omitempty"`
 	StoreID     string             `bson:"store_id,omitempty"   json:"store_id,omitempty"`
+	// Structured door — see addressInput. Nullable throughout: a typed address
+	// carries none of it, and the app must be able to tell "ground floor" (0)
+	// from "not a mapped society" (absent), hence the pointer on Floor.
+	Society     string             `bson:"society,omitempty"     json:"society,omitempty"`
+	SocietyID   string             `bson:"society_id,omitempty"  json:"society_id,omitempty"`
+	Tower       string             `bson:"tower,omitempty"       json:"tower,omitempty"`
+	Floor       *int               `bson:"floor,omitempty"       json:"floor,omitempty"`
+	Unit        string             `bson:"unit,omitempty"        json:"unit,omitempty"`
 	Preferences map[string]any     `bson:"preferences,omitempty" json:"-"`
 	CreatedAt   time.Time          `bson:"created_at"           json:"created_at"`
 }

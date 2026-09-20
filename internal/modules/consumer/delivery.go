@@ -67,10 +67,19 @@ type delivery struct {
 	DeliveryPrefs *deliveryPrefsDoc `bson:"delivery_prefs,omitempty" json:"deliveryPrefs,omitempty"`
 	AddressLine   string            `bson:"address_line"         json:"addressLine"`
 	Landmark      string            `bson:"landmark,omitempty"   json:"landmark,omitempty"`
-	Geo           geoPt             `bson:"geo"                  json:"geo"`
-	Items         []deliveryItem    `bson:"items"                json:"items"`
-	Amount        float64           `bson:"amount"               json:"amount"`
-	PaymentMode   string            `bson:"payment_mode"         json:"paymentMode"`
+	// STRUCTURED DOOR, when the order was placed to a mapped society address.
+	// This is what lets a route be grouped by (societyId, tower, floor) — one
+	// lift ride, one stop — instead of a human reading "P4-805" off a string.
+	// Absent for a typed address, so the operator UI must treat it as optional.
+	SocietyID   string         `bson:"society_id,omitempty" json:"societyId,omitempty"`
+	Society     string         `bson:"society,omitempty"    json:"society,omitempty"`
+	Tower       string         `bson:"tower,omitempty"      json:"tower,omitempty"`
+	Floor       *int           `bson:"floor,omitempty"      json:"floor,omitempty"`
+	Unit        string         `bson:"unit,omitempty"       json:"unit,omitempty"`
+	Geo         geoPt          `bson:"geo"                  json:"geo"`
+	Items       []deliveryItem `bson:"items"                json:"items"`
+	Amount      float64        `bson:"amount"               json:"amount"`
+	PaymentMode string         `bson:"payment_mode"         json:"paymentMode"`
 	// TrialEligible is set at creation when the order is a PYAAS Taaza subscription
 	// item — only then may the 2-paid/2-free welcome trial waive its settle charge.
 	TrialEligible bool   `bson:"trial_eligible,omitempty" json:"-"`

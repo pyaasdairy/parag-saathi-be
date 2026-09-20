@@ -342,6 +342,16 @@ type addressInput struct {
 	CallBefore   *bool  `json:"call_before"`
 	Instructions string `json:"instructions"`
 	DoorPhotoURI string `json:"door_photo_uri"`
+	// STRUCTURED DOOR (society dropdowns, FE phase 2). A typed address sends
+	// these empty; inside a mapped township the app sends all five. They are
+	// kept as REAL FIELDS rather than preferences because the rider route is
+	// grouped by (society_id, tower, floor) — a lift-ride worth of flats in one
+	// stop — and a preferences blob cannot be indexed or grouped.
+	Society   string `json:"society"`
+	SocietyID string `json:"society_id"`
+	Tower     string `json:"tower"`
+	Floor     *int   `json:"floor"` // pointer: 0 is the GROUND floor, not "unset"
+	Unit      string `json:"unit"`
 }
 
 // preferencesOf packs the doorstep extras into the address Preferences map
