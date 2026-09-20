@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -113,6 +115,21 @@ func (s *service) fileComplaint(ctx context.Context, consumerID primitive.Object
 		return nil, errBadRequest("a complaint reference (ref) is required")
 	}
 
+	// IDEMPOTENCY MUST NOT DEPEND ON THE INDEX ALONE. The unique (consumer, ref)
+	// index is the race guard, but its build is deliberately non-fatal at boot —
+	// a complaint register is not a money gate and must never refuse to boot the
+	// backend. So if that build ever fails, a retry would silently file a
+	// duplicate. Check first, and keep the duplicate-key path below for the
+	// genuine race: correct with the index, still correct without it.
+	var existing complaint
+	if err := s.complaintsCol().FindOne(ctx, bson.D{
+		{Key: "consumer_id", Value: consumerID}, {Key: "ref", Value: ref},
+	}).Decode(&existing); err == nil {
+		return &existing, nil
+	} else if err != mongo.ErrNoDocuments {
+		return nil, errInternal("could not check the complaint register")
+	}
+
 	now := time.Now().UTC()
 	c := &complaint{
 		ID: primitive.NewObjectID(), ConsumerID: consumerID, Ref: ref,
@@ -185,4 +202,96 @@ func (h *handler) listComplaints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// ── Operator: answering a complaint ────────────────────────────────────────
+
+// complaintUpdateInput is the operator's side. `resolution` is READ BY THE
+// CUSTOMER verbatim, so it is written as something a member should read.
+type complaintUpdateInput struct {
+	Status     string `json:"status"`
+	Resolution string `json:"resolution"`
+}
+
+// updateComplaint moves a complaint's status and/or writes the resolution the
+// member sees. Without this the register was write-only: a member could file,
+// and nothing in the product could ever answer them.
+func (s *service) updateComplaint(ctx context.Context, ref string, in complaintUpdateInput) (*complaint, error) {
+	ref = strings.ToUpper(strings.TrimSpace(ref))
+	if ref == "" {
+		return nil, errBadRequest("a complaint reference is required")
+	}
+	set := bson.D{{Key: "updated_at", Value: time.Now().UTC()}}
+	if st := strings.ToLower(strings.TrimSpace(in.Status)); st != "" {
+		if !complaintStatuses[st] {
+			return nil, errBadRequest("unknown complaint status: " + st)
+		}
+		set = append(set, bson.E{Key: "status", Value: st})
+	}
+	if res := strings.TrimSpace(in.Resolution); res != "" {
+		if len(res) > 4000 {
+			res = res[:4000]
+		}
+		set = append(set, bson.E{Key: "resolution", Value: res})
+	}
+	if len(set) == 1 { // only the timestamp — nothing was actually asked for
+		return nil, errBadRequest("send a status or a resolution")
+	}
+	var updated complaint
+	err := s.complaintsCol().FindOneAndUpdate(ctx,
+		bson.D{{Key: "ref", Value: ref}},
+		bson.D{{Key: "$set", Value: set}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&updated)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, errNotFound("no complaint with that reference")
+		}
+		return nil, errInternal("could not update the complaint")
+	}
+	return &updated, nil
+}
+
+// listAllComplaints is the support queue — open ones first, newest first.
+func (s *service) listAllComplaints(ctx context.Context, status string) ([]complaint, error) {
+	f := bson.D{}
+	if st := strings.ToLower(strings.TrimSpace(status)); st != "" {
+		if !complaintStatuses[st] {
+			return nil, errBadRequest("unknown complaint status: " + st)
+		}
+		f = bson.D{{Key: "status", Value: st}}
+	}
+	cur, err := s.complaintsCol().Find(ctx, f,
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(500))
+	if err != nil {
+		return nil, errInternal("could not read the complaint queue")
+	}
+	out := []complaint{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("could not decode the complaint queue")
+	}
+	return out, nil
+}
+
+func (h *handler) opsListComplaints(w http.ResponseWriter, r *http.Request) {
+	list, err := h.svc.listAllComplaints(r.Context(), r.URL.Query().Get("status"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (h *handler) opsUpdateComplaint(w http.ResponseWriter, r *http.Request) {
+	var in complaintUpdateInput
+	if err := decode(r, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	c, err := h.svc.updateComplaint(r.Context(), chi.URLParam(r, "ref"), in)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
 }

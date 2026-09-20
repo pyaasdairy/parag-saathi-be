@@ -84,6 +84,17 @@ func newChainWorld(t *testing.T) (*chainWorld, func()) {
 	}
 	svc := newService(d, repo, log)
 	svc.ensureCRMIndexes(ctx)
+	// Phase-2 feature indexes are NON-fatal in production, so ensureIndexes no
+	// longer builds them — build them here so the race guards under test are
+	// the ones production has when the build succeeds.
+	if err := repo.ensureComplaintIndexes(ctx); err != nil {
+		cancel()
+		t.Fatalf("complaint indexes: %v", err)
+	}
+	if err := repo.ensurePushIndexes(ctx); err != nil {
+		cancel()
+		t.Fatalf("push indexes: %v", err)
+	}
 
 	storeID := primitive.NewObjectID()
 	if _, err := db.Collection("org_units").InsertOne(ctx, bson.D{
@@ -260,7 +271,7 @@ func TestFullChainNewCustomerOrderToDelivered(t *testing.T) {
 	}
 	if _, err := w.svc.deliverDelivery(ctx, w.rider, task.ID, deliverInput{
 		ProofPhoto: "https://example.test/proof.jpg", ProofNote: "handed over",
-		Geo:        &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true,
+		Geo: &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true,
 	}); err != nil {
 		t.Fatalf("deliverDelivery: %v", err)
 	}

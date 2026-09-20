@@ -382,3 +382,207 @@ func TestPhase2PushValidation(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// ── Fixes from the adversarial review ──────────────────────────────────────
+
+// DUPLICATE ROWS, ONE DOOR. The app re-POSTs an address when it loses the
+// response, so two rows composing to the same text is ordinary. Refusing them
+// would throw the grouping away for exactly the members who retried — so
+// ambiguity is judged by the DOOR, not by the row count.
+func TestPhase2DuplicateRowsSameDoorStillGroup(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+
+	cid := w.customer(t, "9000005001", 500)
+	clearAddresses(t, w, cid)
+	lat, lng := 26.7712, 81.0123
+	floor := 8
+	for i := 0; i < 2; i++ { // the same door, saved twice by a lost response
+		if _, err := w.svc.createAddress(ctx, cid, addressInput{
+			Label: "Home", Line1: "P4-805", City: "Lucknow", Pincode: "226030",
+			Lat: &lat, Lng: &lng, IsDefault: true,
+			Society: "Chandra Panorama", SocietyID: "chandra-panorama",
+			Tower: "P4", Floor: &floor, Unit: "805",
+		}); err != nil {
+			t.Fatalf("address %d: %v", i, err)
+		}
+	}
+	ord, err := w.svc.createOrder(ctx, cid.Hex(), orderInput{
+		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk", Qty: 2, Price: 35}},
+		PaymentMethod: "wallet", AddressLabel: "Home",
+		AddressText: "P4-805, Lucknow, 226030",
+		Lane:        "morning", ConsumerName: "Dup", Phone: "9000005001",
+	})
+	if err != nil {
+		t.Fatalf("createOrder: %v", err)
+	}
+	queue, _ := w.svc.storeOrders(ctx, w.mgr, w.storeID.Hex())
+	for i := range queue {
+		if queue[i].OrderID == ord.OrderID {
+			if queue[i].Tower != "P4" || queue[i].Unit != "805" {
+				t.Fatalf("identical duplicates lost the door: tower=%q unit=%q",
+					queue[i].Tower, queue[i].Unit)
+			}
+			return
+		}
+	}
+	t.Fatal("order not in the queue")
+}
+
+// sameDoor must treat "ground floor" and "no floor" as DIFFERENT answers.
+func TestPhase2SameDoorTreatsNilFloorAsDistinct(t *testing.T) {
+	zero, eight := 0, 8
+	base := func(f *int) *address {
+		return &address{SocietyID: "s", Tower: "P1", Unit: "101", Floor: f}
+	}
+	if !sameDoor(base(nil), base(nil)) {
+		t.Fatal("two unfloored doors are the same door")
+	}
+	if sameDoor(base(nil), base(&zero)) {
+		t.Fatal("no floor and ground floor must not be treated as equal")
+	}
+	if !sameDoor(base(&zero), base(&zero)) {
+		t.Fatal("two ground floors are the same door")
+	}
+	if sameDoor(base(&zero), base(&eight)) {
+		t.Fatal("different floors are different doors")
+	}
+}
+
+// DPDP: erasure must take the phase-2 PII with the account — a complaint is
+// free text the member wrote, and a push device is a live handle to their phone.
+func TestPhase2ErasureTakesComplaintsAndDevices(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+
+	cid := w.customer(t, "9000005002", 0)
+	if _, err := w.svc.fileComplaint(ctx, cid, complaintInput{
+		Ref: "PYS-ERASE1", Category: "quality", Detail: "Erasure probe",
+	}); err != nil {
+		t.Fatalf("file: %v", err)
+	}
+	if err := w.svc.registerPushDevice(ctx, cid, pushRegisterInput{
+		Token: "ExponentPushToken[erase-probe]", Platform: "ios",
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if err := w.svc.repo.deleteAccountCascade(ctx, cid); err != nil {
+		t.Fatalf("erase: %v", err)
+	}
+
+	if n, _ := w.svc.complaintsCol().CountDocuments(ctx,
+		bson.D{{Key: "consumer_id", Value: cid}}); n != 0 {
+		t.Fatalf("erased account left %d complaints behind", n)
+	}
+	if n, _ := w.svc.pushCol().CountDocuments(ctx,
+		bson.D{{Key: "consumer_id", Value: cid}}); n != 0 {
+		t.Fatalf("erased account left %d push devices behind — a later sender would push to a stranger", n)
+	}
+}
+
+// The register must be answerable: support moves the status and writes the
+// resolution the member reads.
+func TestPhase2ComplaintCanBeAnswered(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+
+	cid := w.customer(t, "9000005003", 0)
+	if _, err := w.svc.fileComplaint(ctx, cid, complaintInput{
+		Ref: "PYS-ANS01", Category: "missing", Detail: "One pack short",
+	}); err != nil {
+		t.Fatalf("file: %v", err)
+	}
+	upd, err := w.svc.updateComplaint(ctx, "PYS-ANS01", complaintUpdateInput{
+		Status: "resolved", Resolution: "We refunded the missing pack to your wallet.",
+	})
+	if err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	if upd.Status != "resolved" || upd.Resolution == "" {
+		t.Fatalf("answer did not stick: %+v", upd)
+	}
+	// The member sees it on their own list.
+	mine, _ := w.svc.listComplaints(ctx, cid)
+	if len(mine) != 1 || mine[0].Resolution == "" {
+		t.Fatalf("the member cannot see the resolution: %+v", mine)
+	}
+	// Unknown status is refused rather than stored.
+	if _, err := w.svc.updateComplaint(ctx, "PYS-ANS01", complaintUpdateInput{Status: "banished"}); err == nil {
+		t.Fatal("an unknown status must be refused")
+	}
+	// An empty update is refused rather than silently bumping updated_at.
+	if _, err := w.svc.updateComplaint(ctx, "PYS-ANS01", complaintUpdateInput{}); err == nil {
+		t.Fatal("an empty update must be refused")
+	}
+	// A reference nobody filed is a 404, not a silent no-op.
+	if _, err := w.svc.updateComplaint(ctx, "PYS-NOPE", complaintUpdateInput{Status: "closed"}); err == nil {
+		t.Fatal("an unknown reference must be refused")
+	}
+}
+
+// The support queue can be read and filtered.
+func TestPhase2SupportQueue(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+
+	a := w.customer(t, "9000005004", 0)
+	b := w.customer(t, "9000005005", 0)
+	_, _ = w.svc.fileComplaint(ctx, a, complaintInput{Ref: "PYS-Q1", Category: "late", Detail: "late"})
+	_, _ = w.svc.fileComplaint(ctx, b, complaintInput{Ref: "PYS-Q2", Category: "rider", Detail: "rude"})
+	if _, err := w.svc.updateComplaint(ctx, "PYS-Q2", complaintUpdateInput{Status: "closed"}); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	all, err := w.svc.listAllComplaints(ctx, "")
+	if err != nil || len(all) < 2 {
+		t.Fatalf("queue should hold both members' rows: %v (%d)", err, len(all))
+	}
+	open, err := w.svc.listAllComplaints(ctx, "open")
+	if err != nil {
+		t.Fatalf("filter: %v", err)
+	}
+	for _, c := range open {
+		if c.Status != "open" {
+			t.Fatalf("filter leaked a %q row", c.Status)
+		}
+	}
+	if _, err := w.svc.listAllComplaints(ctx, "nonsense"); err == nil {
+		t.Fatal("an unknown status filter must be refused")
+	}
+}
+
+// Complaint idempotency must survive the index being ABSENT — its build is
+// non-fatal at boot, so a failed build must degrade nothing that matters.
+func TestPhase2ComplaintIdempotentWithoutTheIndex(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+
+	// Drop the guard the production boot may have failed to create.
+	if _, err := w.svc.complaintsCol().Indexes().DropAll(ctx); err != nil {
+		t.Fatalf("drop indexes: %v", err)
+	}
+	cid := w.customer(t, "9000005006", 0)
+	in := complaintInput{Ref: "PYS-NOIDX", Category: "app", Detail: "no index here"}
+	first, err := w.svc.fileComplaint(ctx, cid, in)
+	if err != nil {
+		t.Fatalf("file: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		again, err := w.svc.fileComplaint(ctx, cid, in)
+		if err != nil {
+			t.Fatalf("retry %d: %v", i, err)
+		}
+		if again.ID != first.ID {
+			t.Fatal("a retry filed a DUPLICATE with the index absent")
+		}
+	}
+	list, _ := w.svc.listComplaints(ctx, cid)
+	if len(list) != 1 {
+		t.Fatalf("index absent: one reference became %d rows", len(list))
+	}
+}

@@ -137,15 +137,24 @@ func (s *service) structuredDoorFor(ctx context.Context, o *order) structuredDoo
 	if want == "" {
 		return structuredDoor{}
 	}
+	// Several saved addresses CAN compose to the same text — the app re-POSTs an
+	// address when it loses the response, so a duplicate row is an ordinary
+	// outcome rather than a corrupt one. Ambiguity only matters when the
+	// duplicates disagree about the DOOR: two rows naming the same tower, floor
+	// and flat point at one place, and refusing them would throw away the
+	// grouping for exactly the members most likely to have retried.
 	var hit *address
 	for i := range list {
 		if composeAddressText(&list[i]) != want {
 			continue
 		}
-		if hit != nil {
-			return structuredDoor{} // ambiguous — two addresses, same text
+		cand := &list[i]
+		if hit != nil && !sameDoor(hit, cand) {
+			return structuredDoor{} // genuinely ambiguous — different doors
 		}
-		hit = &list[i]
+		if hit == nil || hit.SocietyID == "" {
+			hit = cand // prefer a row that actually carries a door
+		}
 	}
 	if hit == nil || hit.SocietyID == "" {
 		return structuredDoor{}
@@ -1037,4 +1046,21 @@ func slotLabel(o *order) string {
 		return o.DeliveryDate
 	}
 	return o.DeliveryWindow
+}
+
+// sameDoor reports whether two saved addresses name the same physical door.
+// A nil floor and a set floor are different answers, so the comparison is on
+// the pointer's VALUE-or-absence, not on the pointer itself.
+func sameDoor(a, b *address) bool {
+	if a.SocietyID != b.SocietyID || a.Tower != b.Tower || a.Unit != b.Unit {
+		return false
+	}
+	switch {
+	case a.Floor == nil && b.Floor == nil:
+		return true
+	case a.Floor == nil || b.Floor == nil:
+		return false
+	default:
+		return *a.Floor == *b.Floor
+	}
 }

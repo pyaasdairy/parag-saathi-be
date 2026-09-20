@@ -135,12 +135,6 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	if err := r.ensureSubscriptionIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer subscription indexes: %w", err)
 	}
-	if err := r.ensureComplaintIndexes(ctx); err != nil {
-		return fmt.Errorf("consumer complaint indexes: %w", err)
-	}
-	if err := r.ensurePushIndexes(ctx); err != nil {
-		return fmt.Errorf("consumer push indexes: %w", err)
-	}
 	if err := r.ensureTrialIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer trial indexes: %w", err)
 	}
@@ -244,6 +238,11 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 		// the evidence rows with the account (r.consents above already covers
 		// the current-state docs, including the derived "promotional" one).
 		db.Collection(collConsentLog),
+		// Phase-2 consumer-keyed PII: a complaint carries free text the member
+		// wrote (and may name an order), and a push device is a live handle to
+		// their phone. An erased account must leave neither behind — the device
+		// row especially, or a later sender would push to a stranger's handset.
+		db.Collection(collComplaints), db.Collection(collPushDevices),
 	} {
 		if _, err := c.DeleteMany(ctx, filter); err != nil {
 			return errInternal("erasure failed")

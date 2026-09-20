@@ -42,6 +42,19 @@ func Register(r chi.Router, d *deps.Deps) {
 		log.Warn("rider-ops index setup incomplete", slog.Any("err", err))
 	}
 
+	// Phase-2 feature indexes (complaints, push devices). NON-fatal for the
+	// same reason as the rider console: the complaint uniqueness guard makes a
+	// retried filing idempotent and the push token index keeps one row per
+	// device, but neither guards money. A transient build failure must degrade
+	// those two features, never refuse to boot a backend that is also serving
+	// orders, wallets and deliveries.
+	if err := repo.ensureComplaintIndexes(ctx); err != nil {
+		log.Warn("complaint index setup incomplete", slog.Any("err", err))
+	}
+	if err := repo.ensurePushIndexes(ctx); err != nil {
+		log.Warn("push index setup incomplete", slog.Any("err", err))
+	}
+
 	// Seed the baseline catalog products (idempotent, single BulkWrite). Runs
 	// AFTER the money-gate indexes and is deliberately NON-FATAL: unlike the
 	// wallet index above, a transient DB blip while loading catalog DATA must not
@@ -289,6 +302,12 @@ func Register(r chi.Router, d *deps.Deps) {
 				cm.Post("/crm/offers/{phone}/override", h.crmOverrideOffer)
 				cm.Get("/crm/dispatch-log/{phone}", h.crmDispatchLog)
 				cm.Post("/crm/flags", h.crmSetFlag)
+
+				// Support queue for the customer complaint register. Without
+				// these the register was write-only — a member could file and
+				// nothing in the product could answer them.
+				cm.Get("/complaints", h.opsListComplaints)
+				cm.Patch("/complaints/{ref}", h.opsUpdateComplaint)
 			})
 
 			// Store manager (STORE_MANAGER): orders in the store's vicinity, its
