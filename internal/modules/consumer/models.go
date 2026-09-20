@@ -155,6 +155,15 @@ type address struct {
 	IsDefault   bool               `bson:"is_default"           json:"is_default"`
 	Lat         *float64           `bson:"lat,omitempty"        json:"lat,omitempty"`
 	Lng         *float64           `bson:"lng,omitempty"        json:"lng,omitempty"`
+	// The structured door, when the app's society picker supplied one. line1 /
+	// line2 still render the same address in words, so a client that reads only
+	// those is unaffected; these exist so a delivery round can be grouped by
+	// (society_id, tower, floor) instead of parsing "805, p4 blk" out of prose.
+	Society   string `bson:"society,omitempty"    json:"society,omitempty"`
+	SocietyID string `bson:"society_id,omitempty" json:"society_id,omitempty"`
+	Tower     string `bson:"tower,omitempty"      json:"tower,omitempty"`
+	Floor     *int   `bson:"floor,omitempty"      json:"floor,omitempty"`
+	Unit      string `bson:"unit,omitempty"       json:"unit,omitempty"`
 	StoreID     string             `bson:"store_id,omitempty"   json:"store_id,omitempty"`
 	Preferences map[string]any     `bson:"preferences,omitempty" json:"-"`
 	CreatedAt   time.Time          `bson:"created_at"           json:"created_at"`

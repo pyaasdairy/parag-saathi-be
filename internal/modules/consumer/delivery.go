@@ -106,9 +106,22 @@ type delivery struct {
 	// Doorstep instructions the RIDER acts on (ring the bell / call first /
 	// drop note) — copied from the order or the account at task creation.
 	DeliveryPrefs *deliveryPrefsDoc `bson:"delivery_prefs,omitempty" json:"deliveryPrefs,omitempty"`
-	AddressLine   string            `bson:"address_line"         json:"addressLine"`
-	Landmark      string            `bson:"landmark,omitempty"   json:"landmark,omitempty"`
-	Geo           geoPt             `bson:"geo"                  json:"geo"`
+	AddressLine string `bson:"address_line"         json:"addressLine"`
+	Landmark    string `bson:"landmark,omitempty"   json:"landmark,omitempty"`
+	// The structured door, when the customer picked it from a society directory
+	// (consumer app §2). addressLine still says the same thing in words; these
+	// let a round be grouped by tower and floor — a rider delivers a whole floor
+	// in one lift ride — instead of parsing it back out of prose.
+	Society string `bson:"society,omitempty"    json:"society,omitempty"`
+	Tower   string `bson:"tower,omitempty"      json:"tower,omitempty"`
+	Floor   *int   `bson:"floor,omitempty"      json:"floor,omitempty"`
+	Unit    string `bson:"unit,omitempty"       json:"unit,omitempty"`
+	Geo geoPt `bson:"geo"                  json:"geo"`
+	// GeoExact — Geo is the CUSTOMER's own pin, not the store's fallback. Only
+	// then can the server judge the 300 m door check: an order placed without
+	// coordinates points the task at the store, where a rider at the real door
+	// is legitimately far away. Server-side only.
+	GeoExact bool `bson:"geo_exact,omitempty"  json:"-"`
 	Items         []deliveryItem    `bson:"items"                json:"items"`
 	Amount        float64           `bson:"amount"               json:"amount"`
 	PaymentMode   string            `bson:"payment_mode"         json:"paymentMode"`

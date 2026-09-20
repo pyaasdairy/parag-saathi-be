@@ -342,6 +342,20 @@ type addressInput struct {
 	CallBefore   *bool  `json:"call_before"`
 	Instructions string `json:"instructions"`
 	DoorPhotoURI string `json:"door_photo_uri"`
+	// STRUCTURED DOOR (consumer app's society picker, HANDOFF-FRONTEND-PHASE2
+	// §2). Inside the launch township the flat is chosen from the society's own
+	// directory as Society → Tower → Floor → Flat instead of being typed, so
+	// "805, p4 blk" and "P4-805" stop being two different doors. All optional:
+	// a typed address sends none of them.
+	//
+	// The point of capturing them is operational — a rider delivers a whole
+	// tower floor in one lift ride — so they are also copied onto the delivery
+	// task, which is where a round can be grouped by (society, tower, floor).
+	Society   string `json:"society"`
+	SocietyID string `json:"society_id"`
+	Tower     string `json:"tower"`
+	Floor     *int   `json:"floor"`
+	Unit      string `json:"unit"`
 }
 
 // preferencesOf packs the doorstep extras into the address Preferences map

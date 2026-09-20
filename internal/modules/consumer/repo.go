@@ -126,6 +126,15 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	if err := r.ensureCatalogIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer catalog indexes: %w", err)
 	}
+	// The complaint register's (consumer, ref) uniqueness is what stops a
+	// retried offline filing becoming a second ticket — like the other
+	// correctness indexes above, a boot without it is a boot that can duplicate.
+	if err := r.ensureComplaintIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer complaint indexes: %w", err)
+	}
+	if err := r.ensurePushIndexes(ctx); err != nil {
+		return fmt.Errorf("consumer push indexes: %w", err)
+	}
 	if err := r.ensureGeoIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer geofence indexes: %w", err)
 	}
@@ -238,6 +247,10 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 		// the evidence rows with the account (r.consents above already covers
 		// the current-state docs, including the derived "promotional" one).
 		db.Collection(collConsentLog),
+		// The complaint register is the member's own words and their phone:
+		// erasure takes it with everything else. Push tokens go too, or a
+		// deleted account keeps receiving notifications on its old phone.
+		db.Collection(collComplaints), db.Collection(collPushDevices),
 	} {
 		if _, err := c.DeleteMany(ctx, filter); err != nil {
 			return errInternal("erasure failed")

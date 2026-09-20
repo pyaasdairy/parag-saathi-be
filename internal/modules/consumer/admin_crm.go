@@ -918,5 +918,7 @@ func registerAdminCRM(cr chi.Router, h *handler, jwtm *auth.JWTManager) {
 		ar.Get("/crm/riders", h.crmRiders)
 		ar.Get("/crm/subscriptions", h.crmSubscriptions)
 		ar.Get("/crm/duplicate-subscription-orders", h.crmDuplicateSubscriptionOrders)
+		ar.Get("/crm/complaints", h.crmComplaints)
+		ar.Post("/crm/complaints/{complaintId}", h.crmUpdateComplaint)
 	})
 }

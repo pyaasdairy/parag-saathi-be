@@ -803,6 +803,8 @@ func (s *service) createAddress(ctx context.Context, consumerID primitive.Object
 		ID: primitive.NewObjectID(), ConsumerID: consumerID,
 		Label: in.Label, Line1: in.Line1, Line2: in.Line2, City: in.City, Pincode: in.Pincode,
 		IsDefault: in.IsDefault, Lat: in.Lat, Lng: in.Lng,
+		Society: strings.TrimSpace(in.Society), SocietyID: strings.TrimSpace(in.SocietyID),
+		Tower: strings.TrimSpace(in.Tower), Floor: in.Floor, Unit: strings.TrimSpace(in.Unit),
 		Preferences: in.preferencesOf(), CreatedAt: now,
 	}
 	// Serving-store resolution seam (§6): resolve address geo → store polygon.

@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"sort"
@@ -33,6 +34,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		return
 	}
 	dest := storeGeo
+	geoExact := at != nil
 	if at != nil {
 		dest = *at
 	}
@@ -67,12 +69,21 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		status, offeredAt = "OFFERED", now.Format(time.RFC3339)
 	}
 	prefs := s.resolveDeliveryPrefs(ctx, o)
+	// Carry the structured door onto the task when the customer picked one.
+	var society, tower, unit string
+	var floor *int
+	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
+		if a := s.addressFor(ctx, cid, o.AddressLabel); a != nil {
+			society, tower, unit, floor = a.Society, a.Tower, a.Unit, a.Floor
+		}
+	}
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
-		Geo: dest, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
+		Geo: dest, GeoExact: geoExact, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
 		Slot: slotLabel(o), Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
+		Society: society, Tower: tower, Floor: floor, Unit: unit,
 		DeliveryPrefs: prefs, DeliveryDate: orderDeliveryDate(o),
 		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
@@ -159,7 +170,10 @@ func standingPrefs(p *deliveryPrefsDoc) *deliveryPrefsDoc {
 
 // addressPrefs reads the doorstep capture stored on the saved address this
 // order ships to (matched by label, else the default address).
-func (s *service) addressPrefs(ctx context.Context, consumerID primitive.ObjectID, label string) *deliveryPrefsDoc {
+// addressFor picks the saved address an order ships to: the one whose label
+// matches, else the default. Shared by the doorstep prefs and the structured
+// door copied onto the task.
+func (s *service) addressFor(ctx context.Context, consumerID primitive.ObjectID, label string) *address {
 	addrs, err := s.repo.listAddresses(ctx, consumerID)
 	if err != nil || len(addrs) == 0 {
 		return nil
@@ -168,14 +182,18 @@ func (s *service) addressPrefs(ctx context.Context, consumerID primitive.ObjectI
 	for i := range addrs {
 		a := &addrs[i]
 		if label != "" && strings.EqualFold(strings.TrimSpace(a.Label), strings.TrimSpace(label)) {
-			pick = a
-			break
+			return a
 		}
 		if a.IsDefault {
 			pick = a
 		}
 	}
-	if len(pick.Preferences) == 0 {
+	return pick
+}
+
+func (s *service) addressPrefs(ctx context.Context, consumerID primitive.ObjectID, label string) *deliveryPrefsDoc {
+	pick := s.addressFor(ctx, consumerID, label)
+	if pick == nil || len(pick.Preferences) == 0 {
 		return nil
 	}
 	str := func(k string) string {
@@ -723,6 +741,19 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	}
 	if !in.GeofenceOK {
 		return nil, errUnprocessable("GEOFENCE_FAILED", "you are not at the delivery address — move closer to confirm")
+	}
+	// ...and MEASURE it here rather than believing the flag. Until now the fence
+	// was asserted entirely by the phone: the server stored proof_distance_m but
+	// never looked at it, so a client that sent geofence_ok:true — including the
+	// app's own "distance unknown" case — was delivered anywhere in the world.
+	// Only enforced when the task carries the CUSTOMER's own pin (GeoExact):
+	// where the order had no coordinates the task falls back to the store's, and
+	// a rider standing at the real door is legitimately kilometres from that.
+	if d.GeoExact && in.Geo != nil && geoSane(d.Geo.Lat, d.Geo.Lng) {
+		if m := haversineKm(*in.Geo, d.Geo) * 1000; m > deliveryGeofenceMeters {
+			return nil, errUnprocessable("GEOFENCE_FAILED",
+				fmt.Sprintf("you are %.0f m from the delivery address — move closer to confirm", m))
+		}
 	}
 	// Debit-on-delivery BEFORE flipping status (funds gate). PREPAID only; keyed
 	// to the order so the consumer's settle sweep can never double-charge.

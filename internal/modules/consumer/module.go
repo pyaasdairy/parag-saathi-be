@@ -177,6 +177,16 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Get("/crm/eligibility", h.crmEligibilityHandler)
 			pr.Post("/crm/enrol/self", h.crmSelfEnrolHandler)
 
+			// Complaint register (complaints.go) — the member files, sees their
+			// own list, and an operator answers from the admin CRM. The app has
+			// been calling these since 18 Sep against a 404.
+			pr.Post("/complaints", h.fileComplaint)
+			pr.Get("/complaints", h.listComplaints)
+
+			// Push device registry (push.go). Stores the token; sending still
+			// needs an FCM/APNs sender and a Firebase project.
+			pr.Post("/push/register", h.registerPushDevice)
+
 			// Profile — support the FE's /users/me and the note's /me alias.
 			for _, base := range []string{"/users/me", "/me"} {
 				pr.Get(base, h.me)
