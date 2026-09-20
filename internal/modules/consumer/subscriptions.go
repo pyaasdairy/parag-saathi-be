@@ -768,8 +768,16 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 					if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, today, true, now); oerr == nil {
 						placed++
 					} else {
-						s.log.WarnContext(ctx, "subscription sweep: same-day order failed",
-							"subscription", sub.SubscriptionID, "day", today)
+						// The claim is what stops a second order for this day, so a
+						// claim with no order behind it means the day is now skipped
+						// FOREVER: the next tick sees it claimed and moves on, and
+						// nobody is told. Release it (the tomorrow-path already did
+						// this) so the next tick retries, and log loudly enough that
+						// a repeated failure is visible rather than a customer simply
+						// not getting milk.
+						s.repo.unclaimSubscriptionDay(ctx, sub.SubscriptionID, today)
+						s.log.ErrorContext(ctx, "subscription sweep: same-day order failed — day released for retry",
+							"subscription", sub.SubscriptionID, "day", today, "err", oerr)
 					}
 				}
 			}
@@ -783,6 +791,8 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 			if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, tomorrow); won {
 				if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, tomorrow, false, now); oerr != nil {
 					s.repo.unclaimSubscriptionDay(ctx, sub.SubscriptionID, tomorrow) // retry next tick
+					s.log.ErrorContext(ctx, "subscription sweep: tomorrow's order failed — day released for retry",
+						"subscription", sub.SubscriptionID, "day", tomorrow, "err", oerr)
 				}
 			}
 		}

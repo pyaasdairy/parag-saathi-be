@@ -487,6 +487,14 @@ func (h *handler) listOrders(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Sign the proof photos here too. The stored value is a private-bucket path
+	// that no app can load; getOrder hands back a short-lived URL for the same
+	// field, so without this the SAME json key meant two different things
+	// depending on which endpoint answered — and the orders list (which is what
+	// the app's live tracking polls) showed a broken image.
+	for i := range orders {
+		orders[i].ProofPhotoURL = h.svc.proofPhotoURL(r.Context(), orders[i].ProofPhotoURL)
+	}
 	writeJSON(w, http.StatusOK, orders)
 }
 

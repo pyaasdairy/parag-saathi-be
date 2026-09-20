@@ -994,14 +994,33 @@ func riderComplianceStepsFor(d *delivery) []riderComplianceStep {
 // order carries no preference — never to a guess about what they wanted.
 func riderHandoverSubtitle(p *deliveryPrefsDoc) string {
 	if p != nil {
+		// The bell is a separate instruction from the handover mode, so it is
+		// CARRIED ALONG rather than dropped: the task card paints an explicit
+		// "do not ring" in red, and the step text used to answer "hand the order
+		// to the customer in person" on the very same task — two screens telling
+		// the rider opposite things about the same door.
+		bell := ""
+		if p.RingBell != nil {
+			if *p.RingBell {
+				bell = "ring the bell"
+			} else {
+				bell = "do NOT ring the bell"
+			}
+		}
+		with := func(line string) string {
+			if bell == "" {
+				return line
+			}
+			return line + " — " + bell
+		}
 		if note := strings.TrimSpace(p.Note); note != "" {
-			return note // the customer's own words win over any template
+			return with(note) // the customer's own words win over any template
 		}
 		switch p.Handover {
 		case "HAND_TO_CUSTOMER":
-			return "Hand the order to the customer in person"
+			return with("Hand the order to the customer in person")
 		case "DROP":
-			return "Leave the order safely at the door"
+			return with("Leave the order safely at the door")
 		case "RING_BELL":
 			return "Ring the bell and wait for the customer"
 		}

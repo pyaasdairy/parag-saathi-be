@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"math"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -43,9 +44,49 @@ type geoPt struct {
 	Lng float64 `bson:"lng" json:"lng"`
 }
 
+// deliveryItem — one line on the last-mile task, as the store manager packs it
+// and the rider carries it.
+//
+// Variant/ProductID were missing until now, and the catalog keeps the pack SIZE
+// in `variant` ("500ml" / "1L") while `name` is only the product ("Full Cream
+// Milk - Parag Gold"). A task line therefore read "Full Cream Milk - Parag Gold
+// x2" on both consoles, and nobody could tell two half-litres from two litres —
+// the manager picked the packs and the rider checked the crate by guesswork.
+//
+// Label() is what a screen should print; an app that only reads `name` (every
+// build already in a rider's hand) still gets the size, because the wire `name`
+// carries it (see deliveryItemsFor).
 type deliveryItem struct {
-	Name string `bson:"name" json:"name"`
-	Qty  int    `bson:"qty"  json:"qty"`
+	ProductID string `bson:"product_id,omitempty" json:"productId,omitempty"`
+	Name      string `bson:"name"                 json:"name"`
+	Variant   string `bson:"variant,omitempty"    json:"variant,omitempty"`
+	Qty       int    `bson:"qty"                  json:"qty"`
+}
+
+// Label renders the line the way a console shows it: product plus pack size.
+func (it deliveryItem) Label() string {
+	v := strings.TrimSpace(it.Variant)
+	if v == "" || strings.Contains(strings.ToLower(it.Name), strings.ToLower(v)) {
+		return it.Name
+	}
+	return it.Name + " (" + v + ")"
+}
+
+// deliveryItemsFor copies order lines onto a task WITHOUT losing the pack size.
+// Both task-writing paths (creation and the store manager's at-handover item
+// adjust) go through here, so the two can never drift apart again.
+//
+// `name` on the wire is the labelled form, so the Saathi builds already
+// installed — which read only name and qty — show "… (500ml)" with no app
+// release. `variant` and `productId` ride alongside for clients that parse them.
+func deliveryItemsFor(items []orderItem) []deliveryItem {
+	out := make([]deliveryItem, 0, len(items))
+	for _, it := range items {
+		d := deliveryItem{ProductID: it.ProductID, Name: it.Name, Variant: it.Variant, Qty: it.Qty}
+		d.Name = d.Label()
+		out = append(out, d)
+	}
+	return out
 }
 
 // delivery is the last-mile task. bson = storage; json = the camelCase FE
@@ -158,6 +199,12 @@ func (r *repository) ensureDeliveryIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "delivery_id", Value: 1}}, Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "store_id", Value: 1}, {Key: "assigned_at", Value: 1}}},
 		{Keys: bson.D{{Key: "rider_party_id", Value: 1}}},
+		// The console lists (listDeliveries): open-or-recent, newest first. Both
+		// consoles hit these on a 12-second poll, so the sort must be served by
+		// an index rather than re-sorting the whole store history in memory.
+		{Keys: bson.D{{Key: "store_id", Value: 1}, {Key: "status", Value: 1}, {Key: "created_at", Value: -1}}},
+		{Keys: bson.D{{Key: "rider_party_id", Value: 1}, {Key: "status", Value: 1}, {Key: "created_at", Value: -1}}},
+		{Keys: bson.D{{Key: "store_id", Value: 1}, {Key: "updated_at", Value: -1}}},
 		{Keys: bson.D{{Key: "order_id", Value: 1}}, Options: options.Index().SetUnique(true)},
 	})
 	if err != nil {
@@ -259,8 +306,39 @@ func (r *repository) listDeliveriesByRider(ctx context.Context, riderPartyID str
 	return r.listDeliveries(ctx, bson.D{{Key: "rider_party_id", Value: riderPartyID}})
 }
 
+// deliveryHistoryDays — how far back a console carries FINISHED work. Open
+// tasks are never aged out; delivered/failed ones older than this drop off the
+// list (they remain in the database, and the admin CRM pages the full history).
+const deliveryHistoryDays = 3
+
+// listDeliveries returns EVERY still-open task plus the recently finished ones,
+// NEWEST FIRST.
+//
+// It used to sort assigned_at ASCENDING with a flat SetLimit(500), which made
+// the store and rider consoles go blind: once a store passed 500 lifetime tasks
+// the query returned its 500 OLDEST rows, so every new order was missing from
+// the queue while the screen confidently showed "no orders waiting". One pilot
+// store crossed that line on 9 Aug 2026 and 3,432 later tasks — including every
+// instant order — never reached a phone again.
+//
+// Two rules now keep the list both complete and bounded:
+//   - open work (deliveryOpenStatuses) is ALWAYS returned, with no age cut-off,
+//     so a task can never fall off the queue while somebody still has to act;
+//   - finished work is trimmed to the last deliveryHistoryDays, which is what
+//     the consoles actually render ("Completed" today, "Done" for the rider)
+//     and what "sold today" / "done today" are derived from.
+//
+// The cap stays as a backstop against an unbounded response, but it is now the
+// NEWEST rows, so a fresh order is always in the window.
 func (r *repository) listDeliveries(ctx context.Context, filter bson.D) ([]delivery, error) {
-	cur, err := r.deliveries.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "assigned_at", Value: 1}}).SetLimit(500))
+	cutoff := time.Now().UTC().AddDate(0, 0, -deliveryHistoryDays)
+	scoped := append(bson.D{}, filter...)
+	scoped = append(scoped, bson.E{Key: "$or", Value: bson.A{
+		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: deliveryOpenStatuses}}}},
+		bson.D{{Key: "updated_at", Value: bson.D{{Key: "$gte", Value: cutoff}}}},
+	}})
+	cur, err := r.deliveries.Find(ctx, scoped,
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(500))
 	if err != nil {
 		return nil, errInternal("deliveries lookup failed")
 	}
@@ -427,17 +505,33 @@ func (r *repository) nearestStore(ctx context.Context, at *geoPt) (string, geoPt
 	if err := cur.All(ctx, &stores); err != nil || len(stores) == 0 {
 		return "", geoPt{}, errNotFound("no serving store")
 	}
+	// A store whose coordinates were never set reads as (0,0) — Null Island, off
+	// west Africa. Left in the running it is "nearest" to nothing and yet wins
+	// whenever the order carries no geo, and every task it produces is pinned to
+	// the zero point: the rider's map sends them into the Atlantic and the
+	// 300 m door check can never pass. nearestStoreNamed already filters these
+	// out (geoSane); this path did not, so the two disagreed about which store
+	// serves an address.
+	usable := stores[:0]
+	for _, s := range stores {
+		if geoSane(s.Lat, s.Lng) {
+			usable = append(usable, s)
+		}
+	}
+	if len(usable) == 0 {
+		return "", geoPt{}, errNotFound("no serving store has coordinates")
+	}
 	best := 0
 	if at != nil {
 		bestD := math.MaxFloat64
-		for i, s := range stores {
+		for i, s := range usable {
 			d := haversineKm(*at, geoPt{Lat: s.Lat, Lng: s.Lng})
 			if d < bestD {
 				bestD, best = d, i
 			}
 		}
 	}
-	s := stores[best]
+	s := usable[best]
 	return s.ID.Hex(), geoPt{Lat: s.Lat, Lng: s.Lng}, nil
 }
 

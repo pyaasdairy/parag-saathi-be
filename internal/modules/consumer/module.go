@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -266,6 +267,20 @@ func Register(r chi.Router, d *deps.Deps) {
 		// ── Admin delivery CRM + pickup-point setting (admin_crm.go) ──
 		// SUPER_ADMIN role token, or X-Admin-Key from the website's server.
 		registerAdminCRM(cr, h, d.JWT)
+		// Say out loud which of the two doors is open. ADMIN_API_KEY is declared
+		// sync:false in render.yaml, so it is typed into the dashboard by hand and
+		// a missing or too-short value fails CLOSED — the website then gets 401s
+		// from a service that otherwise looks perfectly healthy. One boot line
+		// turns that silent misconfiguration into something you can read in the
+		// deploy log. The key itself is never logged, only its length.
+		if n := len(os.Getenv("ADMIN_API_KEY")); n >= adminKeyMinLen {
+			log.Info("admin CRM: key auth ENABLED", slog.Int("key_len", n))
+		} else if n > 0 {
+			log.Error("admin CRM: ADMIN_API_KEY is TOO SHORT — key auth is OFF, the website will get 401s",
+				slog.Int("key_len", n), slog.Int("required", adminKeyMinLen))
+		} else {
+			log.Info("admin CRM: no ADMIN_API_KEY set — SUPER_ADMIN role token only")
+		}
 
 		// ── Operator surfaces (SAATHI operator token + role) ──
 		// The store manager and delivery rider are Saathi operators; these routes

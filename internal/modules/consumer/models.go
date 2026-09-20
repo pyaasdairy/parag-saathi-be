@@ -93,11 +93,24 @@ func sanitizeDeliveryPrefs(m map[string]any) *deliveryPrefsDoc {
 			}
 		}
 	}
+	// The free-text line arrives under three spellings: the consumer app's
+	// standing preference screen sends "notes" (lib/deliveryPrefs.ts:49), the
+	// address capture and checkout send "instructions", and "note" is this
+	// module's own field name. Reading only "note" silently dropped the
+	// customer's doorstep note — the one field in this object that is written
+	// in their own words.
+	note := clip(m["note"], 280)
+	for _, k := range []string{"notes", "instructions"} {
+		if note != "" {
+			break
+		}
+		note = clip(m[k], 280)
+	}
 	d := &deliveryPrefsDoc{
 		Handover:   clip(m["handover"], 24),
 		CallBefore: b(m["callBefore"]) || b(m["call_before"]),
 		RingBell:   ring,
-		Note:       clip(m["note"], 280),
+		Note:       note,
 		Receiver:   clip(m["receiver"], 80),
 	}
 	if d.Handover == "" && !d.CallBefore && d.RingBell == nil && d.Note == "" && d.Receiver == "" {

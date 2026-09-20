@@ -15,6 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
+	"github.com/pyaas/saathi-backend/internal/platform/audit"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 	"github.com/pyaas/saathi-backend/internal/platform/middleware"
@@ -34,6 +35,11 @@ import (
 
 const adminKeyActorID = "admin-api-key"
 
+// adminKeyMinLen — a shared key guarding the customer book has to be long
+// enough that guessing it is hopeless. Anything shorter is refused outright
+// (fail closed), and module.go logs which door is open at boot.
+const adminKeyMinLen = 32
+
 func adminGate(jwtm *auth.JWTManager) func(http.Handler) http.Handler {
 	viaToken := func(next http.Handler) http.Handler {
 		return middleware.Authenticate(jwtm)(middleware.RequireRoles()(next)) // SUPER_ADMIN only
@@ -47,7 +53,7 @@ func adminGate(jwtm *auth.JWTManager) func(http.Handler) http.Handler {
 				return
 			}
 			want := os.Getenv("ADMIN_API_KEY")
-			if len(want) < 32 || subtle.ConstantTimeCompare([]byte(key), []byte(want)) != 1 {
+			if len(want) < adminKeyMinLen || subtle.ConstantTimeCompare([]byte(key), []byte(want)) != 1 {
 				httpx.Error(w, r, httpx.Unauthorized("invalid admin key"))
 				return
 			}
@@ -505,14 +511,21 @@ func (h *handler) crmSummary(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
+	// The dashboard aggregates in Go, so the cap is what stands between a wide
+	// date range and the whole order history in one process. Sort NEWEST FIRST
+	// so a truncated window is the most recent slice rather than an arbitrary
+	// one, and tell the caller when it happened — a silently clipped total is a
+	// wrong number presented as a right one.
+	const summaryMaxOrders = 20000
 	cur, err := h.svc.repo.orders.Find(ctx, bson.D{{Key: "placed_at", Value: bson.D{{Key: "$gte", Value: start}, {Key: "$lt", Value: end}}}},
-		options.Find().SetLimit(20000))
+		options.Find().SetSort(bson.D{{Key: "placed_at", Value: -1}}).SetLimit(summaryMaxOrders))
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(errInternal("orders lookup failed")))
 		return
 	}
 	var orders []order
 	_ = cur.All(ctx, &orders)
+	truncated := len(orders) >= summaryMaxOrders
 	rows := h.svc.crmHydrate(ctx, orders)
 
 	byStatus, byDelivery, byType, byPayment := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
@@ -592,6 +605,10 @@ func (h *handler) crmSummary(w http.ResponseWriter, r *http.Request) {
 		"riders": riderList, "perDay": days, "subscriptions": subs,
 		"liveOpenDeliveries": openNow, "liveUnassignedDeliveries": unassignedNow,
 		"pickup": h.svc.pickupPoint(ctx),
+		// true = the range held more orders than one dashboard call reads, so
+		// every total above covers only the most recent summaryMaxOrders. The
+		// website must say so rather than print a short number as the truth.
+		"truncated": truncated,
 	})
 }
 
@@ -714,15 +731,36 @@ func (h *handler) crmAssign(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "deliveryId")
 	if body.RiderPartyID != "" {
+		task, terr := h.svc.repo.findDeliveryByID(ctx, id)
+		if terr != nil {
+			httpx.Error(w, r, toHTTPErr(terr))
+			return
+		}
 		oid, err := primitive.ObjectIDFromHex(body.RiderPartyID)
 		n := int64(0)
 		if err == nil {
+			// Scope the rider to the store this task belongs to, the way the
+			// store-manager path does (ridersForStore). Being an active rider
+			// SOMEWHERE is not enough: sending a Lucknow order to a rider rostered
+			// at another store creates a task nobody can deliver, and the customer
+			// waits for a rider who will never come. The admin surface keeps its
+			// extra power — it may still assign an OFFERED task the store console
+			// cannot touch — but not the power to pick a stranger.
 			n, _ = h.svc.repo.roleAssignments.CountDocuments(ctx, bson.D{
 				{Key: "party_id", Value: oid}, {Key: "role_code", Value: "DELIVERY_RIDER"}, {Key: "status", Value: "ACTIVE"},
+				{Key: "org_unit_id", Value: task.StoreID},
 			})
+			if n == 0 {
+				if sid, serr := primitive.ObjectIDFromHex(task.StoreID); serr == nil {
+					n, _ = h.svc.repo.roleAssignments.CountDocuments(ctx, bson.D{
+						{Key: "party_id", Value: oid}, {Key: "role_code", Value: "DELIVERY_RIDER"}, {Key: "status", Value: "ACTIVE"},
+						{Key: "org_unit_id", Value: sid},
+					})
+				}
+			}
 		}
 		if n == 0 {
-			httpx.Error(w, r, httpx.BadRequest("NOT_A_RIDER", "that person is not an active delivery rider"))
+			httpx.Error(w, r, httpx.BadRequest("NOT_A_STORE_RIDER", "that person is not an active delivery rider at this store"))
 			return
 		}
 	}
@@ -787,10 +825,22 @@ func (h *handler) crmCancel(w http.ResponseWriter, r *http.Request) {
 // rest (POST /crm/orders/{id}/cancel) if they have not been delivered.
 func (h *handler) crmDuplicateSubscriptionOrders(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// Bound the scan by day. Without a lower bound this walks every subscription
+	// order ever placed and groups them all in memory — fine on a pilot, a slow
+	// unindexed scan once a year of daily milk has accumulated. ?days= widens it
+	// when somebody is hunting old duplicates on purpose.
+	days := 60
+	if v := strings.TrimSpace(r.URL.Query().Get("days")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 730 {
+			days = n
+		}
+	}
+	since := istToday(time.Now().AddDate(0, 0, -days))
 	cur, err := h.svc.repo.orders.Aggregate(ctx, bson.A{
 		bson.D{{Key: "$match", Value: bson.D{
 			{Key: "subscription_id", Value: bson.D{{Key: "$gt", Value: ""}}},
 			{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+			{Key: "scheduled_for", Value: bson.D{{Key: "$gte", Value: since}}},
 		}}},
 		bson.D{{Key: "$sort", Value: bson.D{{Key: "placed_at", Value: 1}}}},
 		bson.D{{Key: "$group", Value: bson.D{
@@ -826,10 +876,38 @@ func (h *handler) crmDuplicateSubscriptionOrders(w http.ResponseWriter, r *http.
 	httpx.JSON(w, http.StatusOK, out)
 }
 
+// auditAdminReads records every admin-surface request, INCLUDING GETs.
+//
+// The platform's AuditMutations middleware deliberately skips reads, which is
+// right for ordinary routes. It is wrong here: seven of these ten routes are
+// GETs, and between them they export the entire customer book — names, unmasked
+// phones, addresses, home coordinates, wallet balances and ledgers, plus rider
+// phones and live positions. Without this line, a leaked ADMIN_API_KEY could
+// pull all of it and leave no trace at all. The shared key has no human behind
+// it, so the actor is recorded as the key's service identity and the IP is what
+// distinguishes one caller from another.
+func auditAdminReads(rec *audit.Recorder) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r)
+			if rec == nil || r.Method != http.MethodGet {
+				return // mutations are already covered by AuditMutations
+			}
+			rec.Record(r.Context(), audit.Entry{
+				Action:     "admin_crm.read " + r.URL.Path,
+				TargetType: "consumer_admin",
+				IP:         r.RemoteAddr,
+				Meta:       map[string]any{"query": r.URL.RawQuery},
+			})
+		})
+	}
+}
+
 // registerAdminCRM mounts /consumer/admin/*.
 func registerAdminCRM(cr chi.Router, h *handler, jwtm *auth.JWTManager) {
 	cr.Route("/admin", func(ar chi.Router) {
 		ar.Use(adminGate(jwtm))
+		ar.Use(auditAdminReads(h.svc.deps.Audit))
 		ar.Get("/delivery-settings", h.crmGetSettings)
 		ar.Put("/delivery-settings", h.crmPutSettings)
 		ar.Get("/crm/summary", h.crmSummary)

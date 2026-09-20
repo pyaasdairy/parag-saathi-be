@@ -36,10 +36,9 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	if at != nil {
 		dest = *at
 	}
-	items := make([]deliveryItem, 0, len(o.Items))
+	items := deliveryItemsFor(o.Items)
 	trialEligible := false
 	for _, it := range o.Items {
-		items = append(items, deliveryItem{Name: it.Name, Qty: it.Qty})
 		if isTrialProduct(it.ProductID) {
 			trialEligible = true // 2+2 welcome trial — full-cream (gold-*) only
 		}
@@ -116,17 +115,46 @@ func (s *service) resolveDeliveryPrefs(ctx context.Context, o *order) *deliveryP
 			merged.RingBell = p.RingBell
 		}
 	}
+	// Least specific first, most specific last — the overlay lets a later source
+	// win field by field. The account's STANDING preference is the general rule,
+	// the saved address is about this particular door, and the order is what the
+	// customer said at this checkout, so that is the order they must be applied
+	// in. (They used to run address-then-account, which let a standing setting
+	// overrule the instruction attached to the door being delivered to.)
 	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
-		overlay(s.addressPrefs(ctx, cid, o.AddressLabel))
 		if acct, aerr := s.repo.findAccountByID(ctx, cid); aerr == nil && acct != nil {
-			overlay(acct.DeliveryPrefs)
+			overlay(standingPrefs(acct.DeliveryPrefs))
 		}
+		overlay(s.addressPrefs(ctx, cid, o.AddressLabel))
 	}
 	overlay(o.DeliveryPrefs)
 	if !any {
 		return nil
 	}
 	return merged
+}
+
+// standingPrefs adapts the ACCOUNT-level preference screen to the tri-state
+// bell.
+//
+// The consumer app's standing prefs are a fixed object with a hard-coded
+// `ring_bell: false` default (pyaas-consumer lib/deliveryPrefs.ts:18) that it
+// sends on every save, whether or not the customer ever touched that switch.
+// Read literally, that default is "DO NOT ring the bell" — and the rider app
+// paints it in red — so the moment both sides ship, nearly every task in the
+// country would carry a doorstep instruction nobody gave.
+//
+// A false from this source therefore means "never said" (nil). Only true is an
+// instruction here. The saved address (an explicit bell picker in
+// AddressCapture) and the order's own prefs keep the full tri-state, so a
+// genuine "baby sleeping, do not ring" still reaches the rider.
+func standingPrefs(p *deliveryPrefsDoc) *deliveryPrefsDoc {
+	if p == nil || p.RingBell == nil || *p.RingBell {
+		return p
+	}
+	clone := *p
+	clone.RingBell = nil
+	return &clone
 }
 
 // addressPrefs reads the doorstep capture stored on the saved address this
@@ -460,10 +488,7 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 		}}}); uerr != nil {
 		return nil, errInternal("order adjust failed")
 	}
-	dItems := make([]deliveryItem, 0, len(newItems))
-	for _, it := range newItems {
-		dItems = append(dItems, deliveryItem{Name: it.Name, Qty: it.Qty})
-	}
+	dItems := deliveryItemsFor(newItems)
 	return s.repo.updateDelivery(ctx, deliveryID,
 		bson.D{{Key: "items", Value: dItems}, {Key: "amount", Value: total}, {Key: "updated_at", Value: now}},
 		bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
@@ -598,8 +623,20 @@ func (s *service) acceptDelivery(ctx context.Context, actor auth.Actor, id strin
 
 func (s *service) pickupDelivery(ctx context.Context, actor auth.Actor, id string) (*delivery, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	d, err := s.riderTransition(ctx, actor, id, "ACCEPTED",
-		bson.D{{Key: "status", Value: "OUT_FOR_DELIVERY"}, {Key: "out_for_delivery_at", Value: now}}, "")
+	// Snapshot WHERE the stock was collected, at the moment it was collected.
+	// The field pair exists on the task and the admin CRM renders a "pickup"
+	// column from it, but nothing ever wrote it, so the column was permanently
+	// blank. Recording it here (rather than reading the live setting later) is
+	// what makes it an audit trail: moving the pickup point tomorrow must not
+	// rewrite where yesterday's milk actually came from.
+	p := s.pickupPoint(ctx)
+	set := bson.D{
+		{Key: "status", Value: "OUT_FOR_DELIVERY"},
+		{Key: "out_for_delivery_at", Value: now},
+		{Key: "pickup_address", Value: p.Address},
+		{Key: "pickup_geo", Value: geoPt{Lat: p.Lat, Lng: p.Lng}},
+	}
+	d, err := s.riderTransition(ctx, actor, id, "ACCEPTED", set, "")
 	if err == nil {
 		s.syncOrderOutForDelivery(ctx, d)
 	}
