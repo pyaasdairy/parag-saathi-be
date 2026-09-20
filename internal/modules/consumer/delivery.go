@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"math"
 	"strings"
 	"time"
@@ -53,9 +54,8 @@ type geoPt struct {
 // x2" on both consoles, and nobody could tell two half-litres from two litres —
 // the manager picked the packs and the rider checked the crate by guesswork.
 //
-// Label() is what a screen should print; an app that only reads `name` (every
-// build already in a rider's hand) still gets the size, because the wire `name`
-// carries it (see deliveryItemsFor).
+// The wire keeps them SEPARATE — see deliveryItemsFor for why the name must
+// never be decorated — and each console joins them for display.
 type deliveryItem struct {
 	ProductID string `bson:"product_id,omitempty" json:"productId,omitempty"`
 	Name      string `bson:"name"                 json:"name"`
@@ -111,8 +111,8 @@ type delivery struct {
 	// Doorstep instructions the RIDER acts on (ring the bell / call first /
 	// drop note) — copied from the order or the account at task creation.
 	DeliveryPrefs *deliveryPrefsDoc `bson:"delivery_prefs,omitempty" json:"deliveryPrefs,omitempty"`
-	AddressLine string `bson:"address_line"         json:"addressLine"`
-	Landmark    string `bson:"landmark,omitempty"   json:"landmark,omitempty"`
+	AddressLine   string            `bson:"address_line"         json:"addressLine"`
+	Landmark      string            `bson:"landmark,omitempty"   json:"landmark,omitempty"`
 	// The structured door, when the customer picked it from a society directory
 	// (consumer app §2). addressLine still says the same thing in words; these
 	// let a round be grouped by tower and floor — a rider delivers a whole floor
@@ -121,15 +121,15 @@ type delivery struct {
 	Tower   string `bson:"tower,omitempty"      json:"tower,omitempty"`
 	Floor   *int   `bson:"floor,omitempty"      json:"floor,omitempty"`
 	Unit    string `bson:"unit,omitempty"       json:"unit,omitempty"`
-	Geo geoPt `bson:"geo"                  json:"geo"`
+	Geo     geoPt  `bson:"geo"                  json:"geo"`
 	// GeoExact — Geo is the CUSTOMER's own pin, not the store's fallback. Only
 	// then can the server judge the 300 m door check: an order placed without
 	// coordinates points the task at the store, where a rider at the real door
 	// is legitimately far away. Server-side only.
-	GeoExact bool `bson:"geo_exact,omitempty"  json:"-"`
-	Items         []deliveryItem    `bson:"items"                json:"items"`
-	Amount        float64           `bson:"amount"               json:"amount"`
-	PaymentMode   string            `bson:"payment_mode"         json:"paymentMode"`
+	GeoExact    bool           `bson:"geo_exact,omitempty"  json:"-"`
+	Items       []deliveryItem `bson:"items"                json:"items"`
+	Amount      float64        `bson:"amount"               json:"amount"`
+	PaymentMode string         `bson:"payment_mode"         json:"paymentMode"`
 	// TrialEligible is set at creation when the order is a PYAAS Taaza subscription
 	// item — only then may the 2-paid/2-free welcome trial waive its settle charge.
 	TrialEligible bool   `bson:"trial_eligible,omitempty" json:"-"`
@@ -349,14 +349,20 @@ const deliveryHistoryDays = 3
 // The cap stays as a backstop against an unbounded response, but it is now the
 // NEWEST rows, so a fresh order is always in the window.
 func (r *repository) listDeliveries(ctx context.Context, filter bson.D) ([]delivery, error) {
-	cutoff := time.Now().UTC().AddDate(0, 0, -deliveryHistoryDays)
-	scoped := append(bson.D{}, filter...)
-	scoped = append(scoped, bson.E{Key: "$or", Value: bson.A{
-		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: deliveryOpenStatuses}}}},
-		bson.D{{Key: "updated_at", Value: bson.D{{Key: "$gte", Value: cutoff}}}},
-	}})
-	cur, err := r.deliveries.Find(ctx, scoped,
-		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(500))
+	// TWO queries, deliberately — not one query with an $or and a cap.
+	//
+	// A single capped query cannot keep both promises: whatever it sorts by,
+	// the cap eventually cuts something. Sorted newest-first it cuts the OLDEST
+	// rows, and an old stuck OFFERED/ASSIGNED task is exactly the oldest row —
+	// so the one task most in need of attention is the first to vanish. That is
+	// the 9 Aug blindness again, just through a different door.
+	//
+	// So: open work is fetched on its own and is NEVER capped (it is bounded by
+	// reality — a store cannot have thousands of undelivered orders), and
+	// finished work is a separate, capped, recent window.
+	open := append(bson.D{}, filter...)
+	open = append(open, bson.E{Key: "status", Value: bson.D{{Key: "$in", Value: deliveryOpenStatuses}}})
+	cur, err := r.deliveries.Find(ctx, open, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
 	if err != nil {
 		return nil, errInternal("deliveries lookup failed")
 	}
@@ -364,7 +370,25 @@ func (r *repository) listDeliveries(ctx context.Context, filter bson.D) ([]deliv
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, errInternal("deliveries decode failed")
 	}
-	return out, nil
+
+	// Finished work: the last few days, newest first, capped. This is what the
+	// consoles render as "Completed" / "Done" and what "sold today" and
+	// "done today" are derived from; older history lives in the admin CRM.
+	cutoff := time.Now().UTC().AddDate(0, 0, -deliveryHistoryDays)
+	done := append(bson.D{}, filter...)
+	done = append(done,
+		bson.E{Key: "status", Value: bson.D{{Key: "$nin", Value: deliveryOpenStatuses}}},
+		bson.E{Key: "updated_at", Value: bson.D{{Key: "$gte", Value: cutoff}}})
+	dcur, err := r.deliveries.Find(ctx, done,
+		options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetLimit(500))
+	if err != nil {
+		return nil, errInternal("deliveries lookup failed")
+	}
+	var finished []delivery
+	if err := dcur.All(ctx, &finished); err != nil {
+		return nil, errInternal("deliveries decode failed")
+	}
+	return append(out, finished...), nil
 }
 
 func (r *repository) updateDelivery(ctx context.Context, id string, set bson.D, guard bson.D) (*delivery, error) {
@@ -530,6 +554,16 @@ func (r *repository) nearestStore(ctx context.Context, at *geoPt) (string, geoPt
 	// 300 m door check can never pass. nearestStoreNamed already filters these
 	// out (geoSane); this path did not, so the two disagreed about which store
 	// serves an address.
+	// Prefer stores that actually have coordinates: a store left at (0,0) is
+	// "nearest" to nothing, yet it wins whenever the order carries no geo, and
+	// every task it produces is pinned to Null Island off west Africa.
+	//
+	// This filter RANKS, it must never refuse. Returning an error here stops
+	// createDeliveryForOrder minting the task at all — no task, in no console,
+	// on no rider's phone — while serviceability deliberately fails OPEN in the
+	// same state ("never go dark", geofence.go). Ordering would stay on while
+	// fulfilment went silent, which is far worse than one odd distance number.
+	// So with no usable store we still route to one and say so loudly.
 	usable := stores[:0]
 	for _, s := range stores {
 		if geoSane(s.Lat, s.Lng) {
@@ -537,7 +571,8 @@ func (r *repository) nearestStore(ctx context.Context, at *geoPt) (string, geoPt
 		}
 	}
 	if len(usable) == 0 {
-		return "", geoPt{}, errNotFound("no serving store has coordinates")
+		s := stores[0]
+		return s.ID.Hex(), geoPt{Lat: s.Lat, Lng: s.Lng}, errNoStoreGeo
 	}
 	best := 0
 	if at != nil {
@@ -552,6 +587,12 @@ func (r *repository) nearestStore(ctx context.Context, at *geoPt) (string, geoPt
 	s := usable[best]
 	return s.ID.Hex(), geoPt{Lat: s.Lat, Lng: s.Lng}, nil
 }
+
+// errNoStoreGeo — a task was routed, but NO active store has usable
+// coordinates, so the store geo behind it is meaningless (distanceKm, and the
+// fallback destination for an order with no pin of its own). A warning, never a
+// reason to refuse the task: see nearestStore.
+var errNoStoreGeo = errors.New("no active store has coordinates")
 
 // geoSane rejects out-of-range and Null-Island (0,0 = missing geo) coordinates,
 // so a store that was never given a centre can't win "nearest".

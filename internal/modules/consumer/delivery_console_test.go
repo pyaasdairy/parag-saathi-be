@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,21 +151,39 @@ func TestDeliveryItemsKeepThePackSize(t *testing.T) {
 	}
 }
 
-// The standing preference screen sends ring_bell:false by default for everyone,
-// so it must not become "DO NOT ring the bell" on every task in the country.
-// An explicit false on the ADDRESS or the ORDER still reaches the rider.
-func TestDefaultBellIsNotAnInstruction(t *testing.T) {
+// The bell rules, which are subtle enough to be worth pinning.
+//
+//   - the ACCOUNT's standing prefs hard-code ring_bell:false and post it on
+//     every save, so a false THERE says nothing and is dropped;
+//   - the ADDRESS capture shows a visibly preselected "Hang it outside", so a
+//     false there is a real instruction and must reach the rider;
+//   - "do not ring" next to an explicit HAND_TO_CUSTOMER is what the cart
+//     produces from an untouched switch, so the rider's step text must not
+//     print a contradiction — but with any other mode it must.
+func TestBellInstructionRules(t *testing.T) {
 	no, yes := false, true
-	if got := standingPrefs(&deliveryPrefsDoc{RingBell: &no}); got.RingBell != nil {
-		t.Error("account-level ring_bell:false is the app's default, not an instruction")
+
+	if got := bellSaid(&deliveryPrefsDoc{RingBell: &no}); got.RingBell != nil {
+		t.Error("the account's default ring_bell:false is not an instruction")
 	}
-	if got := standingPrefs(&deliveryPrefsDoc{RingBell: &yes}); got.RingBell == nil || !*got.RingBell {
-		t.Error("account-level ring_bell:true is a real instruction and must survive")
+	if got := bellSaid(&deliveryPrefsDoc{RingBell: &yes}); got.RingBell == nil || !*got.RingBell {
+		t.Error("ring_bell:true is a real instruction and must survive")
 	}
-	// The rider's step text must not contradict the red banner on the card.
-	line := riderHandoverSubtitle(&deliveryPrefsDoc{Handover: "HAND_TO_CUSTOMER", RingBell: &no})
-	if line == "Hand the order to the customer in person" {
-		t.Errorf("step text drops the bell instruction the card shows in red: %q", line)
+
+	// Contradiction suppressed.
+	if line := riderHandoverSubtitle(&deliveryPrefsDoc{Handover: "HAND_TO_CUSTOMER", RingBell: &no}); line != "Hand the order to the customer in person" {
+		t.Errorf("an untouched bell must not argue with the handover mode: %q", line)
+	}
+	// A real "leave it, don't ring" still reaches the rider.
+	if line := riderHandoverSubtitle(&deliveryPrefsDoc{Handover: "DROP", RingBell: &no}); !strings.Contains(line, "do NOT ring") {
+		t.Errorf("a deliberate do-not-ring was dropped: %q", line)
+	}
+	if line := riderHandoverSubtitle(&deliveryPrefsDoc{RingBell: &no}); !strings.Contains(line, "Do NOT ring") {
+		t.Errorf("a bare do-not-ring was dropped: %q", line)
+	}
+	// And a positive bell is always carried.
+	if line := riderHandoverSubtitle(&deliveryPrefsDoc{Handover: "HAND_TO_CUSTOMER", RingBell: &yes}); !strings.Contains(line, "ring the bell") {
+		t.Errorf("ring-the-bell was dropped: %q", line)
 	}
 }
 

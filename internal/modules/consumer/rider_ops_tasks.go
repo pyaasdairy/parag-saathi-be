@@ -994,16 +994,22 @@ func riderComplianceStepsFor(d *delivery) []riderComplianceStep {
 // order carries no preference — never to a guess about what they wanted.
 func riderHandoverSubtitle(p *deliveryPrefsDoc) string {
 	if p != nil {
-		// The bell is a separate instruction from the handover mode, so it is
-		// CARRIED ALONG rather than dropped: the task card paints an explicit
-		// "do not ring" in red, and the step text used to answer "hand the order
-		// to the customer in person" on the very same task — two screens telling
-		// the rider opposite things about the same door.
+		// The bell rides ALONG with the handover mode instead of being dropped —
+		// the card paints an explicit "do not ring" and the step text used to
+		// answer "hand the order to the customer in person" on the same task,
+		// two screens telling the rider opposite things about one door.
+		//
+		// One exception: a "do not ring" next to an explicit HAND_TO_CUSTOMER is
+		// what the consumer app produces from an UNTOUCHED bell switch (cart.tsx
+		// derives the mode from that same default), so repeating it there would
+		// print a doorstep instruction on nearly every order that nobody gave.
+		// A bell the customer really did switch off comes with DROP or with no
+		// handover mode at all, and still reaches the rider.
 		bell := ""
 		if p.RingBell != nil {
 			if *p.RingBell {
 				bell = "ring the bell"
-			} else {
+			} else if p.Handover != "HAND_TO_CUSTOMER" {
 				bell = "do NOT ring the bell"
 			}
 		}

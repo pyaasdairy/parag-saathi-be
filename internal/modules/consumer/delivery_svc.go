@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -29,7 +30,14 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		at = &geoPt{Lat: o.Geo.Lat, Lng: o.Geo.Lng}
 	}
 	storeID, storeGeo, err := s.repo.nearestStore(ctx, at)
-	if err != nil {
+	switch {
+	case errors.Is(err, errNoStoreGeo):
+		// Routed anyway — a task nobody can see is worse than a task with a
+		// meaningless distance. Loud, because it means a store org-unit is
+		// missing its coordinates and someone has to fix the master data.
+		s.log.ErrorContext(ctx, "no active store has coordinates — task routed on the first store; fix the store's geo",
+			"order", o.OrderID, "store", storeID)
+	case err != nil:
 		s.log.WarnContext(ctx, "no serving store for order", "order", o.OrderID)
 		return
 	}
@@ -134,7 +142,7 @@ func (s *service) resolveDeliveryPrefs(ctx context.Context, o *order) *deliveryP
 	// overrule the instruction attached to the door being delivered to.)
 	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
 		if acct, aerr := s.repo.findAccountByID(ctx, cid); aerr == nil && acct != nil {
-			overlay(standingPrefs(acct.DeliveryPrefs))
+			overlay(bellSaid(acct.DeliveryPrefs))
 		}
 		overlay(s.addressPrefs(ctx, cid, o.AddressLabel))
 	}
@@ -145,21 +153,15 @@ func (s *service) resolveDeliveryPrefs(ctx context.Context, o *order) *deliveryP
 	return merged
 }
 
-// standingPrefs adapts the ACCOUNT-level preference screen to the tri-state
-// bell.
+// bellSaid drops a bell setting the customer never actually chose.
 //
-// The consumer app's standing prefs are a fixed object with a hard-coded
-// `ring_bell: false` default (pyaas-consumer lib/deliveryPrefs.ts:18) that it
-// sends on every save, whether or not the customer ever touched that switch.
-// Read literally, that default is "DO NOT ring the bell" — and the rider app
-// paints it in red — so the moment both sides ship, nearly every task in the
-// country would carry a doorstep instruction nobody gave.
-//
-// A false from this source therefore means "never said" (nil). Only true is an
-// instruction here. The saved address (an explicit bell picker in
-// AddressCapture) and the order's own prefs keep the full tri-state, so a
-// genuine "baby sleeping, do not ring" still reaches the rider.
-func standingPrefs(p *deliveryPrefsDoc) *deliveryPrefsDoc {
+// Applied to the ACCOUNT's standing prefs only. That object hard-codes
+// `ring_bell: false` (pyaas-consumer lib/deliveryPrefs.ts:18) and posts it on
+// every save of any unrelated field, so a false there says nothing about the
+// bell — while the ADDRESS capture and the ORDER's own prefs keep the full
+// tri-state, because those are where a customer sets a door instruction and a
+// deliberate "baby sleeping, do not ring" must reach the rider intact.
+func bellSaid(p *deliveryPrefsDoc) *deliveryPrefsDoc {
 	if p == nil || p.RingBell == nil || *p.RingBell {
 		return p
 	}
@@ -178,7 +180,7 @@ func (s *service) addressFor(ctx context.Context, consumerID primitive.ObjectID,
 	if err != nil || len(addrs) == 0 {
 		return nil
 	}
-	pick := &addrs[0]
+	pick := &addrs[0] // no label match and no default: the first saved address
 	for i := range addrs {
 		a := &addrs[i]
 		if label != "" && strings.EqualFold(strings.TrimSpace(a.Label), strings.TrimSpace(label)) {
@@ -422,8 +424,27 @@ func (s *service) storeCancelDelivery(ctx context.Context, actor auth.Actor, sto
 // itemAdjust is one requested line change — the ABSOLUTE new quantity,
 // reduction only (a store can shrink a bill, never inflate one).
 type itemAdjust struct {
-	Name string `json:"name"`
-	Qty  int    `json:"qty"`
+	// ProductID identifies the exact line. Name alone cannot: Gold 500 ml and
+	// Gold 1 L share one product name and differ only by variant, so a
+	// name-keyed adjustment silently rewrote BOTH lines and re-billed the
+	// customer for a pack they still have. Clients that send it get exact
+	// matching; older builds fall back to the name, as before.
+	ProductID string `json:"product_id"`
+	Variant   string `json:"variant"`
+	Name      string `json:"name"`
+	Qty       int    `json:"qty"`
+}
+
+// adjustKey identifies one order line for the at-handover adjustment. Product
+// id when the client sent one, else name+variant, else the bare name.
+func adjustKey(productID, name, variant string) string {
+	if p := strings.TrimSpace(productID); p != "" {
+		return "id:" + p
+	}
+	if v := strings.TrimSpace(variant); v != "" {
+		return "nv:" + strings.ToLower(strings.TrimSpace(name)) + "|" + strings.ToLower(v)
+	}
+	return "n:" + strings.ToLower(strings.TrimSpace(name))
 }
 
 // storeAdjustDelivery — the manager reduces item quantities before handover
@@ -459,12 +480,16 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 	}
 	want := map[string]int{}
 	for _, c := range changes {
-		want[c.Name] = c.Qty
+		want[adjustKey(c.ProductID, c.Name, c.Variant)] = c.Qty
 	}
 	newItems := make([]orderItem, 0, len(o.Items))
 	changed := false
 	for _, it := range o.Items {
-		q, ok := want[it.Name]
+		q, ok := want[adjustKey(it.ProductID, it.Name, it.Variant)]
+		if !ok {
+			// An older client sent a bare name: match on that, as it always did.
+			q, ok = want[adjustKey("", it.Name, "")]
+		}
 		if !ok {
 			newItems = append(newItems, it)
 			continue
