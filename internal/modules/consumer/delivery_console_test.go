@@ -54,7 +54,7 @@ func TestStoreConsoleShowsNewOrdersPast500(t *testing.T) {
 		{Key: "assigned_at", Value: now.Format(time.RFC3339)},
 		{Key: "created_at", Value: now},
 		{Key: "updated_at", Value: now},
-		{Key: "items", Value: []deliveryItem{{ProductID: "gold-500ml", Name: "Full Cream Milk - Parag Gold (500ml)", Variant: "500ml", Qty: 2}}},
+		{Key: "items", Value: []deliveryItem{{ProductID: "gold-500ml", Name: "Full Cream Milk - Parag Gold", Variant: "500ml", Qty: 2}}},
 	}
 	if _, err := repo.deliveries.InsertOne(ctx, fresh); err != nil {
 		t.Fatalf("seed fresh: %v", err)
@@ -119,29 +119,34 @@ func TestOpenTasksNeverAgeOut(t *testing.T) {
 	}
 }
 
-// The pack size reaches the task by BOTH writing paths, and the wire `name`
-// carries it so the Saathi builds already on riders' phones show it without an
-// app release.
+// The pack size reaches the task by BOTH writing paths — in its own field.
+//
+// The name must stay EXACTLY as the catalog wrote it: the Saathi store screen
+// reconciles stock by exact name match (models/store.dart), so decorating the
+// name with "(500ml)" would silently stop "held" / "delivered" / "sold today"
+// from counting against any product row.
 func TestDeliveryItemsKeepThePackSize(t *testing.T) {
 	items := deliveryItemsFor([]orderItem{
 		{ProductID: "gold-500ml", Name: "Full Cream Milk - Parag Gold", Variant: "500ml", Qty: 2},
 		{ProductID: "taaza-1l", Name: "Toned Milk - Parag Taaza", Variant: "1L", Qty: 1},
-		{ProductID: "x", Name: "Paneer 200g", Variant: "200g", Qty: 1},
-		{ProductID: "y", Name: "Curd 400g (400g)", Variant: "400g", Qty: 1},
 	})
-	want := []string{
-		"Full Cream Milk - Parag Gold (500ml)",
-		"Toned Milk - Parag Taaza (1L)",
-		"Paneer 200g",      // the name already carries the size — not repeated
-		"Curd 400g (400g)", // likewise, whatever case the catalog used
-	}
-	for i, w := range want {
-		if items[i].Name != w {
-			t.Errorf("line %d: got %q, want %q", i, items[i].Name, w)
-		}
+	if items[0].Name != "Full Cream Milk - Parag Gold" || items[1].Name != "Toned Milk - Parag Taaza" {
+		t.Errorf("the wire name must stay verbatim, got %q / %q", items[0].Name, items[1].Name)
 	}
 	if items[0].Variant != "500ml" || items[0].ProductID != "gold-500ml" {
-		t.Errorf("variant/productId must ride along for clients that parse them: %+v", items[0])
+		t.Errorf("variant/productId must ride along: %+v", items[0])
+	}
+	if items[1].Variant != "1L" {
+		t.Errorf("variant missing on line 2: %+v", items[1])
+	}
+	// Label() is the display form used server-side, and never repeats a size the
+	// name already carries.
+	if got := items[0].Label(); got != "Full Cream Milk - Parag Gold (500ml)" {
+		t.Errorf("Label(): got %q", got)
+	}
+	already := deliveryItem{Name: "Paneer 200g", Variant: "200g"}
+	if got := already.Label(); got != "Paneer 200g" {
+		t.Errorf("Label() should not repeat a size the name already states: %q", got)
 	}
 }
 

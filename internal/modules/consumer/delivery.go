@@ -64,6 +64,8 @@ type deliveryItem struct {
 }
 
 // Label renders the line the way a console shows it: product plus pack size.
+// Server-side display only (admin CRM, logs) — the WIRE keeps name and variant
+// as separate fields, see deliveryItemsFor.
 func (it deliveryItem) Label() string {
 	v := strings.TrimSpace(it.Variant)
 	if v == "" || strings.Contains(strings.ToLower(it.Name), strings.ToLower(v)) {
@@ -76,15 +78,18 @@ func (it deliveryItem) Label() string {
 // Both task-writing paths (creation and the store manager's at-handover item
 // adjust) go through here, so the two can never drift apart again.
 //
-// `name` on the wire is the labelled form, so the Saathi builds already
-// installed — which read only name and qty — show "… (500ml)" with no app
-// release. `variant` and `productId` ride alongside for clients that parse them.
+// `name` is copied VERBATIM and the size travels in its own `variant` field.
+// Folding "(500ml)" into the name would have shown the size on builds already
+// installed — tempting — but the Saathi store screen reconciles stock by EXACT
+// name match against its catalog (models/store.dart matches()/canon()), so a
+// decorated name silently stops matching any product row and "held",
+// "delivered" and "sold today" quietly stop counting. A console that shows the
+// size but miscounts the stock is a worse trade than one that shows the size
+// one release later.
 func deliveryItemsFor(items []orderItem) []deliveryItem {
 	out := make([]deliveryItem, 0, len(items))
 	for _, it := range items {
-		d := deliveryItem{ProductID: it.ProductID, Name: it.Name, Variant: it.Variant, Qty: it.Qty}
-		d.Name = d.Label()
-		out = append(out, d)
+		out = append(out, deliveryItem{ProductID: it.ProductID, Name: it.Name, Variant: it.Variant, Qty: it.Qty})
 	}
 	return out
 }
