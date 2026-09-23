@@ -409,8 +409,9 @@ POST /consumer/referrals/apply { code }             lib/referrals.ts:160, :178
    unless both `CRM_WA_TOKEN` and `CRM_WA_PHONE_ID` are set and the trigger is in
    `CRM_WA_TEMPLATE_NAMES`; push is bound per dispatch to the member's tokens from
    `consumer_push_devices` (provider expo, newest 5), needs `EXPO_PUSH_ENABLED=true`, and prunes
-   `DeviceNotRegistered` tokens (source: 01). `ai_call`, `human_call`, `admin_console`, `email`
-   resolve to nothing (`crm_channels.go:95`).
+   `DeviceNotRegistered` tokens (source: 01). `ai_call`, `admin_console`, `email`
+   resolve to nothing (`crm_channels.go:95`); `human_call` is the operator call-back queue
+   since `e76bd1a` (`crm_callbacks.go`, `GET /consumer/admin/crm/callbacks`).
 7. **W-01 / W-07 mechanics.** W-01 is sent by the worker, not inline on the enrol request
    (`a1b8623`); pack 2 expires only once W-07 is on record as SENT (`8afae8f`); the manual
    operator send dedups by content (`e9c609c`).
@@ -425,7 +426,7 @@ the complaint triggers that now have emitters (C6), lands in the in-app inbox on
 for the member to open the app (20 Sep handoff section 5; the emitters are new, the channel
 state is not). The per-trigger status table is `docs/CRM-AUDIT-2026-09-24.md` section 1 (as of
 `bf083ef`, before the five completion commits; re-derive the column STATUS after section 4.6 is
-finished). `docs/CRM-MESSAGES.md` (the rendered-body matrix) was never written; it is item 6a.0.b.
+finished). `docs/CRM-MESSAGES.md` (the rendered-body matrix, with each trigger's status today) now exists.
 
 ### 4.3 Env keys (declared in `render.yaml` and `.env.example`)
 
@@ -477,6 +478,16 @@ a bare jest harness insert a `consumer_push_devices` row by hand). Tests for the
    only, by design.
 
 ### 4.6 STOPPED: CRM completion stage, exactly where it stands
+
+> **Update (24 Sep, later the same day): items 6 to 9 and stage D items 1 to 5 are DONE**
+> on `integration/delivery`, each with a test that failed before its fix: `f7384d9` (the
+> top-up message fires only once the money is in; every credit path proven),
+> `e76bd1a` (human_call queue, E-05 reaches a person), `22759d4` (W-03b consent chain
+> proven), `3b8851f` (F17 pack size on Welcome Litre plans), `8f369e8` (F18 address
+> replay), `cb5ede3` (F19 inbox refs; consumer `ee2a07f` pairs by them), `71286d2` (F20
+> inventory sizes), `482133c` (the matrix test), `eb9d9ae` (20 Sep handoff
+> corrections) and `docs/CRM-MESSAGES.md`. What is still open from this section is the
+> independent review (6a.0.c). The text below is kept as it was written.
 
 Planned as nine items plus a "stage D" of five, then two independent reviewers (compat and
 CRM-matrix). Stopped by the owner after item 5. Every landed commit passed the full suite
@@ -996,11 +1007,11 @@ the report files in `docs/handoff-2026-09-24-reports/`.
 | F13 | backend CRM | HIGH | per-order triggers claimed once per consumer per day: a second order the same day got no D-01/D-02/D-06 | FIXED `8edd9e1` (unreviewed) |
 | F14 | backend CRM | MEDIUM | trigger `delay` ignored | FIXED `8d24915` (unreviewed) |
 | F15 | backend CRM | HIGH | ~38 triggers had no emitter (the wallet top-up message the owner reported among them); complaint conditions used category names the app never sends; `order.failed` had no message | FIXED `804205f`, `7cbb043`, `81e2ff6` (unreviewed); 22 triggers remain `awaiting_event` by design |
-| F16 | backend CRM | MEDIUM | E-05 (`human_call`) reaches nobody; W-03b never sends; no matrix test; no `docs/CRM-MESSAGES.md` | OPEN, section 4.6 |
-| F17 | backend | HIGH (owner-visible) | Welcome Litre plans created server-side carry no pack size: every morning order, task, store row and rider row shows no volume (reproduced live) | OPEN, section 4.6 stage D item 1 |
-| F18 | backend | MEDIUM | offline replay of an address create can duplicate a server row | OPEN, 4.6 stage D item 2 |
-| F19 | backend | LOW | inbox rows carry no order id / complaint ref for exact dedupe | OPEN, 4.6 stage D item 3 |
-| F20 | backend | LOW | rider Verify-inventory lines carry the size only as `unit`; the order-unreadable fallback merges sizes | OPEN, 4.6 stage D item 4 |
+| F16 | backend CRM | MEDIUM | E-05 (`human_call`) reaches nobody; W-03b never sends; no matrix test; no `docs/CRM-MESSAGES.md` | FIXED `e76bd1a` (human_call queue), `22759d4` (W-03b is consent-gated by owner decision and proven to fire for a consenting member), `482133c` (matrix), `docs/CRM-MESSAGES.md`; pre-ticked consent defaults remain a founder decision (6b) |
+| F17 | backend | HIGH (owner-visible) | Welcome Litre plans created server-side carry no pack size: every morning order, task, store row and rider row shows no volume (reproduced live) | FIXED `3b8851f` |
+| F18 | backend | MEDIUM | offline replay of an address create can duplicate a server row | FIXED `8f369e8` |
+| F19 | backend | LOW | inbox rows carry no order id / complaint ref for exact dedupe | FIXED `cb5ede3` + consumer `ee2a07f` |
+| F20 | backend | LOW | rider Verify-inventory lines carry the size only as `unit`; the order-unreadable fallback merges sizes | FIXED `71286d2` |
 | F21 | backend features | HIGH | Founding Family billing retries per hour: a short wallet stops the membership in ~3 hours | OPEN, 5.3.1 |
 | F22 | backend features | MEDIUM | stop then re-join inside the paid month forfeits perks and charges Rs 99 again; own unlocked farm cannot be re-joined | OPEN, 5.3.2 (owner rule) |
 | F23 | backend features | LOW | LOCK step honours edits made 12:00-12:15 | OPEN, 5.3.3 |
