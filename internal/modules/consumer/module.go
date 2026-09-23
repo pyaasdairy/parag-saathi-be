@@ -187,6 +187,10 @@ func Register(r chi.Router, d *deps.Deps) {
 			// needs an FCM/APNs sender and a Firebase project.
 			pr.Post("/push/register", h.registerPushDevice)
 
+			// Photo uploads (uploads_presign.go, contract C4): a one-shot B2
+			// upload target for a complaint or door photo.
+			pr.Post("/uploads/presign", h.consumerPresign)
+
 			// Profile — support the FE's /users/me and the note's /me alias.
 			for _, base := range []string{"/users/me", "/me"} {
 				pr.Get(base, h.me)

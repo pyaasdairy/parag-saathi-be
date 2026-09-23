@@ -90,6 +90,10 @@ type service struct {
 	// b2img is the download-only B2 client behind the PUBLIC catalog image proxy
 	// (catalog_images.go). Reads B2_* env; nil-safe (route 503s if unconfigured).
 	b2img *b2DownloadClient
+	// presign mints B2 upload targets for the member's complaint and door
+	// photos (uploads_presign.go) through the uploads module's own core.
+	// Nil-safe; the route answers 503 until B2_* is configured.
+	presign presignCore
 	// crmSMS / crmWA are the CRM Phase B outbound transports (crm_channels.go).
 	// Nil-safe and DISABLED until their env keys exist (CRM_MSG91_AUTHKEY;
 	// CRM_WA_TOKEN + CRM_WA_PHONE_ID) — without keys the CRM dispatcher stays
@@ -112,6 +116,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		sms:                sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
 		catalogServeSeeded: os.Getenv("CONSUMER_CATALOG_SEED_SERVE") == "true",
 		b2img:              newB2DownloadClient(),
+		presign:            newConsumerPresigner(),
 		crmSMS:             newSMSChannel(log),
 		crmWA:              newWhatsAppChannel(log),
 		dolibarrKick:       make(chan struct{}, 1),
