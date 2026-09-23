@@ -186,6 +186,7 @@ func Register(r chi.Router, d *deps.Deps) {
 			// Push device registry (push.go). Stores the token; sending still
 			// needs an FCM/APNs sender and a Firebase project.
 			pr.Post("/push/register", h.registerPushDevice)
+			pr.Delete("/push/register", h.unregisterPushDevice) // C2: sign-out unbinds the device
 
 			// Photo uploads (uploads_presign.go, contract C4): a one-shot B2
 			// upload target for a complaint or door photo.

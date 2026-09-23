@@ -95,6 +95,22 @@ func (s *service) registerPushDevice(ctx context.Context, consumerID primitive.O
 	return nil
 }
 
+// unregisterPushDevice drops ONE token when it belongs to the caller: the
+// sign-out leg (contract C2), so a shared phone stops carrying the previous
+// member's order news. Idempotent: a token that is absent, or that has since
+// moved to another account, is not an error and is left to its newest owner.
+func (s *service) unregisterPushDevice(ctx context.Context, consumerID primitive.ObjectID, token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" || len(token) > 512 {
+		return errBadRequest("a device token is required")
+	}
+	if _, err := s.repo.pushDevices().DeleteOne(ctx,
+		bson.D{{Key: "token", Value: token}, {Key: "consumer_id", Value: consumerID}}); err != nil {
+		return errInternal("device unregistration failed")
+	}
+	return nil
+}
+
 // forgetPushDevices drops a consumer's tokens — called from the erasure cascade
 // so a deleted account cannot keep receiving notifications on its old phone.
 func (r *repository) forgetPushDevices(ctx context.Context, consumerID primitive.ObjectID) {
@@ -119,4 +135,26 @@ func (h *handler) registerPushDevice(w http.ResponseWriter, r *http.Request) {
 	// Tell the app plainly that the token is stored but nothing can be sent yet,
 	// so "push is silent" is a documented state rather than a mystery.
 	writeJSON(w, http.StatusOK, map[string]any{"registered": true, "delivery": "pending_sender"})
+}
+
+// DELETE /consumer/push/register {"token"} -> 204 (contract C2). 204 also
+// when the row is absent; the app calls this before it clears the session.
+func (h *handler) unregisterPushDevice(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var in struct {
+		Token string `json:"token"`
+	}
+	if err := decode(r, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.svc.unregisterPushDevice(r.Context(), id, in.Token); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
