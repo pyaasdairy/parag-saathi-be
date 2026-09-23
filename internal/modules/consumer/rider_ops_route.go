@@ -355,6 +355,7 @@ type riderInventoryLineDoc struct {
 	Name         string   `bson:"name"`
 	DemandQty    int      `bson:"demand_qty"`
 	Unit         string   `bson:"unit,omitempty"`
+	Variant      string   `bson:"variant,omitempty"`
 	Scannable    bool     `bson:"scannable"`
 	TakenQty     int      `bson:"taken_qty"`
 	ScannedCodes []string `bson:"scanned_codes,omitempty"`
@@ -379,6 +380,10 @@ type riderInventoryLineResponse struct {
 	Name      string `json:"name"`
 	DemandQty int    `json:"demand_qty"`
 	Unit      string `json:"unit,omitempty"`
+	// Variant is the pack size ("500ml", "1L") as its own key; the Saathi
+	// sheet prints variant ?? unit (lib/models/rider.dart InventoryLine.size),
+	// and unit stays for the deployed build that reads only unit.
+	Variant   string `json:"variant,omitempty"`
 	Scannable bool   `json:"scannable"`
 	TakenQty  int    `json:"taken_qty"`
 }
@@ -399,6 +404,7 @@ func riderInventoryView(doc *riderInventoryDoc) riderInventorySessionResponse {
 			Name:      l.Name,
 			DemandQty: l.DemandQty,
 			Unit:      l.Unit,
+			Variant:   l.Variant,
 			Scannable: l.Scannable,
 			TakenQty:  l.TakenQty,
 		})
@@ -538,6 +544,7 @@ func riderInventoryLinesUnchanged(have, want []riderInventoryLineDoc) bool {
 			have[i].DemandQty != want[i].DemandQty ||
 			have[i].Name != want[i].Name ||
 			have[i].Unit != want[i].Unit ||
+			have[i].Variant != want[i].Variant ||
 			have[i].Scannable != want[i].Scannable {
 			return false
 		}
@@ -634,16 +641,26 @@ func (r *repository) riderInventoryDemandForDay(ctx context.Context, riderPartyI
 				if key == "" {
 					key = riderInventoryKeyFromName(it.Name)
 				}
-				add(key, strings.TrimSpace(it.ProductID), it.Name, it.Variant, it.Qty)
+				add(key+riderInventorySizeSuffix(it.Variant), strings.TrimSpace(it.ProductID), it.Name, strings.TrimSpace(it.Variant), it.Qty)
 			}
 			continue
 		}
+		// The order could not be read: the task's own lines carry the name
+		// and the pack size, and the size keeps 500ml and 1L apart.
 		for _, it := range d.Items {
-			add(riderInventoryKeyFromName(it.Name), "", it.Name, "", it.Qty)
+			add(riderInventoryKeyFromName(it.Name)+riderInventorySizeSuffix(it.Variant), "", it.Name, strings.TrimSpace(it.Variant), it.Qty)
 		}
 	}
 	if len(rolled) == 0 {
 		return []riderInventoryLineDoc{}, nil
+	}
+	// Verify indexes the sheet by product_id, so a product carried in two
+	// sizes needs one id per size.
+	sizesOf := map[string]int{}
+	for _, a := range rolled {
+		if a.productID != "" {
+			sizesOf[a.productID]++
+		}
 	}
 
 	// Pack size for the sheet, read from the catalogue where the SKU is known.
@@ -661,12 +678,15 @@ func (r *repository) riderInventoryDemandForDay(ctx context.Context, riderPartyI
 		id := a.productID
 		if id == "" {
 			id = key
+		} else if sizesOf[id] > 1 {
+			id += ":" + strings.ToLower(a.variant)
 		}
 		out = append(out, riderInventoryLineDoc{
 			ProductID: id,
 			Name:      a.name,
 			DemandQty: a.qty,
 			Unit:      unit,
+			Variant:   a.variant,
 			// Scannable stays FALSE: nothing in this system yet records which
 			// products ship in code-bearing crates. Claiming true would make the
 			// console demand a scan of every box before it lets the rider verify
@@ -691,6 +711,16 @@ func (r *repository) riderInventoryDemandForDay(ctx context.Context, riderPartyI
 // and space-collapsed so "Toned Milk  1L" and "toned milk 1L" are one line.
 func riderInventoryKeyFromName(name string) string {
 	return "name:" + strings.ToLower(strings.Join(strings.Fields(name), " "))
+}
+
+// riderInventorySizeSuffix keeps two pack sizes of one product on separate
+// lines ("|500ml", "|1l"); a line with no size keeps the plain key, so a
+// sheet derived before sizes were keyed reads the same.
+func riderInventorySizeSuffix(variant string) string {
+	if v := strings.ToLower(strings.TrimSpace(variant)); v != "" {
+		return "|" + v
+	}
+	return ""
 }
 
 // riderInventoryProductUnits resolves pack sizes ("500 ml", "1 kg") for the known SKUs in
