@@ -25,7 +25,9 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	store := w.storeID.Hex()
 	tomorrow := addDaysIST(istToday(time.Now()), 1)
 	// Before noon the upcoming window is exactly tomorrow (from noon it runs
-	// to the day after); the test drives the endpoint at 09:00 IST today.
+	// to the day after); the test drives the endpoint, and places its
+	// scheduled one-off orders, at 09:00 IST today (after noon tomorrow is
+	// past the one-off cut-off).
 	ist := time.Now().In(istZone)
 	at := time.Date(ist.Year(), ist.Month(), ist.Day(), 9, 0, 0, 0, istZone)
 
@@ -61,11 +63,11 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	// (c) a scheduled one-off order: with its task it belongs to the orders
 	// console; without one (creation failed) it is upcoming.
 	cid2 := w.customer(t, "9000006002", 500)
-	oneOff, err := w.svc.createOrder(ctx, cid2.Hex(), orderInput{
+	oneOff, err := w.svc.createOrderAt(ctx, cid2.Hex(), orderInput{
 		Items:         []orderItem{{ProductID: "taaza-1l", Name: "Milk taaza-1l", Qty: 1, Price: 57}},
 		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
 		Lane: "morning", ConsumerName: "Scheduled Tester", Phone: "9000006002", DeliveryDate: tomorrow,
-	})
+	}, at)
 	if err != nil {
 		t.Fatalf("scheduled order: %v", err)
 	}
@@ -132,12 +134,12 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	}
 	actor2 := auth.Actor{PartyID: mgr2.Hex(), Kind: "role", RoleCode: "STORE_MANAGER"}
 	cid3 := w.customer(t, "9000006003", 500)
-	farOrder, err := w.svc.createOrder(ctx, cid3.Hex(), orderInput{
+	farOrder, err := w.svc.createOrderAt(ctx, cid3.Hex(), orderInput{
 		Items:         []orderItem{{ProductID: "gold-1l", Name: "Milk gold-1l", Qty: 1, Price: 69}},
 		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Delhi",
 		Lane: "morning", ConsumerName: "Far Tester", Phone: "9000006003", DeliveryDate: tomorrow,
 		Geo: &geoPoint{Lat: 28.6000, Lng: 77.2000},
-	})
+	}, at)
 	if err != nil {
 		t.Fatalf("far order: %v", err)
 	}

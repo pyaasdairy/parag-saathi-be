@@ -274,6 +274,13 @@ type orderInput struct {
 }
 
 func (s *service) createOrder(ctx context.Context, userID string, in orderInput) (*order, error) {
+	return s.createOrderAt(ctx, userID, in, time.Now())
+}
+
+// createOrderAt is createOrder on an explicit clock: the delivery-date window
+// and the noon cut-off are IST-calendar rules, so tests drive them at a fixed
+// moment the way the subscription sweep's tests do.
+func (s *service) createOrderAt(ctx context.Context, userID string, in orderInput, at time.Time) (*order, error) {
 	if len(in.Items) == 0 {
 		return nil, errBadRequest("an order needs at least one item")
 	}
@@ -383,15 +390,31 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 		if derr != nil {
 			return nil, errBadRequest("delivery_date must be YYYY-MM-DD")
 		}
-		ist := time.Now().In(istZone)
+		ist := at.In(istZone)
 		today0 := time.Date(ist.Year(), ist.Month(), ist.Day(), 0, 0, 0, 0, istZone)
 		if d.Before(today0.AddDate(0, 0, 1)) || d.After(today0.AddDate(0, 0, 7)) {
 			return nil, errUnprocessable("BAD_DELIVERY_DATE", "pick a morning between tomorrow and 7 days from now")
 		}
+		// THE NOON CUT-OFF (One Voice 1.2, "Order by 12 noon, delivery by
+		// 7 AM"): tomorrow's morning route locks at 12:00 IST today, for
+		// one-off orders exactly as for subscription changes (the same
+		// lockedThroughDay the sweep uses). The order is refused rather than
+		// moved to a later morning: the member agreed to tomorrow, so the
+		// message names the next open morning and lets them choose.
+		if deliveryDate <= lockedThroughDay(at) {
+			next := firstEditableDay(at)
+			label := next
+			if nd, ok := parseDay(next); ok {
+				label = nd.Format("Mon 2 Jan")
+			}
+			return nil, &apiError{status: http.StatusUnprocessableEntity, Code: "CUTOFF_PASSED",
+				Message:          "Order by 12 noon for tomorrow; next available " + label + ".",
+				NextDeliveryDate: next}
+		}
 	} else {
 		deliveryDate = ""
 	}
-	now := time.Now().UTC()
+	now := at.UTC()
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: userID, Status: "placed",
 		Subtotal: subtotal, DeliveryFee: fee, MonsoonFee: monsoonFee, Total: total, PaymentMethod: pm,

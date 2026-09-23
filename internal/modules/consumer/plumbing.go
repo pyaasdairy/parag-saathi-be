@@ -49,6 +49,9 @@ type apiError struct {
 	// Shortfall rides on WALLET_SHORT (founding.go): the rupees the wallet is
 	// short of the Rs 99 seat, as a field beside the message that names it.
 	Shortfall float64 `json:"shortfall,omitempty"`
+	// NextDeliveryDate rides on CUTOFF_PASSED (orders.go): the first morning
+	// (YYYY-MM-DD, IST) a one-off order can still reach.
+	NextDeliveryDate string `json:"next_delivery_date,omitempty"`
 }
 
 func (e *apiError) Error() string { return e.Message }
