@@ -562,3 +562,16 @@ tick. A task already `DELIVERED` is never touched (the order sync owns it).
    record in this backend to migrate from.
 10. **The app's start-date picker after noon** (9.3): tomorrow is already locked;
     the picker should offer the day after tomorrow or read `next_delivery_date`.
+
+### 9.7 Review defects fixed (24 Sep handoff, section 5.3)
+
+Each fix landed as its own commit with a test that failed before it.
+
+1. **Billing retried per hour, not per day**: fixed in `21cf84c`. `last_attempt_date` counts one attempt per IST day; the third distinct short day stops the membership; a same-day top-up is still billed within the hour (`TestFoundingBillingRetriesOncePerDay`).
+2. **Re-join inside the paid month charged Rs 99 again and dropped the perks**: fixed in `78cdaea`. Before `perks_until` the re-join is free and keeps `perks_until`; the farm the member was active on can be taken back even though it unlocked (active, same line, same bill date); a filling farm seats them as waiting with the perks intact and bills month two from the day after the paid month; after `perks_until` it is a fresh Rs 99 join (`TestFoundingRejoinInsidePaidMonth`).
+3. **LOCK step honoured edits made 12:00-12:15**: fixed in `1346e2a`. A plan changed after the day's lock moment locks its preview as it stands; a pause before noon still cancels tomorrow on the late tick (`TestNoonLockStepIgnoresEditsAfterTheCutOff`).
+4. **Duplicate line numbers after a waiting member stops**: fixed in `7b9a990`. A per-farm `next_line` that never decreases; `claimed` stays the live seat count (`TestFoundingLineNumbersNeverRepeat`).
+5. **Founding and referral unique indexes missing from the test world**: fixed in `fe5ea18`. `newChainWorld` builds both; five concurrent joins give one member, one seat, one debit; a failed boot build makes `POST /founding-family/join` answer 503 `FOUNDING_UNAVAILABLE` and `POST /referrals/apply` 503 `REFERRAL_UNAVAILABLE` (flat `{code, message}`) until a retry builds the index (`index_guard.go`).
+6. **Noon cut-off for one-off morning orders**: built in `f8fcfe5`. A morning order whose `delivery_date` is already locked (tomorrow, from 12:00 IST) gets 422 `CUTOFF_PASSED`, "Order by 12 noon for tomorrow; next available <day>.", plus `next_delivery_date`; the day after tomorrow and the instant lane are untouched; an order with no `delivery_date` (the app's first delivery of a new subscription) is not refused (`TestOneOffMorningOrderNoonCutOff`). App follow-up: the cart always sends tomorrow, so after noon it shows this message; it should offer `next_delivery_date` instead.
+
+Also: `e0d7ed1` breaks the referral-code collision tie on the ObjectID (the oldest account now always wins; `TestReferralDerivedCodeResolvesWithoutAStoredOne` failed about one run in five before it), and `a892a14` declares the nine referral / Founding Family keys in `.env.example` and `render.yaml` with the defaults `config.go` applies.
