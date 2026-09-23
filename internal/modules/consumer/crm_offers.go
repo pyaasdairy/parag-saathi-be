@@ -751,8 +751,9 @@ func (s *service) crmEnsureSubscription(ctx context.Context, consumerID primitiv
 }
 
 // crmCreateSubscription creates the campaign's NORMAL daily plan: the offer
-// SKU at the server-authoritative price, quantity honouring the app's
-// 1 L/day milk floor (2 × 500 ml). It intentionally reuses the plain
+// SKU at the server-authoritative price with its catalogue pack size (every
+// morning order, store row and rider row inherits it), quantity honouring
+// the app's 1 L/day milk floor (2 × 500 ml). It intentionally reuses the plain
 // subscription document — the sweep treats it identically to any other plan.
 func (s *service) crmCreateSubscription(ctx context.Context, consumerID primitive.ObjectID, productID string, qty int, frequency string) (*subscription, error) {
 	ix, err := s.loadPriceIndex(ctx)
@@ -767,7 +768,7 @@ func (s *service) crmCreateSubscription(ctx context.Context, consumerID primitiv
 	sub := &subscription{
 		MongoID: primitive.NewObjectID(), SubscriptionID: newSubscriptionID(),
 		ConsumerID: consumerID, ProductID: productID, Name: ix.nameFor(productID),
-		Qty: qty, UnitPrice: round2(unit), Frequency: frequency,
+		Variant: ix.variantFor(productID), Qty: qty, UnitPrice: round2(unit), Frequency: frequency,
 		Status: "active", StartDate: istDay(time.Now().Add(24 * time.Hour)),
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -970,7 +971,7 @@ func (s *service) mintPromoPackOrder(ctx context.Context, acct *account, addr *a
 		DeliveryDate: day,
 		OfferID:      offerWelcomeLitre, OfferPack: packNo,
 		Items: []orderItem{{
-			ID: newItemID(), ProductID: cfg.SeedSKU, Name: name, Variant: "500ml",
+			ID: newItemID(), ProductID: cfg.SeedSKU, Name: name, Variant: ix.variantFor(cfg.SeedSKU),
 			Price: 0, Qty: 1,
 			IsPromotional: true, PromotionalValue: round2(value), SupplySource: "parag",
 		}},

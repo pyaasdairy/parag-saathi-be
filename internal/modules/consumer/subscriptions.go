@@ -743,6 +743,7 @@ func addDaysIST(dayISO string, n int) string {
 // reconciled until the midnight lock); locked=true → immediately live (delivery
 // task created, store queue). Money never moves here — settle-on-delivery.
 func (s *service) insertSubscriptionOrder(ctx context.Context, sub *subscription, addr *address, day string, locked bool, at time.Time) (*order, error) {
+	s.ensureSubscriptionVariant(ctx, sub) // a plan stored without its pack size (F17)
 	acct, _ := s.repo.findAccountByID(ctx, sub.ConsumerID)
 	name, phone := "", ""
 	if acct != nil {
@@ -827,6 +828,7 @@ func (s *service) cancelScheduledSubOrder(ctx context.Context, o *order) {
 // qty / price / variant edit made before the midnight lock shows on the
 // upcoming order (and bills correctly at lock).
 func (s *service) refreshSubOrder(ctx context.Context, o *order, sub *subscription) *order {
+	s.ensureSubscriptionVariant(ctx, sub) // a plan stored without its pack size (F17)
 	if len(o.Items) == 1 &&
 		o.Items[0].Qty == sub.Qty &&
 		o.Items[0].Price == round2(sub.UnitPrice) &&
