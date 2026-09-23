@@ -430,7 +430,11 @@ type crmDispatchRow struct {
 	Status     string             `bson:"status"` // SENT | SUPPRESSED
 	Guard      string             `bson:"guard,omitempty"`
 	Channel    string             `bson:"channel,omitempty"`
-	CreatedAt  time.Time          `bson:"created_at"`
+	// Intended is the trigger's configured primary channel, recorded at
+	// claim time so the operator log shows what SHOULD have carried the
+	// message next to what did (Channel).
+	Intended  string    `bson:"intended,omitempty"`
+	CreatedAt time.Time `bson:"created_at"`
 }
 
 func (r *repository) crmDispatchCol() *mongo.Collection {
@@ -444,6 +448,7 @@ func (s *service) crmClaimDispatch(ctx context.Context, t crmTrigger, consumerID
 	row := &crmDispatchRow{
 		TriggerID: t.ID, ConsumerID: consumerID, ISTDay: day,
 		Category: t.Category, Template: t.Template.String(), Status: "CLAIMED", CreatedAt: time.Now().UTC(),
+		Intended: t.Delivery.Primary,
 	}
 	res, err := s.repo.crmDispatchCol().InsertOne(ctx, row)
 	if err != nil {

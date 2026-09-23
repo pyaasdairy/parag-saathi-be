@@ -286,6 +286,15 @@ func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t c
 		}
 		tr := transports[name]
 		if tr == nil {
+			// A channel the config names but nothing serves: keys unset, or a
+			// kind Phase B does not ship (push before its sender, rcs,
+			// human_call). Say so once per dispatch; a silent skip made the
+			// WhatsApp gap invisible and the row read as if the inbox had
+			// been the plan all along.
+			if log != nil {
+				log.Warn("crm: channel not plugged in", "trigger", t.ID, "channel", name, "role", role)
+			}
+			done[name] = true
 			return false, false
 		}
 		// Mark attempted regardless of outcome: a channel that failed in one

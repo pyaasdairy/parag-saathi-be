@@ -396,7 +396,7 @@ func (h *handler) crmDispatchLog(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"trigger_id": d.TriggerID, "ist_day": d.ISTDay, "category": d.Category,
 			"template": d.Template, "status": d.Status, "guard": d.Guard,
-			"channel": d.Channel, "at": d.CreatedAt,
+			"channel": d.Channel, "intended": d.Intended, "at": d.CreatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
