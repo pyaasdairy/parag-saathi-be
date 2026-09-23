@@ -67,6 +67,10 @@ type crmTrigger struct {
 	Template     crmTemplateRef `json:"template"`
 	Section      string         `json:"section"`
 	FrequencyCap map[string]any `json:"frequency_cap"`
+	// Conditions gate an event trigger: every line must hold or the trigger
+	// does not fire (crmEvalConditions, crm_lifecycle.go). Unknown keys and
+	// shapes the evaluator cannot parse fail CLOSED.
+	Conditions []string `json:"conditions"`
 	// Delivery is the config's per-trigger channel routing (primary / parallel /
 	// fallback) — consumed by the Phase B transports in crm_channels.go. The
 	// in-app inbox is NOT listed there; it always runs (Phase A behaviour).
@@ -777,6 +781,10 @@ func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) error {
 		// so writing into an existing account's inbox keyed on an attacker-
 		// supplied phone would be a spam vector, not a feature.
 	}
+	// Every other event trigger in the config (D-, E-, A-02 ...) routes by
+	// its topic and conditions. The explicit cases above own their state
+	// machines and return before this line on the paths they handle.
+	s.crmRouteGeneric(ctx, ev)
 	return nil
 }
 

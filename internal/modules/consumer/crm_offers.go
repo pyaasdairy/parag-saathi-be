@@ -919,7 +919,7 @@ func (s *service) crmOnPackDelivered(ctx context.Context, consumerID primitive.O
 		// C-01 product labelling: the token resolves from the ORDER LINE, never
 		// the customer record — "{product_name} — delivered by PYAAS".
 		s.crmDispatch(ctx, "W-05", consumerID, map[string]string{
-			"labelled_product": s.crmLabelledProduct(ctx, orderID),
+			"LABELLED_PRODUCT": s.crmLabelledProduct(ctx, orderID),
 		})
 	}
 	return nil

@@ -212,7 +212,7 @@
    "parag": "{product_name} — delivered by PYAAS",
    "pyaas_own_brand": "PYAAS {product_name} (limited trial)"
   },
-  "placeholder": "{labelled_product}"
+  "placeholder": "[LABELLED_PRODUCT]"
  },
  "wallet_accounts": {
   "correction": "C-02",
@@ -251,8 +251,8 @@
   "T-A02": {
    "dlt_category": "service_implicit",
    "cta": "reorder",
-   "en": "Delivered! Thanks for trying {labelled_product}. Reorder anytime in the app.",
-   "hi": "Deliver ho gaya! {labelled_product} try karne ke liye dhanyavaad. Dobara order kabhi bhi app par."
+   "en": "Delivered! Thanks for trying [LABELLED_PRODUCT]. Reorder anytime in the app.",
+   "hi": "Deliver ho gaya! [LABELLED_PRODUCT] try karne ke liye dhanyavaad. Dobara order kabhi bhi app par."
   },
   "T-A03": {
    "dlt_category": "service_implicit",
@@ -350,8 +350,8 @@
   "T-D01": {
    "dlt_category": "service_implicit",
    "cta": "track",
-   "en": "Order confirmed ✅ {labelled_product}. Arriving [ETA].",
-   "hi": "Order confirm ✅ {labelled_product}. [ETA] tak."
+   "en": "Order confirmed ✅ [LABELLED_PRODUCT]. Arriving [ETA].",
+   "hi": "Order confirm ✅ [LABELLED_PRODUCT]. [ETA] tak."
   },
   "T-D02": {
    "dlt_category": "service_implicit",
@@ -368,20 +368,20 @@
   "T-D04": {
    "dlt_category": "service_implicit",
    "cta": "approve_yes_no",
-   "en": "{labelled_product} is out — okay to swap for [ALT] (similar price)? Reply YES/NO.",
-   "hi": "{labelled_product} nahi hai — [ALT] chalega? YES/NO bhejein."
+   "en": "[LABELLED_PRODUCT] is out — okay to swap for [ALT] (similar price)? Reply YES/NO.",
+   "hi": "[LABELLED_PRODUCT] nahi hai — [ALT] chalega? YES/NO bhejein."
   },
   "T-D05": {
    "dlt_category": "transactional",
    "cta": null,
-   "en": "{labelled_product} is unavailable; ₹[X] refunded to your Wallet. Sorry!",
-   "hi": "{labelled_product} uplabdh nahi; ₹[X] Wallet mein wapas. Maaf kijiye."
+   "en": "[LABELLED_PRODUCT] is unavailable; ₹[X] refunded to your Wallet. Sorry!",
+   "hi": "[LABELLED_PRODUCT] uplabdh nahi; ₹[X] Wallet mein wapas. Maaf kijiye."
   },
   "T-D06": {
    "dlt_category": "service_implicit",
    "cta": "rate",
-   "en": "Delivered ✅ {labelled_product}. Enjoy! Tap to rate.",
-   "hi": "Deliver ho gaya ✅ {labelled_product}. Rate karein."
+   "en": "Delivered ✅ [LABELLED_PRODUCT]. Enjoy! Tap to rate.",
+   "hi": "Deliver ho gaya ✅ [LABELLED_PRODUCT]. Rate karein."
   },
   "T-D07": {
    "dlt_category": "service_implicit",
@@ -418,8 +418,8 @@
   "T-E04": {
    "dlt_category": "service_implicit",
    "cta": "choose_fix",
-   "en": "Sorry! We'll redeliver {labelled_product} or refund ₹[X] to your Wallet — your choice.",
-   "hi": "Maaf kijiye! {labelled_product} dobara bhejein ya ₹[X] Wallet mein — aap batayein."
+   "en": "Sorry! We'll redeliver [LABELLED_PRODUCT] or refund ₹[X] to your Wallet — your choice.",
+   "hi": "Maaf kijiye! [LABELLED_PRODUCT] dobara bhejein ya ₹[X] Wallet mein — aap batayein."
   },
   "T-E06": {
    "dlt_category": "service_implicit",
@@ -502,8 +502,8 @@
   "T-W05": {
    "dlt_category": "service_implicit",
    "cta": "rate",
-   "en": "Delivered. [labelled_product] plus your second free 500 ml. That completes the welcome offer — from here it's just milk, every morning.",
-   "hi": "Deliver ho gaya. [labelled_product] aur aapka doosra muft 500 ml. Welcome offer poora — ab bas roz subah doodh."
+   "en": "Delivered. [LABELLED_PRODUCT] plus your second free 500 ml. That completes the welcome offer — from here it's just milk, every morning.",
+   "hi": "Deliver ho gaya. [LABELLED_PRODUCT] aur aapka doosra muft 500 ml. Welcome offer poora — ab bas roz subah doodh."
   },
   "T-W06": {
    "dlt_category": "service_implicit",
@@ -2730,7 +2730,7 @@
    "proof_of_delivery"
   ],
   "why": [
-   "C-01 resolves {labelled_product} from the order line — no line means the message fails",
+   "C-01 resolves [LABELLED_PRODUCT] from the order line — no line means the message fails",
    "E-05 needs a batch to stop on a quality concern; a free pack is not a lesser pack",
    "fraud controls, daily reconciliation and promoter free-to-cancel rate all become queries"
   ],
