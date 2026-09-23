@@ -715,3 +715,50 @@ func TestFoundingRejoinInsidePaidMonth(t *testing.T) {
 		t.Fatalf("a fresh waiting join carries no perks: %+v", got)
 	}
 }
+
+// The line number is the member's identity on the card, so it is never
+// handed out twice on one farm: a waiting member who stops gives the SEAT
+// back (claimed goes down, the farm needs one more home) but not the
+// number. A#1 B#2 C#3, B stops, D joins -> D is #4, claimed is 3.
+func TestFoundingLineNumbersNeverRepeat(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 10)
+	join := func(phone string) (primitive.ObjectID, int) {
+		cid := w.customer(t, phone, 300)
+		m, err := w.svc.joinFoundingFamily(ctx, cid, "gonard-dairy")
+		if err != nil || m.LineNumber == nil {
+			t.Fatalf("join %s: %v %+v", phone, err, m)
+		}
+		return cid, *m.LineNumber
+	}
+	_, la := join("9000009401")
+	b, lb := join("9000009402")
+	_, lc := join("9000009403")
+	if la != 1 || lb != 2 || lc != 3 {
+		t.Fatalf("lines: %d %d %d want 1 2 3", la, lb, lc)
+	}
+	if _, err := w.svc.stopFoundingFamily(ctx, b); err != nil {
+		t.Fatalf("stop B: %v", err)
+	}
+	if f, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy"); f.Claimed != 2 {
+		t.Fatalf("claimed after B stops: %d want 2", f.Claimed)
+	}
+	_, ld := join("9000009404")
+	if ld != 4 {
+		t.Fatalf("D's line: %d want 4 (3 is still C's)", ld)
+	}
+	if f, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy"); f.Claimed != 3 {
+		t.Fatalf("claimed after D joins: %d want 3 (the live seat count)", f.Claimed)
+	}
+	// A failed debit gives the seat back too, and its number is never reused.
+	poor := w.customer(t, "9000009405", 0)
+	if _, err := w.svc.joinFoundingFamily(ctx, poor, "gonard-dairy"); err == nil {
+		t.Fatalf("an empty wallet joined")
+	}
+	_, le := join("9000009406")
+	if le <= ld {
+		t.Fatalf("E's line %d must follow D's %d", le, ld)
+	}
+}

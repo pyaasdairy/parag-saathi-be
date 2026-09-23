@@ -76,6 +76,7 @@ type foundingFarm struct {
 	PhotoURL      string     `bson:"photo_url,omitempty"`
 	UnlocksAt     int        `bson:"unlocks_at"`
 	Claimed       int        `bson:"claimed"`
+	NextLine      int        `bson:"next_line,omitempty"` // last line number handed out; never decreases (claimFarmSeat)
 	Status        string     `bson:"status"`
 	UnlockedPacks string     `bson:"unlocked_packs,omitempty"`
 	UnlockedAt    *time.Time `bson:"unlocked_at,omitempty"`
@@ -324,8 +325,16 @@ func (r *repository) upsertFoundingFarm(ctx context.Context, f foundingFarm, upd
 }
 
 // claimFarmSeat takes the next seat on a FILLING farm with room left and
-// returns the farm as it stands after the claim (claimed is the new line
-// number). (nil, nil) when the farm is unlocked or full - claims are closed.
+// returns the farm as it stands after the claim: claimed is the live seat
+// count, next_line the member's line number. (nil, nil) when the farm is
+// unlocked or full - claims are closed.
+//
+// The two counters differ because a seat can be given back (a waiting member
+// who stops, a failed debit) while the number cannot: the line number is the
+// member's identity on the card, so next_line only ever goes up. A farm row
+// from before next_line existed continues from its seat count. One pipeline
+// update, so both counters move atomically ("$claimed" is the pre-update
+// value in both expressions).
 func (r *repository) claimFarmSeat(ctx context.Context, farmID string) (*foundingFarm, error) {
 	after := options.After
 	var f foundingFarm
@@ -334,7 +343,13 @@ func (r *repository) claimFarmSeat(ctx context.Context, farmID string) (*foundin
 			{Key: "_id", Value: farmID}, {Key: "status", Value: farmFilling},
 			{Key: "$expr", Value: bson.D{{Key: "$lt", Value: bson.A{"$claimed", "$unlocks_at"}}}},
 		},
-		bson.D{{Key: "$inc", Value: bson.D{{Key: "claimed", Value: 1}}}, {Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now().UTC()}}}},
+		bson.A{bson.D{{Key: "$set", Value: bson.D{
+			{Key: "claimed", Value: bson.D{{Key: "$add", Value: bson.A{"$claimed", 1}}}},
+			{Key: "next_line", Value: bson.D{{Key: "$add", Value: bson.A{
+				bson.D{{Key: "$max", Value: bson.A{bson.D{{Key: "$ifNull", Value: bson.A{"$next_line", 0}}}, "$claimed"}}}, 1,
+			}}}},
+			{Key: "updated_at", Value: time.Now().UTC()},
+		}}}},
 		options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&f)
 	if isNoDocs(err) {
 		return nil, nil
@@ -597,7 +612,7 @@ func walletShortError(short float64) *apiError {
 // operations, so a failure at any step leaves nothing dangling:
 //
 //  1. checks (open, farm, standing, wallet balance);
-//  2. the seat (atomic $inc guarded on filling and room left) - the line number;
+//  2. the seat (atomic, guarded on filling and room left) - the line number;
 //  3. the member row (insert, or a stopped member re-joins in place);
 //  4. the debit; a short wallet here releases the seat and the row;
 //  5. the unlock when the seat was the last one, else the seat notification.
@@ -658,7 +673,7 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 	if seat == nil {
 		return nil, errFarmUnlocked
 	}
-	line := seat.Claimed
+	line := seat.NextLine
 
 	var m *foundingMember
 	inserted := false
