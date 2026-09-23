@@ -297,6 +297,12 @@ func (s *service) emitCRMEvent(ctx context.Context, topic string, consumerID pri
 // returns ("", true) to send or (failedGuardID, false) to suppress. The
 // dispatch log records either outcome — a suppression is never silent.
 func (s *service) crmGuardCheck(ctx context.Context, t crmTrigger, consumerID primitive.ObjectID, now time.Time) (string, bool) {
+	return s.crmGuardCheckScoped(ctx, t, consumerID, now, "")
+}
+
+// crmGuardCheckScoped is crmGuardCheck for one event scope (see
+// crmClaimDispatchScoped); only the G8 dedup read depends on the scope.
+func (s *service) crmGuardCheckScoped(ctx context.Context, t crmTrigger, consumerID primitive.ObjectID, now time.Time, scope string) (string, bool) {
 	// G1 — kill switches: global env + per-trigger flag (default ON when the
 	// flag row is absent; an explicit false kills without a deploy).
 	if !crmEnabled() {
@@ -342,7 +348,7 @@ func (s *service) crmGuardCheck(ctx context.Context, t crmTrigger, consumerID pr
 	// G6 (service) — max identical per hour is enforced by the per-offer /
 	// per-day claim keys, which are stricter than the config's 6/hour.
 	// G8 — dedup: same template to the same customer inside the window → drop.
-	if s.crmRecentTemplate(ctx, consumerID, t.Template.String(), now.Add(-time.Duration(crmConfigLoad().Guards.DedupMinutes)*time.Minute)) {
+	if s.crmRecentTemplateScoped(ctx, consumerID, t.Template.String(), scope, now.Add(-time.Duration(crmConfigLoad().Guards.DedupMinutes)*time.Minute)) {
 		return "G8_dedup_window", false
 	}
 	// G9 — channel availability: the inbox needs an account; internal triggers
@@ -425,11 +431,16 @@ type crmDispatchRow struct {
 	TriggerID  string             `bson:"trigger_id"`
 	ConsumerID primitive.ObjectID `bson:"consumer_id"`
 	ISTDay     string             `bson:"ist_day"`
-	Category   string             `bson:"category"`
-	Template   string             `bson:"template,omitempty"`
-	Status     string             `bson:"status"` // SENT | SUPPRESSED
-	Guard      string             `bson:"guard,omitempty"`
-	Channel    string             `bson:"channel,omitempty"`
+	// ScopeKey narrows the exactly-once claim to one product event: the
+	// order or complaint id an event trigger fired for, "" for a scheduled
+	// or per-day trigger. Always written (never omitted), so the unique
+	// index sees "" rather than a missing field.
+	ScopeKey string `bson:"scope_key"`
+	Category string `bson:"category"`
+	Template string `bson:"template,omitempty"`
+	Status   string `bson:"status"` // SENT | SUPPRESSED
+	Guard    string `bson:"guard,omitempty"`
+	Channel  string `bson:"channel,omitempty"`
 	// Intended is the trigger's configured primary channel, recorded at
 	// claim time so the operator log shows what SHOULD have carried the
 	// message next to what did (Channel).
@@ -445,8 +456,16 @@ func (r *repository) crmDispatchCol() *mongo.Collection {
 // unique index. Winning inserts the row (status filled by the caller's update);
 // losing means another tick/replica already handled it.
 func (s *service) crmClaimDispatch(ctx context.Context, t crmTrigger, consumerID primitive.ObjectID, day string) (*crmDispatchRow, bool) {
+	return s.crmClaimDispatchScoped(ctx, t, consumerID, day, "")
+}
+
+// crmClaimDispatchScoped is crmClaimDispatch with the event scope in the key:
+// (trigger, consumer, IST day, scope). A per_order trigger claims once per
+// order, a per_complaint trigger once per complaint; scope "" is the plain
+// per-day claim every scheduled trigger keeps.
+func (s *service) crmClaimDispatchScoped(ctx context.Context, t crmTrigger, consumerID primitive.ObjectID, day, scope string) (*crmDispatchRow, bool) {
 	row := &crmDispatchRow{
-		TriggerID: t.ID, ConsumerID: consumerID, ISTDay: day,
+		TriggerID: t.ID, ConsumerID: consumerID, ISTDay: day, ScopeKey: scope,
 		Category: t.Category, Template: t.Template.String(), Status: "CLAIMED", CreatedAt: time.Now().UTC(),
 		Intended: t.Delivery.Primary,
 	}
@@ -492,11 +511,20 @@ func (s *service) crmCountTriggerSent(ctx context.Context, consumerID primitive.
 }
 
 func (s *service) crmRecentTemplate(ctx context.Context, consumerID primitive.ObjectID, template string, since time.Time) bool {
+	return s.crmRecentTemplateScoped(ctx, consumerID, template, "", since)
+}
+
+// crmRecentTemplateScoped is the G8 dedup read. The config's rule is "one
+// message per real event", so the scope of the event is part of the key: a
+// second order the same morning is a second event and its D-06 is not a
+// duplicate of the first one's. Scope "" keeps the plain per-template read.
+func (s *service) crmRecentTemplateScoped(ctx context.Context, consumerID primitive.ObjectID, template, scope string, since time.Time) bool {
 	if template == "" {
 		return false
 	}
 	n, _ := s.repo.crmDispatchCol().CountDocuments(ctx, bson.D{
 		{Key: "consumer_id", Value: consumerID}, {Key: "template", Value: template},
+		{Key: "scope_key", Value: scope},
 		{Key: "status", Value: "SENT"}, {Key: "created_at", Value: bson.D{{Key: "$gte", Value: since}}},
 	})
 	return n > 0
@@ -566,6 +594,19 @@ func (s *service) crmDispatch(ctx context.Context, triggerID string, consumerID 
 // guard), or ("", "") when nothing was recorded this call (CRM off, unknown
 // trigger, or the day's claim already taken by an earlier tick or replica).
 func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string, now time.Time) (status, guard string) {
+	return s.crmDispatchWith(ctx, triggerID, consumerID, params, now, crmDispatchOpts{})
+}
+
+// crmDispatchOpts carries what an EVENT dispatch adds to the plain per-day
+// one: the claim scope (order / complaint id) and, for a trigger whose
+// template is conditional (B-06's if/then/else), the branch the router chose.
+type crmDispatchOpts struct {
+	Scope    string
+	Template string
+}
+
+// crmDispatchWith is the one dispatch body every entry point shares.
+func (s *service) crmDispatchWith(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string, now time.Time, opts crmDispatchOpts) (status, guard string) {
 	if !crmEnabled() {
 		return "", ""
 	}
@@ -575,7 +616,10 @@ func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerI
 		s.log.Warn("crm: unknown trigger", "id", triggerID)
 		return "", ""
 	}
-	row, won := s.crmClaimDispatch(ctx, t, consumerID, istDay(now))
+	if opts.Template != "" {
+		t.Template = crmTemplateRef{Ref: opts.Template} // t is a copy; the config is untouched
+	}
+	row, won := s.crmClaimDispatchScoped(ctx, t, consumerID, istDay(now), opts.Scope)
 	if !won {
 		return "", "" // already handled today (exactly-once)
 	}
@@ -584,7 +628,7 @@ func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerI
 		s.crmFinishDispatch(ctx, row, "SUPPRESSED", "G6_frequency_cap", "")
 		return "SUPPRESSED", "G6_frequency_cap"
 	}
-	if guard, pass := s.crmGuardCheck(ctx, t, consumerID, now); !pass {
+	if guard, pass := s.crmGuardCheckScoped(ctx, t, consumerID, now, opts.Scope); !pass {
 		s.crmFinishDispatch(ctx, row, "SUPPRESSED", guard, "")
 		return "SUPPRESSED", guard
 	}

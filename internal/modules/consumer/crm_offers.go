@@ -237,13 +237,14 @@ func (s *service) ensureCRMIndexes(ctx context.Context) bool {
 		ok = false
 	}
 	disp := s.repo.accounts.Database().Collection(collCRMDispatch)
-	if _, err := disp.Indexes().CreateMany(ctx, []mongo.IndexModel{
-		// The exactly-once claim: one row per (trigger, consumer, IST day).
-		{Keys: bson.D{{Key: "trigger_id", Value: 1}, {Key: "consumer_id", Value: 1}, {Key: "ist_day", Value: 1}},
-			Options: options.Index().SetUnique(true)},
-		{Keys: bson.D{{Key: "consumer_id", Value: 1}, {Key: "created_at", Value: -1}}},
+	if _, err := disp.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "consumer_id", Value: 1}, {Key: "created_at", Value: -1}},
 	}); err != nil {
 		s.log.Warn("crm: dispatch index setup failed (continuing)", "err", err)
+		ok = false
+	}
+	// The exactly-once claim: one row per (trigger, consumer, IST day, scope).
+	if !s.ensureCRMClaimIndex(ctx, disp) {
 		ok = false
 	}
 	ev := s.repo.accounts.Database().Collection(collCRMEvents)
@@ -261,6 +262,85 @@ func (s *service) ensureCRMIndexes(ctx context.Context) bool {
 		ok = false
 	}
 	return ok
+}
+
+const (
+	// crmClaimIndexLegacy is the auto-named (trigger, consumer, day) unique
+	// index every deployment before the scoped claim built.
+	crmClaimIndexLegacy = "trigger_id_1_consumer_id_1_ist_day_1"
+	// crmClaimIndexScoped is its replacement, with the event scope in the key.
+	crmClaimIndexScoped = "crm_claim_scoped"
+)
+
+// ensureCRMClaimIndex migrates the exactly-once claim from (trigger,
+// consumer, day) to (trigger, consumer, day, scope_key). Rows written before
+// the scope existed are stamped scope_key "" first, so the new key covers
+// them and a per-day claim taken under the old index stays taken. The legacy
+// index is dropped only once the scoped one exists: a refused build (the
+// same guard ensureSubscriptionDayIndex applies) logs the colliding row
+// count and leaves the old index in force, so no claim is ever unprotected.
+func (s *service) ensureCRMClaimIndex(ctx context.Context, disp *mongo.Collection) bool {
+	if _, err := disp.UpdateMany(ctx,
+		bson.D{{Key: "scope_key", Value: bson.D{{Key: "$exists", Value: false}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "scope_key", Value: ""}}}}); err != nil {
+		s.log.Warn("crm: dispatch scope backfill failed (continuing)", "err", err)
+		return false
+	}
+	if _, err := disp.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "trigger_id", Value: 1}, {Key: "consumer_id", Value: 1}, {Key: "ist_day", Value: 1}, {Key: "scope_key", Value: 1}},
+		Options: options.Index().SetName(crmClaimIndexScoped).SetUnique(true),
+	}); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			s.log.Error("crm: scoped claim index refused, legacy claim index kept",
+				"duplicate_claims", s.crmCountClaimDuplicates(ctx, disp), "err", err)
+		} else {
+			s.log.Warn("crm: scoped claim index setup failed (continuing)", "err", err)
+		}
+		return false
+	}
+	if _, err := disp.Indexes().DropOne(ctx, crmClaimIndexLegacy); err != nil && !crmIsIndexNotFound(err) {
+		s.log.Warn("crm: legacy claim index drop failed (continuing)", "err", err)
+		return false
+	}
+	return true
+}
+
+// crmCountClaimDuplicates counts the (trigger, consumer, day, scope) keys
+// held by more than one dispatch row - the rows a scoped index build refuses.
+func (s *service) crmCountClaimDuplicates(ctx context.Context, disp *mongo.Collection) int64 {
+	cur, err := disp.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{
+				{Key: "t", Value: "$trigger_id"}, {Key: "c", Value: "$consumer_id"},
+				{Key: "d", Value: "$ist_day"}, {Key: "s", Value: "$scope_key"},
+			}},
+			{Key: "n", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$match", Value: bson.D{{Key: "n", Value: bson.D{{Key: "$gt", Value: 1}}}}}},
+		{{Key: "$count", Value: "keys"}},
+	})
+	if err != nil {
+		return -1
+	}
+	defer cur.Close(ctx)
+	var out []struct {
+		Keys int64 `bson:"keys"`
+	}
+	if err := cur.All(ctx, &out); err != nil || len(out) == 0 {
+		return 0
+	}
+	return out[0].Keys
+}
+
+// crmIsIndexNotFound reports the server's IndexNotFound (27) answer to a drop
+// of an index that is already gone - the expected reply on every boot after
+// the migration ran once.
+func crmIsIndexNotFound(err error) bool {
+	var ce mongo.CommandError
+	if errors.As(err, &ce) {
+		return ce.Code == 27 || ce.Name == "IndexNotFound"
+	}
+	return false
 }
 
 // ── Enrolment ───────────────────────────────────────────────────────────────

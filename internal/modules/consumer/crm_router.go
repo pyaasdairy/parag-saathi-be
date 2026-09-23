@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -33,10 +34,11 @@ const crmComplaintSLA = "24 hours"
 // crmRouteGeneric fires every event trigger in the config whose event is the
 // outbox topic and whose conditions all hold. Skipped by design: internal
 // triggers (operator-side, handled explicitly), triggers with no customer
-// template (E-05 pages a human), aliases and schedules. A trigger's "delay"
-// is not honoured; it fires on the worker tick that drains the event. The
-// (trigger, consumer, IST day) dispatch claim still applies, so a per_order
-// trigger fires at most once per consumer per day.
+// template, aliases and schedules. A trigger's "delay" is not honoured; it
+// fires on the worker tick that drains the event. The dispatch claim is
+// (trigger, consumer, IST day, scope): scoped to the order or complaint the
+// event is about (crmEventScopeKey), so a per_order trigger fires once per
+// order, not once per day.
 func (s *service) crmRouteGeneric(ctx context.Context, ev crmEvent) {
 	if ev.ConsumerID.IsZero() {
 		return
@@ -83,8 +85,22 @@ func (s *service) crmRouteGeneric(ctx context.Context, ev crmEvent) {
 			s.log.Warn("crm: unresolved template token, trigger not fired", "trigger", t.ID, "token", tok)
 			continue
 		}
-		s.crmDispatch(ctx, t.ID, ev.ConsumerID, params)
+		s.crmDispatchWith(ctx, t.ID, ev.ConsumerID, params, time.Now().UTC(), crmDispatchOpts{Scope: crmEventScopeKey(ev.Payload)})
 	}
+}
+
+// crmEventScopeKey is the claim scope of one outbox event: what the emitter
+// named explicitly (scope_key), else the order, else the complaint the event
+// is about, else "" (a per-day claim). Two orders on one day are two scopes,
+// so each gets its own D-01 and D-06; a scheduled trigger has no event and
+// keeps the per-day claim.
+func crmEventScopeKey(payload map[string]any) string {
+	for _, k := range []string{"scope_key", "order_id", "complaint_id"} {
+		if v, _ := payload[k].(string); strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // crmCondWarned keys (trigger, error) pairs already logged: a condition that
