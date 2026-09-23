@@ -293,6 +293,12 @@ func (s *service) applyReferral(ctx context.Context, refereeID primitive.ObjectI
 	if code == "" {
 		return nil, errBadRequest("a referral code is required")
 	}
+	// The referee-unique index is what stops two concurrent applies making
+	// two links (two rewards); without it, refuse with a 503 the app's
+	// outbox replays later rather than trust the pre-check below.
+	if !s.referralIdx.ready(ctx) {
+		return nil, errReferralUnavailable
+	}
 	referrer, err := s.repo.findAccountByReferralCode(ctx, code)
 	if err != nil {
 		return nil, err

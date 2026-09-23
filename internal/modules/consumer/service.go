@@ -103,6 +103,11 @@ type service struct {
 	// crmPush is the Expo push transport (crm_push.go, contract C5). Disabled
 	// until EXPO_PUSH_ENABLED=true; nil-safe.
 	crmPush *pushChannel
+	// foundingIdx / referralIdx gate the Founding Family join and the
+	// referral apply on their unique indexes (index_guard.go). Zero value:
+	// built; module.go marks one missing when its boot build fails.
+	foundingIdx indexGuard
+	referralIdx indexGuard
 }
 
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {

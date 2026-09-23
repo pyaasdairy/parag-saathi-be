@@ -624,6 +624,11 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 	if !open {
 		return nil, errFoundingClosed
 	}
+	// The member-unique index is the exactly-once guard for the seat and
+	// the Rs 99; never run the join on the racy pre-check alone.
+	if !s.foundingIdx.ready(ctx) {
+		return nil, errFoundingUnavailable
+	}
 	farmID = strings.TrimSpace(farmID)
 	if farmID == "" {
 		return nil, errBadRequest("farm_id is required")

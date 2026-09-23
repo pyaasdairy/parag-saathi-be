@@ -762,3 +762,104 @@ func TestFoundingLineNumbersNeverRepeat(t *testing.T) {
 		t.Fatalf("E's line %d must follow D's %d", le, ld)
 	}
 }
+
+// Five taps on "Join" at once (a double-tap, a retry racing the first
+// request) make ONE member, take ONE seat and move Rs 99 ONCE. The service's
+// pre-check cannot promise that on its own - all five read "not a member"
+// before any of them writes - so the consumer_id unique index is the guard,
+// and the test world builds it exactly as the boot does.
+func TestFoundingConcurrentJoinIsOneMemberOneSeatOneDebit(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 10)
+	a := w.customer(t, "9000009501", 500)
+	const n = 5
+	errs := make(chan error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func() {
+			<-start
+			_, err := w.svc.joinFoundingFamily(ctx, a, "gonard-dairy")
+			errs <- err
+		}()
+	}
+	close(start)
+	ok := 0
+	for i := 0; i < n; i++ {
+		var ae *apiError
+		if err := <-errs; err == nil {
+			ok++
+		} else if !errors.As(err, &ae) || ae.Code != "ALREADY_MEMBER" {
+			t.Fatalf("a losing join must say ALREADY_MEMBER: %v", err)
+		}
+	}
+	rows, _ := w.db.Collection(collFoundingMembers).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}})
+	f, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy")
+	debits, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}, {Key: "remark", Value: foundingLedgerLabel}})
+	wv, _ := w.svc.wallet(ctx, a)
+	if ok != 1 || rows != 1 || f.Claimed != 1 || debits != 1 || wv.Available != 401 {
+		t.Fatalf("5 concurrent joins: ok=%d member rows=%d seats=%d FOUNDING-99 debits=%d wallet=%v; want 1 1 1 1 401",
+			ok, rows, f.Claimed, debits, wv.Available)
+	}
+}
+
+// When the boot could not build the unique index that makes a join (or a
+// referral apply) exactly-once, those two money paths refuse with a flat
+// 503 {code, message} instead of trusting the racy pre-check, and move
+// nothing. The guard retries the build, so once the index exists the paths
+// open again without a restart. A 503 is what the app's referral outbox
+// replays later; the join screen shows the message.
+func TestFoundingAndReferralRefuseWithoutTheirUniqueIndex(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	h := &handler{svc: w.svc}
+	seedTestFarms(t, w, 10)
+	broken := func(context.Context) error { return errors.New("index build failed") }
+	flat := func(code int, body, want string) {
+		t.Helper()
+		var e map[string]any
+		if err := json.Unmarshal([]byte(body), &e); err != nil || code != http.StatusServiceUnavailable ||
+			e["code"] != want || e["message"] == nil || e["message"] == "" || len(e) != 2 {
+			t.Fatalf("want a flat 503 %s {code,message}, got %d %s", want, code, body)
+		}
+	}
+
+	a := w.customer(t, "9000009601", 500)
+	w.svc.foundingIdx.markMissing(broken)
+	code, body := foundingAPI(t, w, a, http.MethodPost, "/founding-family/join", `{"farm_id":"gonard-dairy"}`, h.foundingJoin)
+	flat(code, body, "FOUNDING_UNAVAILABLE")
+	if f, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy"); f.Claimed != 0 {
+		t.Fatalf("a refused join took a seat")
+	}
+	if wv, _ := w.svc.wallet(ctx, a); wv.Available != 500 {
+		t.Fatalf("a refused join moved money: %v", wv.Available)
+	}
+	// The view and stop are not money-at-risk paths and keep answering.
+	if code, body = foundingAPI(t, w, a, http.MethodGet, "/founding-family", "", h.foundingView); code != 200 {
+		t.Fatalf("the view must not depend on the guard: %d %s", code, body)
+	}
+	// The index can be built again: the next join rebuilds it and goes through.
+	w.svc.foundingIdx.markMissing(w.svc.repo.ensureFoundingIndexes)
+	if code, body = foundingAPI(t, w, a, http.MethodPost, "/founding-family/join", `{"farm_id":"gonard-dairy"}`, h.foundingJoin); code != 200 {
+		t.Fatalf("join once the index is back: %d %s", code, body)
+	}
+
+	referrer := w.customer(t, "9000009602", 0)
+	refCode, err := w.svc.referralCode(ctx, referrer)
+	if err != nil {
+		t.Fatalf("referral code: %v", err)
+	}
+	b := w.customer(t, "9000009603", 0)
+	w.svc.referralIdx.markMissing(broken)
+	code, body = foundingAPI(t, w, b, http.MethodPost, "/referrals/apply", `{"code":"`+refCode+`"}`, h.applyReferral)
+	flat(code, body, "REFERRAL_UNAVAILABLE")
+	if n, _ := w.db.Collection(collReferrals).CountDocuments(ctx, bson.D{{Key: "referee_id", Value: b}}); n != 0 {
+		t.Fatalf("a refused apply stored a referral")
+	}
+	w.svc.referralIdx.markMissing(w.svc.repo.ensureReferralIndexes)
+	if code, body = foundingAPI(t, w, b, http.MethodPost, "/referrals/apply", `{"code":"`+refCode+`"}`, h.applyReferral); code != 200 {
+		t.Fatalf("apply once the index is back: %d %s", code, body)
+	}
+}

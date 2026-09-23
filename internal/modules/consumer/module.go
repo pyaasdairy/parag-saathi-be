@@ -70,15 +70,20 @@ func Register(r chi.Router, d *deps.Deps) {
 		log.Warn("push index setup incomplete", slog.Any("err", err))
 	}
 	// Growth programmes (referrals.go, founding.go). NON-fatal like the rest
-	// of the phase-2 indexes: the referee-unique index makes a retried apply
-	// idempotent and the member-unique index guards a double join, but both
-	// service paths re-check before they write, and neither guards the
-	// wallet's own money gate.
+	// of the phase-2 indexes, so a failed build never refuses to boot a
+	// backend serving orders and wallets. But the referee-unique index is
+	// what stops two concurrent applies paying two rewards, and the
+	// member-unique index what stops two concurrent joins taking two seats
+	// and two Rs 99 (the service's pre-checks race). So a failed build marks
+	// the guard: join and apply answer 503 until a retry builds the index
+	// (index_guard.go); every other route of the programmes keeps serving.
 	if err := repo.ensureReferralIndexes(ctx); err != nil {
-		log.Warn("referral index setup incomplete", slog.Any("err", err))
+		svc.referralIdx.markMissing(repo.ensureReferralIndexes)
+		log.Error("referral index setup failed - POST /referrals/apply answers 503 until it builds", slog.Any("err", err))
 	}
 	if err := repo.ensureFoundingIndexes(ctx); err != nil {
-		log.Warn("founding family index setup incomplete", slog.Any("err", err))
+		svc.foundingIdx.markMissing(repo.ensureFoundingIndexes)
+		log.Error("founding family index setup failed - POST /founding-family/join answers 503 until it builds", slog.Any("err", err))
 	}
 
 	// Seed the baseline catalog products (idempotent, single BulkWrite). Runs

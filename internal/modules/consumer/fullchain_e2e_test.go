@@ -99,6 +99,17 @@ func newChainWorld(t *testing.T) (*chainWorld, func()) {
 		cancel()
 		t.Fatalf("push indexes: %v", err)
 	}
+	// The growth programmes' uniqueness guards: one member row per consumer
+	// (a concurrent join cannot take two seats or two Rs 99) and one referral
+	// per referee (a concurrent apply cannot pay two rewards).
+	if err := repo.ensureFoundingIndexes(ctx); err != nil {
+		cancel()
+		t.Fatalf("founding indexes: %v", err)
+	}
+	if err := repo.ensureReferralIndexes(ctx); err != nil {
+		cancel()
+		t.Fatalf("referral indexes: %v", err)
+	}
 
 	storeID := primitive.NewObjectID()
 	if _, err := db.Collection("org_units").InsertOne(ctx, bson.D{
