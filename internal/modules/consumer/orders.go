@@ -487,13 +487,13 @@ func (h *handler) listOrders(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	// Sign the proof photos here too. The stored value is a private-bucket path
-	// that no app can load; getOrder hands back a short-lived URL for the same
-	// field, so without this the SAME json key meant two different things
-	// depending on which endpoint answered — and the orders list (which is what
-	// the app's live tracking polls) showed a broken image.
+	// The list carries NO proof photo. The stored value is a private-bucket path
+	// no app can load, and signing every one of up to 200 rows serially on a
+	// list the app polls every 15 s was the slowest thing on the path. The tag
+	// is omitempty so the key disappears; the tracking screen reads the signed
+	// URL from GET /orders/{id}, which still signs it.
 	for i := range orders {
-		orders[i].ProofPhotoURL = h.svc.proofPhotoURL(r.Context(), orders[i].ProofPhotoURL)
+		orders[i].ProofPhotoURL = ""
 	}
 	writeJSON(w, http.StatusOK, orders)
 }
