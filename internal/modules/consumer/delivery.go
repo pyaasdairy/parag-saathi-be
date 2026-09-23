@@ -125,8 +125,9 @@ type delivery struct {
 	// GeoExact — Geo is the CUSTOMER's own pin, not the store's fallback. Only
 	// then can the server judge the 300 m door check: an order placed without
 	// coordinates points the task at the store, where a rider at the real door
-	// is legitimately far away. Server-side only.
-	GeoExact    bool           `bson:"geo_exact,omitempty"  json:"-"`
+	// is legitimately far away. On the wire so the rider app can tell a real
+	// fence from a store fallback (contract C3).
+	GeoExact    bool           `bson:"geo_exact,omitempty"  json:"geoExact"`
 	Items       []deliveryItem `bson:"items"                json:"items"`
 	Amount      float64        `bson:"amount"               json:"amount"`
 	PaymentMode string         `bson:"payment_mode"         json:"paymentMode"`

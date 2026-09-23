@@ -764,7 +764,10 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	if in.Geo == nil {
 		return nil, errUnprocessable("PROOF_GEO_REQUIRED", "add the delivery location (geotag) as proof")
 	}
-	if !in.GeofenceOK {
+	// The phone's own fence verdict only counts when the task points at the
+	// customer's real pin: with a store fallback the rider at the real door is
+	// legitimately far from Geo and would be refused forever.
+	if d.GeoExact && !in.GeofenceOK {
 		return nil, errUnprocessable("GEOFENCE_FAILED", "you are not at the delivery address — move closer to confirm")
 	}
 	// ...and MEASURE it here rather than believing the flag. Until now the fence
