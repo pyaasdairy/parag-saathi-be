@@ -24,12 +24,7 @@ import (
 func TestRiderOpsRoutesRegistered(t *testing.T) {
 	want := []string{
 		// Per-task extras (RIDER_API.md §2)
-		"POST /delivery/tasks/{deliveryId}/otp/send",
-		"POST /delivery/tasks/{deliveryId}/otp/verify",
-		"POST /delivery/tasks/{deliveryId}/scan",
-		"POST /delivery/tasks/{deliveryId}/door-photo",
 		"POST /delivery/tasks/{deliveryId}/undo",
-		"GET /delivery/tasks/{deliveryId}/compliance",
 		// Profile + self-service (§3.1, §3.10-3.13, §2.6)
 		"GET /delivery/rider/me",
 		"GET /delivery/rider/nd-reasons",

@@ -2,13 +2,10 @@ package consumer
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,11 +19,13 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-task extras — RIDER_API.md §2.1–2.5.
+// Per-task extras - RIDER_API.md section 2.4.
 //
-// Everything here hangs off ONE delivery the rider is currently holding:
-// the customer's door OTP, the crate/bag scan, the door reference photo, the
-// time-boxed undo of a completed marking, and the door step checklist.
+// Everything here hangs off ONE delivery the rider is currently holding: the
+// time-boxed undo of a completed marking. The customer OTP, crate scan, door
+// photo and compliance checklist routes (sections 2.1-2.3, 2.5) were removed
+// on 23 Sep 2026: the rider flow is photo + geotag by the founder's decision,
+// and no shipped Saathi screen ever called them.
 //
 // The lifecycle itself (offer → claim → pickup → deliver/fail) stays in
 // delivery_svc.go; these endpoints only ever decorate or reverse it.
@@ -39,9 +38,9 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	// riderOTPResendCooldown throttles customer delivery OTPs. The rider taps
-	// "resend" when the customer says "nothing came"; without a cooldown that
-	// tap SMS-bombs the customer (and bills us per message).
+	// riderOTPResendCooldown throttles OTP resends. The customer door OTP is
+	// gone; the cash-collection OTP (rider_ops_money.go) still uses it so a
+	// "resend" tap cannot SMS-bomb the customer (and bill us per message).
 	riderOTPResendCooldown = 60 * time.Second
 
 	// riderUndoWindow is how long after a DELIVERED/FAILED marking the rider may
@@ -49,26 +48,7 @@ const (
 	// customer's mind (and in their ledger) and the correction belongs to
 	// support, not to the person holding the phone at the door.
 	riderUndoWindow = 15 * time.Minute
-
-	// Input bounds. A scan payload is a handful of crate labels, not a catalogue.
-	// (riderMaxReasonLen / riderMaxPhotoRefLen are the surface-wide bounds
-	// already defined for the money routes — free text is capped identically
-	// wherever a rider types it.)
-	riderMaxScanCodes   = 60
-	riderMaxScanCodeLen = 64
-	riderMinScanCodeLen = 3
 )
-
-// otpScopeDelivery is the OTP namespace for the customer's door code, keyed by
-// delivery id (the cash-collection surface owns its own "cash" scope).
-const otpScopeDelivery = "delivery"
-
-// riderSentResponse is the §2.1 send acknowledgement. The code itself is NEVER
-// in a response body: the rider must read it off the customer's phone, which is
-// the entire point of the check.
-type riderSentResponse struct {
-	Sent bool `json:"sent"`
-}
 
 // riderTaskForCaller loads the delivery named by {deliveryId} and proves the
 // caller owns it. Any failure is a 404 — an unknown id and someone else's task
@@ -92,129 +72,7 @@ func (h *handler) riderTaskForCaller(r *http.Request) (*delivery, error) {
 	return d, nil
 }
 
-// ── 2.1 Customer delivery OTP ───────────────────────────────────────────────
-
-// riderTaskOTPSend issues the customer's 6-digit door code and SMSes it to the
-// number on the task. POST /consumer/delivery/tasks/{deliveryId}/otp/send.
-//
-// Only meaningful for a task that is actually out for delivery: a code sent
-// while the parcel is still at the store is a code that has expired by the time
-// the rider reaches the door.
-func (h *handler) riderTaskOTPSend(w http.ResponseWriter, r *http.Request) {
-	d, err := h.riderTaskForCaller(r)
-	if err != nil {
-		httpx.Error(w, r, err)
-		return
-	}
-	if d.Status != "OUT_FOR_DELIVERY" {
-		httpx.Error(w, r, httpx.Conflict("NOT_OUT", "mark the order picked up before sending the customer's code"))
-		return
-	}
-	phone := strings.TrimSpace(d.Phone)
-	if phone == "" {
-		// Honest failure: we cannot text a number we do not hold. The rider
-		// falls back to photo + geotag, which are mandatory proof anyway.
-		httpx.Error(w, r, httpx.Unprocessable("NO_CUSTOMER_PHONE", "this order has no customer phone number to send a code to"))
-		return
-	}
-	ctx := r.Context()
-	// Claim the send slot BEFORE minting anything. The claim is a single
-	// conditional upsert, so two taps racing on two replicas still produce one
-	// SMS (see riderClaimOTPSendSlot).
-	ok, cerr := h.svc.repo.riderClaimOTPSendSlot(ctx, otpScopeDelivery, d.ID, riderOTPResendCooldown)
-	if cerr != nil {
-		httpx.Error(w, r, cerr)
-		return
-	}
-	if !ok {
-		httpx.Error(w, r, httpx.TooManyRequests("a code was just sent — wait a minute before sending another"))
-		return
-	}
-	code, ierr := h.svc.issueRiderOTP(ctx, otpScopeDelivery, d.ID, d.RiderPartyID)
-	if ierr != nil {
-		httpx.Error(w, r, ierr)
-		return
-	}
-	if h.svc.sms.Enabled() {
-		if serr := h.svc.sms.SendOTP(ctx, phone, code); serr != nil {
-			// The SMS did not go out, so the code is unusable. Burn the
-			// challenge (and with it the cooldown slot) on a detached context —
-			// the request context may already be cancelled — so the rider can
-			// retry immediately instead of waiting out a minute for a code the
-			// customer never received.
-			h.svc.riderDropOTPChallenge(otpScopeDelivery, d.ID)
-			h.svc.log.ErrorContext(ctx, "delivery otp sms send failed", "delivery", d.ID, "err", serr)
-			httpx.Error(w, r, httpx.Internal(fmt.Errorf("send delivery otp sms: %w", serr)))
-			return
-		}
-	} else if h.svc.deps.Cfg.OTPDevMode {
-		// Dev/demo only: with no SMS transport configured the code has to reach
-		// the operator somehow, and the log is the one place the RIDER cannot
-		// see it. Never on a production build.
-		h.svc.log.InfoContext(ctx, "delivery otp (dev echo)", "delivery", d.ID, "otp", code)
-	} else {
-		// Production with no transport is a misconfiguration, not a success —
-		// claiming "sent" here would have the rider waiting at a door for an SMS
-		// that will never arrive.
-		h.svc.riderDropOTPChallenge(otpScopeDelivery, d.ID)
-		httpx.Error(w, r, httpx.Internal(errors.New("delivery otp: sms transport is not configured")))
-		return
-	}
-	httpx.JSON(w, http.StatusOK, riderSentResponse{Sent: true})
-}
-
-// riderOTPVerifyRequest is the door code the rider keyed in. `otp` is what the
-// client sends; `code` is accepted as an alias for parity with the login route.
-type riderOTPVerifyRequest struct {
-	OTP  string `json:"otp"`
-	Code string `json:"code"`
-}
-
-// riderTaskOTPVerify checks the customer's door code.
-// POST /consumer/delivery/tasks/{deliveryId}/otp/verify.
-//
-// A correct code is single-use (verifyRiderOTP consumes the challenge) and is
-// stamped on the task as evidence — "the customer read us their code at 06:12"
-// is exactly the record a delivery dispute needs.
-func (h *handler) riderTaskOTPVerify(w http.ResponseWriter, r *http.Request) {
-	d, err := h.riderTaskForCaller(r)
-	if err != nil {
-		httpx.Error(w, r, err)
-		return
-	}
-	var req riderOTPVerifyRequest
-	if derr := httpx.DecodeJSON(r, &req); derr != nil {
-		httpx.Error(w, r, derr)
-		return
-	}
-	code := strings.TrimSpace(req.OTP)
-	if code == "" {
-		code = strings.TrimSpace(req.Code)
-	}
-	if d.Status != "OUT_FOR_DELIVERY" {
-		httpx.Error(w, r, httpx.Conflict("NOT_OUT", "this order is not out for delivery"))
-		return
-	}
-	ctx := r.Context()
-	if verr := h.svc.verifyRiderOTP(ctx, otpScopeDelivery, d.ID, code); verr != nil {
-		httpx.Error(w, r, verr) // OTP_INVALID — the code the client switches on
-		return
-	}
-	// Evidence, best-effort: a failed stamp must not fail a verification the
-	// rider has already passed at the door. Guarded to the owner + the state we
-	// verified in, so it can never touch a task that moved on underneath us.
-	_, _ = h.svc.repo.deliveries.UpdateOne(ctx,
-		bson.D{
-			{Key: "delivery_id", Value: d.ID},
-			{Key: "rider_party_id", Value: d.RiderPartyID},
-			{Key: "status", Value: "OUT_FOR_DELIVERY"},
-		},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "otp_verified_at", Value: time.Now().UTC()},
-			{Key: "updated_at", Value: time.Now().UTC()},
-		}}})
-	httpx.JSON(w, http.StatusOK, okResponse{OK: true})
-}
+// -- Shared OTP plumbing: the cash-collection flow (rider_ops_money.go) uses these --
 
 // riderClaimOTPSendSlot is the atomic resend throttle. It bumps the challenge's
 // created_at only when the last one is older than `cooldown`; the (scope,
@@ -249,296 +107,6 @@ func (s *service) riderDropOTPChallenge(scope, refID string) {
 	defer cancel()
 	_, _ = s.repo.riderColl(collDeliveryOTP).DeleteOne(ctx,
 		bson.D{{Key: "scope", Value: scope}, {Key: "ref_id", Value: refID}})
-}
-
-// ── 2.2 Product scan ────────────────────────────────────────────────────────
-
-type riderScanRequest struct {
-	Codes []string `json:"codes"`
-}
-
-// riderScanResponse tells the rider exactly which labels did not stick, so the
-// wrong crate is found at the van and not at the customer's door.
-type riderScanResponse struct {
-	Accepted int      `json:"accepted"`
-	Rejected []string `json:"rejected"`
-}
-
-// riderScanBinding ties one physical crate/bag label to one delivery. The
-// unique index on `code` (rider_ops.go) IS the business rule: a label lives on
-// exactly one task until someone unbinds it.
-type riderScanBinding struct {
-	Code         string    `bson:"code"`
-	DeliveryID   string    `bson:"delivery_id"`
-	OrderID      string    `bson:"order_id"`
-	RiderPartyID string    `bson:"rider_party_id"`
-	ScannedAt    time.Time `bson:"scanned_at"`
-}
-
-// riderTaskScan binds the scanned crate/bag codes to this task.
-// POST /consumer/delivery/tasks/{deliveryId}/scan.
-//
-// The client re-posts the WHOLE list every time the scan screen is closed, so
-// re-scanning a code already bound to this task must count as accepted, not
-// rejected — otherwise a rider who adds one more crate gets everything they
-// scanned before thrown back at them as errors.
-func (h *handler) riderTaskScan(w http.ResponseWriter, r *http.Request) {
-	d, err := h.riderTaskForCaller(r)
-	if err != nil {
-		httpx.Error(w, r, err)
-		return
-	}
-	if d.Status == "DELIVERED" || d.Status == "FAILED" || d.Status == "CANCELLED" {
-		httpx.Error(w, r, httpx.Conflict("TASK_CLOSED", "this order is already closed"))
-		return
-	}
-	var req riderScanRequest
-	if derr := httpx.DecodeJSON(r, &req); derr != nil {
-		httpx.Error(w, r, derr)
-		return
-	}
-	if len(req.Codes) == 0 {
-		httpx.Error(w, r, httpx.BadRequest("NO_CODES", "send at least one scanned code"))
-		return
-	}
-	if len(req.Codes) > riderMaxScanCodes {
-		httpx.Error(w, r, httpx.BadRequest("TOO_MANY_CODES",
-			fmt.Sprintf("at most %d codes per scan", riderMaxScanCodes)))
-		return
-	}
-	ctx := r.Context()
-	now := time.Now().UTC()
-	accepted := 0
-	rejected := []string{}
-	seen := make(map[string]struct{}, len(req.Codes))
-	for _, raw := range req.Codes {
-		code, ok := riderNormalizeScanCode(raw)
-		if !ok {
-			// A label we cannot store is reported back rather than silently
-			// dropped: the rider needs to see WHICH one to key in again.
-			if trimmed := strings.TrimSpace(raw); trimmed != "" {
-				rejected = append(rejected, trimmed)
-			}
-			continue
-		}
-		if _, dup := seen[code]; dup {
-			continue // the same label twice in one payload is one binding
-		}
-		seen[code] = struct{}{}
-		bound, berr := h.svc.repo.riderBindScanCode(ctx, riderScanBinding{
-			Code: code, DeliveryID: d.ID, OrderID: d.OrderID,
-			RiderPartyID: d.RiderPartyID, ScannedAt: now,
-		})
-		if berr != nil {
-			httpx.Error(w, r, berr)
-			return
-		}
-		if bound {
-			accepted++
-			continue
-		}
-		rejected = append(rejected, code)
-	}
-	httpx.JSON(w, http.StatusOK, riderScanResponse{Accepted: accepted, Rejected: rejected})
-}
-
-// riderNormalizeScanCode trims + uppercases a label and checks it looks like a
-// printed code. The client already normalises; we repeat it because the wire is
-// not the client, and a stored code that differs only in case would defeat the
-// unique index that makes the binding exclusive.
-func riderNormalizeScanCode(raw string) (string, bool) {
-	code := strings.ToUpper(strings.TrimSpace(raw))
-	if len(code) < riderMinScanCodeLen || len(code) > riderMaxScanCodeLen {
-		return "", false
-	}
-	for _, c := range code {
-		switch {
-		case c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.', c == '/':
-		default:
-			return "", false
-		}
-	}
-	return code, true
-}
-
-// riderReleaseScanCodes frees every crate label bound to a delivery.
-//
-// The unique index on `code` is what makes "this label is already on another
-// task" detectable, but it is also a permanent claim — so every path that ends
-// a task's claim on its crates has to release them, or the label is retired
-// from the system the first time it is scanned onto a task that is later undone.
-func (r *repository) riderReleaseScanCodes(ctx context.Context, deliveryID string) (int64, error) {
-	res, err := r.riderColl(collRiderTaskScans).DeleteMany(ctx,
-		bson.D{{Key: "delivery_id", Value: deliveryID}})
-	if err != nil {
-		return 0, httpx.Internal(fmt.Errorf("release scan codes: %w", err))
-	}
-	return res.DeletedCount, nil
-}
-
-// riderBindScanCode inserts one binding. bound=true means the code now belongs
-// to this delivery — either because we just wrote it, or because it was already
-// bound to THIS task (an idempotent re-scan). bound=false means the label is
-// held by a different task and the rider has the wrong crate in hand.
-func (r *repository) riderBindScanCode(ctx context.Context, b riderScanBinding) (bool, error) {
-	coll := r.riderColl(collRiderTaskScans)
-	if _, err := coll.InsertOne(ctx, b); err != nil {
-		if !mongo.IsDuplicateKeyError(err) {
-			return false, httpx.Internal(fmt.Errorf("bind scan code: %w", err))
-		}
-		var existing riderScanBinding
-		e := coll.FindOne(ctx, bson.D{{Key: "code", Value: b.Code}}).Decode(&existing)
-		if errors.Is(e, mongo.ErrNoDocuments) {
-			// Unbound between our insert and this read (another task released
-			// it). Report it as rejected rather than guessing — the rider
-			// re-scans and the next attempt succeeds cleanly.
-			return false, nil
-		}
-		if e != nil {
-			return false, httpx.Internal(fmt.Errorf("read scan binding: %w", e))
-		}
-		if existing.DeliveryID == b.DeliveryID {
-			return true, nil // re-scan of a label already on this task
-		}
-		// SELF-HEAL: crates are REUSED every morning, but a binding released
-		// only on undo made each label single-use — one delivered task and the
-		// physical crate was unscannable forever. A label whose holding task is
-		// already CLOSED (delivered/failed/cancelled) is stale by definition:
-		// steal it for the live task. The delete is guarded on the exact
-		// (code, delivery_id) pair, so racing scanners fall through to a plain
-		// rejected and simply re-scan.
-		if holder, herr := r.findDeliveryByID(ctx, existing.DeliveryID); herr == nil && holder != nil {
-			switch holder.Status {
-			case "DELIVERED", "FAILED", "CANCELLED":
-				if _, derr := coll.DeleteOne(ctx, bson.D{
-					{Key: "code", Value: b.Code}, {Key: "delivery_id", Value: existing.DeliveryID},
-				}); derr == nil {
-					if _, ierr := coll.InsertOne(ctx, b); ierr == nil {
-						return true, nil
-					}
-				}
-			}
-		}
-		return false, nil
-	}
-	return true, nil
-}
-
-// ── 2.3 Door reference photo ────────────────────────────────────────────────
-
-type riderDoorPhotoRequest struct {
-	PhotoRef string `json:"photo_ref"`
-}
-
-// riderTaskDoorPhoto stores the door reference photo AGAINST THE ADDRESS, not
-// the task. POST /consumer/delivery/tasks/{deliveryId}/door-photo.
-//
-// The picture answers "which door is B-204?" for whoever delivers there NEXT,
-// so keying it to a task that ends today would throw away the only thing that
-// makes it worth taking. One row per address (upsert): the newest photo of a
-// door replaces the older one, because doors get repainted and gates get moved.
-func (h *handler) riderTaskDoorPhoto(w http.ResponseWriter, r *http.Request) {
-	d, err := h.riderTaskForCaller(r)
-	if err != nil {
-		httpx.Error(w, r, err)
-		return
-	}
-	// A door photo can only be taken AT the door: refuse it from a task the
-	// rider has not yet picked up.
-	switch d.Status {
-	case "OUT_FOR_DELIVERY", "DELIVERED", "FAILED":
-	default:
-		httpx.Error(w, r, httpx.Conflict("NOT_OUT", "this order is not out for delivery"))
-		return
-	}
-	var req riderDoorPhotoRequest
-	if derr := httpx.DecodeJSON(r, &req); derr != nil {
-		httpx.Error(w, r, derr)
-		return
-	}
-	ref, ok := riderDoorPhotoRef(req.PhotoRef)
-	if !ok {
-		httpx.Error(w, r, httpx.BadRequest("INVALID_PHOTO_REF",
-			"photo_ref must be the view URL returned by the upload presign"))
-		return
-	}
-	key := riderAddressKey(d.ConsumerID, d.AddressLabel, d.AddressLine)
-	if key == "" {
-		httpx.Error(w, r, httpx.Unprocessable("NO_ADDRESS", "this order has no address to attach the photo to"))
-		return
-	}
-	if serr := h.svc.repo.riderSaveDoorPhoto(r.Context(), key, ref, d); serr != nil {
-		httpx.Error(w, r, serr)
-		return
-	}
-	httpx.JSON(w, http.StatusOK, savedResponse{Saved: true})
-}
-
-// riderAddressKey is the stable identity of a doorstep. Orders carry no address
-// id (only the label + line copied onto the task), so the key is the customer
-// plus their normalised address text: same customer + same address text = same
-// door. Hashed so the key is fixed-width and carries no address in the clear;
-// the readable label and line are stored alongside it for a human to check.
-//
-// A re-typed address ("B 204" → "B-204") starts a new key and loses the old
-// photo. That is the honest trade: a wrong photo of the wrong door is worse
-// than none, and the next delivery re-captures it.
-func riderAddressKey(consumerID, label, line string) string {
-	norm := func(s string) string { return strings.Join(strings.Fields(strings.ToLower(s)), " ") }
-	consumerID = strings.TrimSpace(consumerID)
-	l, ln := norm(label), norm(line)
-	if consumerID == "" || (l == "" && ln == "") {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(consumerID + "\n" + l + "\n" + ln))
-	return "addr_" + hex.EncodeToString(sum[:16])
-}
-
-// riderDoorPhotoRef validates the stored media reference. Door photos are
-// rendered by ANOTHER rider's app later, so only the shapes our own presign
-// hands back are accepted — never a javascript:/data: URI smuggled through.
-func riderDoorPhotoRef(raw string) (string, bool) {
-	ref := strings.TrimSpace(raw)
-	if ref == "" || len(ref) > riderMaxPhotoRefLen {
-		return "", false
-	}
-	if strings.ContainsAny(ref, " \t\r\n\"'<>") {
-		return "", false
-	}
-	if strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "https://") {
-		return ref, true
-	}
-	return "", false
-}
-
-// riderSaveDoorPhoto upserts the one door photo row for an address.
-func (r *repository) riderSaveDoorPhoto(ctx context.Context, addressKey, photoRef string, d *delivery) error {
-	now := time.Now().UTC()
-	_, err := r.riderColl(collDoorReferencePic).UpdateOne(ctx,
-		bson.D{{Key: "address_key", Value: addressKey}},
-		bson.D{
-			{Key: "$set", Value: bson.D{
-				{Key: "consumer_id", Value: d.ConsumerID},
-				{Key: "address_label", Value: d.AddressLabel},
-				{Key: "address_line", Value: d.AddressLine},
-				{Key: "photo_ref", Value: photoRef},
-				{Key: "geo", Value: d.Geo},
-				// Provenance: who took it, on which run. A door photo that turns
-				// out to be of the wrong flat has to be traceable to a rider.
-				{Key: "captured_by", Value: d.RiderPartyID},
-				{Key: "captured_on_delivery", Value: d.ID},
-				{Key: "updated_at", Value: now},
-			}},
-			{Key: "$setOnInsert", Value: bson.D{
-				{Key: "address_key", Value: addressKey},
-				{Key: "created_at", Value: now},
-			}},
-		},
-		options.Update().SetUpsert(true))
-	if err != nil {
-		return httpx.Internal(fmt.Errorf("save door photo: %w", err))
-	}
-	return nil
 }
 
 // ── 2.4 Undo a completed delivery ───────────────────────────────────────────
@@ -612,16 +180,6 @@ func (h *handler) riderTaskUndo(w http.ResponseWriter, r *http.Request) {
 	if uerr != nil {
 		httpx.Error(w, r, uerr)
 		return
-	}
-	if moved {
-		// Release this task's crate labels. The unique index on `code` is a
-		// permanent claim, so a binding left behind on an undone delivery would
-		// make that physical label unscannable forever — including for the
-		// rider who is reassigned the very same crate the next morning.
-		if _, rerr := h.svc.repo.riderReleaseScanCodes(ctx, d.ID); rerr != nil {
-			h.svc.log.ErrorContext(ctx, "scan bindings not released on delivery undo",
-				slog.String("delivery_id", d.ID), slog.Any("err", rerr))
-		}
 	}
 	if !moved {
 		// Someone (a double tap, a second device) already undid this marking.
@@ -894,105 +452,7 @@ func (s *service) riderRestoreOrderOutForDelivery(ctx context.Context, d *delive
 	}
 }
 
-// ── 2.5 Per-order compliance steps ──────────────────────────────────────────
-
-// riderComplianceStep is one door step. `code` drives client behaviour (SCAN
-// opens the scanner, CALL dials, COLLECT shows the cash amount, PROOF is the
-// screen's CTA) so the codes are a closed set shared with the client; `voice`
-// is the Hindi line spoken at the door.
-type riderComplianceStep struct {
-	Code      string `json:"code"`
-	Title     string `json:"title"`
-	Subtitle  string `json:"subtitle,omitempty"`
-	Voice     string `json:"voice,omitempty"`
-	Mandatory bool   `json:"mandatory"`
-}
-
-// riderTaskCompliance returns the ordered door steps for THIS task.
-// GET /consumer/delivery/tasks/{deliveryId}/compliance.
-//
-// The client ships kDefaultComplianceSteps as its fallback, so this list is
-// deliberately the same set in the same order — server and client must never
-// disagree about what a rider is asked to do at a door. What the server adds is
-// truth about the ACTUAL order: the CALL step only when the customer asked to
-// be called, the COLLECT step only on a cash order (and with the real amount in
-// it), the handover line the customer actually chose.
-func (h *handler) riderTaskCompliance(w http.ResponseWriter, r *http.Request) {
-	d, err := h.riderTaskForCaller(r)
-	if err != nil {
-		httpx.Error(w, r, err)
-		return
-	}
-	httpx.JSON(w, http.StatusOK, riderComplianceStepsFor(d))
-}
-
-// riderComplianceStepsFor derives the checklist from the task itself. Nothing
-// here is invented: every step that is conditional is conditioned on a field
-// stored on the delivery.
-func riderComplianceStepsFor(d *delivery) []riderComplianceStep {
-	steps := []riderComplianceStep{{
-		Code:      "REACH",
-		Title:     "Reach the customer address",
-		Subtitle:  "Park safely and carry the cold box to the door",
-		Voice:     "ग्राहक के पते पर पहुँचें।",
-		Mandatory: true,
-	}}
-
-	// CALL — only for a customer who asked to be called first. When they did
-	// ask, it is not optional: it is the instruction they left on the order.
-	if d.DeliveryPrefs != nil && d.DeliveryPrefs.CallBefore {
-		steps = append(steps, riderComplianceStep{
-			Code:      "CALL",
-			Title:     "Call the customer",
-			Subtitle:  "This customer asked to be called before delivery",
-			Voice:     "ग्राहक को कॉल करें।",
-			Mandatory: true,
-		})
-	}
-
-	// SCAN — nothing to scan on a task with no lines.
-	if len(d.Items) > 0 {
-		steps = append(steps, riderComplianceStep{
-			Code:      "SCAN",
-			Title:     "Scan the products",
-			Subtitle:  "Scan every box/bag code assigned to this order",
-			Voice:     "सामान स्कैन करें।",
-			Mandatory: true,
-		})
-	}
-
-	steps = append(steps, riderComplianceStep{
-		Code:      "HANDOVER",
-		Title:     "Hand over the order",
-		Subtitle:  riderHandoverSubtitle(d.DeliveryPrefs),
-		Voice:     "ग्राहक को सामान दें।",
-		Mandatory: true,
-	})
-
-	// COLLECT — a prepaid order has nothing to collect, and a rider asked to
-	// collect on one would be taking money twice. The amount is the task's own
-	// (the store may have re-billed it after an adjustment), so what the rider
-	// asks for is always what the customer owes.
-	if d.PaymentMode == "COD" && d.Amount > 0 {
-		amt := strconv.FormatFloat(round2(d.Amount), 'f', -1, 64)
-		steps = append(steps, riderComplianceStep{
-			Code:      "COLLECT",
-			Title:     "Collect the payment",
-			Subtitle:  "Cash order — collect exactly ₹" + amt,
-			Voice:     "₹" + amt + " लेना ना भूलें।",
-			Mandatory: true,
-		})
-	}
-
-	steps = append(steps, riderComplianceStep{
-		Code:      "PROOF",
-		Title:     "Capture proof of delivery",
-		Subtitle:  "Photo at the door + geotag",
-		Voice:     "डिलीवरी की फोटो लें।",
-		Mandatory: true,
-	})
-	return steps
-}
+// -- Handover wording (kept: TestBellInstructionRules pins the bell rule) --
 
 // riderHandoverSubtitle turns the customer's stored handover preference into
 // the line the rider reads. Falls back to the generic instruction when the
