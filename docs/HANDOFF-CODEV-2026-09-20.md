@@ -364,3 +364,201 @@ expiry.
 - Never decorate a wire `name` that something else matches on.
 - New Mongo-backed tests belong behind `CONSUMER_MONGO_TEST_URI`, using
   `newChainWorld(t)` from `fullchain_e2e_test.go`.
+
+---
+
+## 9. 24 September 2026: referrals, Founding Family, the noon cut-off
+
+**Branch:** `feature/founding-referrals` (from `integration/delivery` at `80f4a0b`).
+**Spec:** the consumer app on `origin/feature/ui-revamp` `5f92d2e` is the contract
+(`lib/referrals.ts`, `lib/foundingFamily.ts`, `lib/subscriptions.ts`,
+`lib/orderTracking.ts`, `pyaas-app-spec.md`, `pyaas-one-voice.md`,
+`HANDOFF-FRONTEND-2026-09-21.md` in that commit). Everything is additive: no
+path, key, status or error code the app already reads was renamed or removed.
+
+Verification, as before but on a private Mongo so the fixed database names do not
+collide with another run:
+
+```bash
+mongod --port 27018 --dbpath D:/dev/cache/mongo-wt1
+go build ./... && go vet ./... && CONSUMER_MONGO_TEST_URI=mongodb://127.0.0.1:27018 go test ./... -count=1
+```
+
+### 9.1 Referrals (`referrals.go`)
+
+| Route (under `/consumer`) | Body / reply |
+|---|---|
+| `GET /referrals/code` | `{code}` |
+| `GET /referrals` | `[{id, name, status, reward_amount, created_at}]`, newest first |
+| `POST /referrals/apply` | `{code}` -> `{id, code, status, reward_amount, created_at}` |
+
+- The code is the app's own `codeFromUid` derivation (`h = h*31 + charCode`,
+  unsigned 32-bit, `("PG" + base36 upper + "XXXX").slice(0, 6)`) over the consumer
+  id, minted lazily into the account's `referral_code` field. A code shared from the
+  phone before the server ever minted it still resolves: `applyReferral` derives
+  the code for every account without one and stores the match.
+- `status` is `pending` until the referee's first delivered order, then
+  `credited`: that is the app's `ReferralStatus` union (`refer.tsx` branches on
+  `credited`), so the task's `rewarded` wording lives in the CRM event name
+  (`referral.rewarded`), not on the wire.
+- Reward: `REFERRAL_REWARD_PAISE` (default 10000, the Refer screen's "Gift Rs 100,
+  get Rs 100") credited to the REWARDS bucket of BOTH sides from the delivered sync
+  (`syncOrderDelivered` -> `rewardReferralOnDelivery`), exactly once per referral
+  (ledger refs `referral:<id>:referrer` / `:referee`, status flip guarded on
+  `pending`). CRM events `referral.applied` and `referral.rewarded` go to the
+  outbox; no trigger routes them yet.
+- Errors, all in the consumer module's `{code, message}` body the app's
+  `apiClient` reads: unknown code -> 404 `REFERRAL_CODE_NOT_FOUND`; own code -> 422
+  `SELF_REFERRAL`; a second, different code -> 409 `ALREADY_REFERRED`; the same
+  code again -> 200 with the existing link.
+- **Collision rule to know:** four base-36 characters collide. Accounts created in
+  the same second derive the same code (same-second ObjectIDs differ only in the
+  counter, and the hash keeps the top digits). On a stored-code collision the
+  oldest account wins; a stored code always beats the derivation. The founder may
+  want a longer code in a later app build.
+
+### 9.2 Founding Family (`founding.go`, spec sections 3 to 6)
+
+| Route | Reply |
+|---|---|
+| `GET /consumer/founding-family` | `{price_month, member, farms[], savings}`; **404 `NOT_AVAILABLE`** while no farm is on record or `FOUNDING_FAMILY_CLOSED=true` (the app says opening soon) |
+| `POST /consumer/founding-family/join` `{farm_id}` | `{member}`; errors `WALLET_SHORT` (422, `shortfall` field and "short by N rupees" in the message), `FARM_UNLOCKED` (409), `ALREADY_MEMBER` (409) |
+| `POST /consumer/founding-family/stop` | `{member}` with `status: stopped`; perks run to the end of the paid month |
+| `GET /consumer/admin/founding/farms` | operator `{data: [...]}` envelope, SUPER_ADMIN token or `X-Admin-Key` |
+| `PUT /consumer/admin/founding/farms` `{farms: [{id?, name, farmer, place, note, photo_url, unlocks_at, unlocked_packs, status?, sort?}]}` | upserts the founder's fields; never touches `claimed`; `status: unlocked` by hand activates the farm's waiting members through the same path a full farm uses |
+
+Shapes are exactly `lib/foundingFamily.ts`: `member = {status: waiting|active|stopped,
+farm_id, line_number, referral_code, joined_at, next_bill_date}`, `farms[] = {id,
+name, farmer, place, note, photo_url, unlocks_at, claimed, status: filling|unlocked,
+unlocked_packs}`, `savings = {level1_per_litre, level3_per_litre, delivery_fee}`
+(null when no 1 L PYAAS line is priced yet).
+
+**Data source.** Spec rule one says prices, stock, member status and farm status come
+from the ERP through the backend. What the Dolibarr integration already reads is
+used as-is; what it does not, the backend keeps:
+
+| Value | Source today |
+|---|---|
+| Product master, level-1 price, stock | ERP sync (`dolibarr_sync.go`), unchanged |
+| Level-3 (member) price on `PYS-*` milk | ERP `multiprices_ttc["3"]` when set and below level 1, mirrored to `member_price` on the catalog row; else derived as level 1 minus `FOUNDING_LEVEL3_OFF_PAISE_PER_LITRE` (default 200) per litre, rounded to the rupee (1 L -> 2, 500 ml -> 1, 450 ml -> 1, 200 ml -> 0, matching the spec's table) |
+| FOUNDING-99, DELIVERY-FEE | ERP services of those refs when the sync sees them (`consumer_founding_prices`); until they exist, `FOUNDING_PRICE_MONTH_PAISE` (9900) and `FOUNDING_DELIVERY_FEE_PAISE` (500) |
+| Wallet | the backend wallet (the ERP customer advance is not read by this backend) |
+| Farms, seats, members | `consumer_founding_farms` / `consumer_founding_members`, the admin endpoint above, and the seed `cmd/seed/founding_farms.json` (insert-only, both seed modes) |
+
+**Rules implemented.** Join takes `price_month` from the wallet server-side, exactly
+once (ledger row `ref_type: founding`, remark `FOUNDING-99`, ref
+`founding:join:<member>:<n>`), assigns the next `line_number` on the farm
+atomically, status `waiting`; a debit that fails releases the seat and the row.
+When `claimed` reaches `unlocks_at` the farm flips to `unlocked` (once), claims
+close, every waiting member becomes `active` with `next_bill_date` one month on,
+and `founding.farm_unlocked` + `founding.member_active` are emitted per member;
+otherwise `founding.seat_waiting` goes to the joiner. Billing
+(`foundingBillingWorker`, hourly): Rs 99 on `next_bill_date`, once per
+`(member, bill day)`, rolled on the anchor day-of-month (31 Jan -> 28 Feb -> 31
+Mar); a short wallet is retried for `FOUNDING_BILL_RETRY_DAYS` (3) then the
+membership stops with perks to the day before the missed bill. Stop keeps the perks
+until `perks_until` (the day before the next bill); a waiting member's seat goes
+back. A stopped member can re-join a filling farm.
+
+**Member pricing.** Parag is never discounted. PYAAS milk lines (seeded `pyaas-*`
+cards, the sync's `dol-pys-*` additions, any row with a `PYS-*` base id; ghee
+excluded) bill at level 3 for a member whose perks apply and level 1 otherwise, in
+`createOrder`, `createSubscription` and every morning order the worker
+materialises (`subscriptionLinePrice` re-reads the standing each time).
+`catalogPriceIndex.priceForMember` is the one resolver. Members pay no delivery
+fee on one-off orders. `GET /consumer/catalog` now carries `member_price` on every
+served PYAAS milk line (overrides, additions and their variants as `memberPrice`),
+absent on everything else.
+
+**CRM.** Three data-driven triggers in `crm_triggers.json` (FF-01/02/03, templates
+T-FF01/02/03, EN + romanised HI in the file's register), on topics
+`founding.farm_unlocked`, `founding.member_active`, `founding.seat_waiting`, routed
+like D-01 (push, WhatsApp after 15 min, SMS, inbox always). Tokens `[FARM]`,
+`[FARMER]`, `[LINE]`, `[TOGO]` are filled by `crmEventParams`. Trigger count is
+57, templates 49.
+
+### 9.3 The lock is 12 noon IST the day before (`subscriptions.go`)
+
+- `lockHourIST = 12`. A delivery day's previews lock at 12:00 IST the day before
+  (`lockMomentFor`), when the store task is created. Until then the preview is
+  editable: edits reconcile it, pause/vacation cancel it and release the day.
+- The preview for the first still-editable day (`firstEditableDay`: tomorrow before
+  noon, the day after tomorrow from noon) is created on any tick, so the store sees
+  it a full day ahead. `scheduleFromHourIST` (13:00) is gone.
+- A change made after noon applies to the day after tomorrow: locked orders are
+  never reconciled. A plan created, resumed or edited after the cut-off does not
+  reach a day already past it: the catch-up branch serves only plans whose last
+  member change (`changed_at`, stamped on create / patch / pause / resume)
+  predates that day's lock moment, which is the server-down case.
+- `next_delivery_date` (additive) is on every subscription reply so the app can
+  show when a plan created after noon really starts. The app's start-date picker
+  still defaults to tomorrow at any hour; after noon that day is already locked, so
+  the picker should read this field or offer the day after tomorrow.
+- Exactly-once is unchanged: the per-day claim plus the unique
+  `(subscription_id, scheduled_for)` index.
+- An unfunded preview is retried every tick until its day passes (as before).
+- `GET /stores/{storeId}/upcoming` now lists the window from tomorrow through the
+  first editable day; each row's `delivery_date` says which day. The admin CRM
+  timeline event reads "Subscription day confirmed (noon lock)".
+- The CRM B-02 shortfall notice (12:00) now fires at the lock itself; the
+  "recharge by 12 noon tomorrow" copy question in section 5 still stands.
+
+### 9.4 `DUPLICATE_SUBSCRIPTION`
+
+`createSubscription` refuses a second non-cancelled plan for the same
+`product_id` + normalised `variant` with 409 `DUPLICATE_SUBSCRIPTION` and a message
+naming the plan ("You already have a daily plan for Milk gold-500ml 500ml. Change
+its quantity or days in My subscriptions."). Paused counts as live; cancelled
+frees the line; another variant is its own line. The app's own guard keys on
+`product_id` alone, so it is the stricter of the two.
+
+### 9.5 Stale locked orders
+
+The sweep's new MISSED step (`closeMissedSubscriptionOrders`) closes a locked
+morning order whose delivery day passed with no delivery task or a task never
+completed: status `cancelled` (the one terminal status the app draws besides
+`delivered`), `cancelled_by: missed`, the task `FAILED` with reason `missed`,
+`order.failed` emitted with `reason: "missed"`, no money moved. Yesterday's orders
+close from noon (the morning is left for a late delivered mark); older ones on any
+tick. A task already `DELIVERED` is never touched (the order sync owns it).
+
+### 9.6 Founder decisions still open
+
+1. **Farm records are placeholders**: `cmd/seed/founding_farms.json` carries the
+   four farms from spec 3.3 (Sri Radha Mohan Dairy / Ram / 150; Mishra Dairy /
+   Abhishek Mishra / 80; Gonard Dairy / Harsh Singh / 65; Ranjeet Singh Dairy /
+   Ranjeet Singh / 55), no photos, and every farmer's written consent (One Voice
+   3.7 rule 5) is open. Sri Radha Mohan is "unlocked and delivering" on the website:
+   set its status and `unlocked_packs` by hand once its members are migrated.
+2. **Seat thresholds** (`unlocks_at`) are the spec's planned numbers, not confirmed.
+3. **ERP items missing** (spec section 9): Whole Farm Milk 1 L bottle / pouch
+   (`PYS-*` refs with a farm extrafield), price level 3 set to level 1 minus Rs 2/L
+   on `PYS-*` milk (levels 3 to 5 equal level 1 today, so the backend derives it),
+   the `FOUNDING-99` service (Rs 99, monthly) and `DELIVERY-FEE` (Rs 5), member and
+   farm records in the ERP, the customer-facing names, the stray Parag records.
+   Until then the fallbacks in 9.2 apply.
+4. **DELIVERY-FEE on PYAAS-milk orders by non-members** (spec 5.3, "needs your
+   yes"): built behind `FOUNDING_PYAAS_NONMEMBER_FEE`, off by default. The app's
+   one-off fee stays Rs 15 below Rs 199 (both apps agree on that number today; One
+   Voice says Rs 5, and shown must equal charged).
+5. **PYAAS milk members-only** (spec 5.1): built behind
+   `FOUNDING_PYAAS_MEMBERS_ONLY`, off by default because the app at `5f92d2e` has no
+   shop lock state yet (its handoff lists screens 1, 2, 8, 9 as not built) and an
+   existing PYAAS subscriber would be refused with no screen to explain it. Flip it
+   with the app build that ships the lock states.
+6. **Month one starts on activation**, not "on the first delivery" (spec 5.6): the
+   first delivery date is not known at unlock. Say if the bill date should move to
+   the first delivered PYAAS order instead.
+7. **A waiting member who stops** gets the seat released and no automatic refund
+   (spec 7 only covers a farm that does not unlock within 60 days). That 60-day
+   refund, the 3-days-before reminder and the wallet-short notice (spec 6) are not
+   built; the notification texts exist in the spec.
+8. **Referral reward vs spec 5.8**: the Refer screen promises Rs 100 each; the spec
+   and One Voice say a referral moves you up the line with no cash. The backend
+   pays what the screen promises (config `REFERRAL_REWARD_PAISE`; set 0 to stop
+   paying). `crm_triggers.json` config also lists 7500 paise per side under
+   `credits_paise`, a third number.
+9. **Moving today's Plus members** (spec section 8) is not built: there is no Plus
+   record in this backend to migrate from.
+10. **The app's start-date picker after noon** (9.3): tomorrow is already locked;
+    the picker should offer the day after tomorrow or read `next_delivery_date`.

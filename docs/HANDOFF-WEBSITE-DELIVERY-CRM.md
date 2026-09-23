@@ -141,7 +141,7 @@ Response:
 ```
 
 Field notes:
-- `orderStatus` is what the customer sees; `deliveryStatus` is the rider side (`NO_TASK` = a subscription day not yet confirmed; it locks at midnight IST).
+- `orderStatus` is what the customer sees; `deliveryStatus` is the rider side (`NO_TASK` = a subscription day not yet confirmed; it locks at 12:00 noon IST the day before delivery).
 - `paymentStatus`: `PAID` (wallet debited), `FREE` (₹0 trial/offer day), `PENDING` (not delivered yet), `NOT_CHARGED` (cancelled), `COD`. Money only ever moves on delivery, so a `PENDING` order has never been charged.
 - `proofDistanceM` = metres between the rider's GPS when the photo was taken and the customer's saved pin. Flag rows over **300 m** in amber (not an error, just worth a look).
 - `lane` is `instant` or `morning`. Group the table the way the apps do: the two lanes are different operations, not a filter of one list.
@@ -155,7 +155,7 @@ Field notes:
   "order": { /* crmOrderRow */ },
   "timeline": [
     {"at": "2026-09-14T16:11:52Z", "event": "Order placed", "by": "customer"},
-    {"at": "2026-09-14T18:30:00Z", "event": "Subscription day confirmed (midnight lock)", "by": "system"},
+    {"at": "2026-09-14T18:30:00Z", "event": "Subscription day confirmed (noon lock)", "by": "system"},
     {"at": "2026-09-14T18:30:00Z", "event": "Sent to riders", "by": "system"},
     {"at": "2026-09-15T00:41:10Z", "event": "Picked up · out for delivery", "by": "PYAAS Rider 1"},
     {"at": "2026-09-15T00:55:02Z", "event": "Delivered (photo taken)", "by": "PYAAS Rider 1"}
