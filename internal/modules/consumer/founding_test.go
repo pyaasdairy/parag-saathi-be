@@ -365,8 +365,10 @@ func TestFoundingFamilyJoinUnlockStopAndPricing(t *testing.T) {
 	if joined.Member.Status != memberWaiting || joined.Member.FarmID != "mishra-dairy" || *joined.Member.LineNumber != 1 {
 		t.Fatalf("member after re-join: %+v", joined.Member)
 	}
-	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}, {Key: "remark", Value: foundingLedgerLabel}}); n != 2 {
-		t.Fatalf("FOUNDING-99 rows after a re-join: %d want 2", n)
+	// Inside the paid month the re-join is free (owner rule, 24 Sep; see
+	// TestFoundingRejoinInsidePaidMonth for the whole rule).
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}, {Key: "remark", Value: foundingLedgerLabel}}); n != 1 {
+		t.Fatalf("FOUNDING-99 rows after a re-join inside the paid month: %d want 1", n)
 	}
 }
 
@@ -597,5 +599,119 @@ func TestFoundingBillingRetriesOncePerDay(t *testing.T) {
 	}
 	if got, _ := w.svc.repo.findFoundingMember(ctx, b); got.Status != memberActive || got.NextBillDate != "2026-11-30" || got.BillAttempts != 0 || got.LastAttemptDate != "" {
 		t.Fatalf("after the same-day top-up: %+v", got)
+	}
+}
+
+// Stop, then re-join inside the paid month (owner rule, 24 Sep): the month is
+// already paid, so the re-join charges nothing and keeps the perks. The farm
+// the member held can be taken back even though it unlocked (claims are
+// closed to newcomers, not to its own member); another farm still filling
+// seats them as waiting with the paid month intact, and its unlock bills
+// from the day after that month. A join after perks_until is a fresh Rs 99
+// join, charged once.
+func TestFoundingRejoinInsidePaidMonth(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	h := &handler{svc: w.svc}
+	seedTestFarms(t, w, 1)
+	rows := func(cid primitive.ObjectID) int64 {
+		n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: cid}, {Key: "remark", Value: foundingLedgerLabel}})
+		return n
+	}
+	join := func(cid primitive.ObjectID, farm string) (int, foundingMemberView, string) {
+		code, body := foundingAPI(t, w, cid, http.MethodPost, "/founding-family/join", `{"farm_id":"`+farm+`"}`, h.foundingJoin)
+		var out struct {
+			Member foundingMemberView `json:"member"`
+		}
+		_ = json.Unmarshal([]byte(body), &out)
+		return code, out.Member, body
+	}
+	stop := func(cid primitive.ObjectID) {
+		if code, body := foundingAPI(t, w, cid, http.MethodPost, "/founding-family/stop", "", h.foundingStop); code != 200 {
+			t.Fatalf("stop: %d %s", code, body)
+		}
+	}
+
+	a := w.customer(t, "9000009301", 500)
+	if code, m, body := join(a, "gonard-dairy"); code != 200 || m.Status != memberActive {
+		t.Fatalf("first join: %d %s", code, body)
+	}
+	first, _ := w.svc.repo.findFoundingMember(ctx, a)
+	paidBill := first.NextBillDate
+	stop(a)
+
+	// 1) Back to the farm A held, now unlocked: active again, same line, same
+	//    bill date, no charge.
+	code, m, body := join(a, "gonard-dairy")
+	if code != 200 || m.Status != memberActive || m.LineNumber == nil || *m.LineNumber != 1 || m.NextBillDate == nil || *m.NextBillDate != paidBill {
+		t.Fatalf("re-join the own unlocked farm inside the paid month: %d %s", code, body)
+	}
+	if wv, _ := w.svc.wallet(ctx, a); wv.Available != 401 || rows(a) != 1 {
+		t.Fatalf("a re-join inside the paid month charged: wallet %v, FOUNDING-99 rows %d", wv.Available, rows(a))
+	}
+	if f, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy"); f.Claimed != 1 {
+		t.Fatalf("taking back one's own seat must not add a seat: claimed %d", f.Claimed)
+	}
+	if !w.svc.foundingActive(ctx, a) {
+		t.Fatalf("perks after taking the seat back")
+	}
+
+	// 2) Stop again, re-join a farm still filling: waiting there, perks kept
+	//    through the paid month, still no charge.
+	stop(a)
+	perks := addDaysIST(paidBill, -1)
+	code, m, body = join(a, "mishra-dairy")
+	if code != 200 || m.Status != memberWaiting || m.FarmID != "mishra-dairy" || *m.LineNumber != 1 {
+		t.Fatalf("re-join a filling farm inside the paid month: %d %s", code, body)
+	}
+	if wv, _ := w.svc.wallet(ctx, a); wv.Available != 401 || rows(a) != 1 {
+		t.Fatalf("a re-join inside the paid month charged: wallet %v, rows %d", wv.Available, rows(a))
+	}
+	if got, _ := w.svc.repo.findFoundingMember(ctx, a); got.PerksUntil != perks {
+		t.Fatalf("perks_until lost on re-join: %q want %q", got.PerksUntil, perks)
+	}
+	if !w.svc.foundingActive(ctx, a) {
+		t.Fatalf("the paid month's perks must survive a re-join onto a filling farm")
+	}
+	if _, active := w.svc.foundingStanding(ctx, a, addDaysIST(perks, 1)); active {
+		t.Fatalf("perks must end with the paid month while still waiting")
+	}
+	// Mishra unlocks: month two bills the day after the paid month, not a
+	// month after the unlock.
+	if _, err := w.svc.upsertFoundingFarms(ctx, []foundingFarmInput{
+		{ID: "mishra-dairy", Name: "Mishra Dairy", Farmer: "Abhishek Mishra", Place: "Gonda", UnlocksAt: 80, Status: farmUnlocked},
+	}, "test"); err != nil {
+		t.Fatalf("hand unlock: %v", err)
+	}
+	got, _ := w.svc.repo.findFoundingMember(ctx, a)
+	if got.Status != memberActive || got.NextBillDate != paidBill || got.PerksUntil != "" {
+		t.Fatalf("activation of a paid-through member: %+v (want next bill %s)", got, paidBill)
+	}
+
+	// 3) After perks_until: a fresh Rs 99 join, charged exactly once; the
+	//    unlocked farms (its own included) are closed to it.
+	stop(a)
+	if _, err := w.db.Collection(collFoundingMembers).UpdateOne(ctx, bson.D{{Key: "consumer_id", Value: a}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "perks_until", Value: addDaysIST(istToday(time.Now()), -1)}}}}); err != nil {
+		t.Fatalf("age perks: %v", err)
+	}
+	if code, _, body = join(a, "mishra-dairy"); code != 409 || !strings.Contains(body, "FARM_UNLOCKED") {
+		t.Fatalf("own unlocked farm after the paid month: %d %s", code, body)
+	}
+	if _, err := w.svc.upsertFoundingFarms(ctx, []foundingFarmInput{
+		{ID: "third-farm", Name: "Third Farm", Farmer: "Ranjeet Singh", UnlocksAt: 10},
+	}, "test"); err != nil {
+		t.Fatalf("third farm: %v", err)
+	}
+	code, m, body = join(a, "third-farm")
+	if code != 200 || m.Status != memberWaiting {
+		t.Fatalf("fresh join after the paid month: %d %s", code, body)
+	}
+	if wv, _ := w.svc.wallet(ctx, a); wv.Available != 302 || rows(a) != 2 {
+		t.Fatalf("a fresh join must charge Rs 99 once: wallet %v, rows %d", wv.Available, rows(a))
+	}
+	if got, _ = w.svc.repo.findFoundingMember(ctx, a); got.PerksUntil != "" || w.svc.foundingActive(ctx, a) {
+		t.Fatalf("a fresh waiting join carries no perks: %+v", got)
 	}
 }

@@ -480,7 +480,9 @@ func (s *service) foundingOpen(ctx context.Context) (bool, []foundingFarm, error
 }
 
 // foundingStanding is the member row plus whether the perks apply on day:
-// active members, and stopped members until the end of their paid month.
+// active members, and stopped members until the end of their paid month. A
+// member who re-joined a filling farm inside that month waits with the
+// month's perks_until still on the row, so the perks they paid for run on.
 func (s *service) foundingStanding(ctx context.Context, consumerID primitive.ObjectID, day string) (*foundingMember, bool) {
 	m, err := s.repo.findFoundingMember(ctx, consumerID)
 	if err != nil || m == nil {
@@ -489,7 +491,7 @@ func (s *service) foundingStanding(ctx context.Context, consumerID primitive.Obj
 	switch m.Status {
 	case memberActive:
 		return m, true
-	case memberStopped:
+	case memberStopped, memberWaiting:
 		return m, m.PerksUntil != "" && day <= m.PerksUntil
 	}
 	return m, false
@@ -625,19 +627,30 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 	if existing != nil && existing.Status != memberStopped {
 		return nil, errAlreadyMember
 	}
+	now := time.Now().UTC()
+	// Owner rule (24 Sep): a stopped member who comes back before
+	// perks_until has already paid this month. The re-join charges nothing
+	// and keeps perks_until; the farm they were active on can be taken back
+	// even though it unlocked (its claims are closed to newcomers, not to
+	// its own member). After perks_until it is a fresh Rs 99 join.
+	paidThrough := existing != nil && existing.PerksUntil != "" && istToday(now) <= existing.PerksUntil
+	if paidThrough && existing.FarmID == farmID && farm.Status == farmUnlocked && existing.ActivatedAt != nil {
+		return s.retakeFoundingSeat(ctx, consumerID, existing)
+	}
 	if farm.Status != farmFilling || farm.Claimed >= farm.UnlocksAt {
 		return nil, errFarmUnlocked
 	}
 	price := s.foundingPriceMonth(ctx)
-	wv, err := s.wallet(ctx, consumerID)
-	if err != nil {
-		return nil, err
-	}
-	if wv.Available < price {
-		return nil, walletShortError(price - wv.Available)
+	if !paidThrough {
+		wv, err := s.wallet(ctx, consumerID)
+		if err != nil {
+			return nil, err
+		}
+		if wv.Available < price {
+			return nil, walletShortError(price - wv.Available)
+		}
 	}
 
-	now := time.Now().UTC()
 	seat, err := s.repo.claimFarmSeat(ctx, farmID)
 	if err != nil {
 		return nil, err
@@ -663,16 +676,22 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 		}
 		inserted = true
 	} else {
+		// A fresh re-join clears the old month entirely; a paid-through one
+		// keeps perks_until and the bill anchor, which the unlock bills from.
+		unset := bson.D{
+			{Key: "activated_at", Value: ""}, {Key: "next_bill_date", Value: ""},
+			{Key: "last_bill_date", Value: ""}, {Key: "bill_attempts", Value: ""}, {Key: "last_attempt_date", Value: ""},
+			{Key: "stopped_at", Value: ""}, {Key: "stop_reason", Value: ""},
+		}
+		if !paidThrough {
+			unset = append(unset, bson.E{Key: "bill_day", Value: ""}, bson.E{Key: "perks_until", Value: ""})
+		}
 		m, err = s.repo.updateFoundingMember(ctx, existing.ID,
 			bson.D{
 				{Key: "status", Value: memberWaiting}, {Key: "farm_id", Value: farmID},
 				{Key: "line_number", Value: line}, {Key: "joined_at", Value: now}, {Key: "joins", Value: existing.Joins + 1},
 			},
-			bson.D{
-				{Key: "activated_at", Value: ""}, {Key: "next_bill_date", Value: ""}, {Key: "bill_day", Value: ""},
-				{Key: "last_bill_date", Value: ""}, {Key: "bill_attempts", Value: ""}, {Key: "perks_until", Value: ""},
-				{Key: "stopped_at", Value: ""}, {Key: "stop_reason", Value: ""},
-			},
+			unset,
 			bson.D{{Key: "status", Value: memberStopped}})
 		if err != nil {
 			s.repo.releaseFarmSeat(ctx, farmID)
@@ -684,8 +703,13 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 		}
 	}
 
-	ref := "founding:join:" + m.ID.Hex() + ":" + strconv.Itoa(m.Joins)
-	if _, derr := s.debitAs(ctx, consumerID, price, "founding", ref, foundingLedgerLabel); derr != nil {
+	// A paid-through re-join moves no money: the month is already paid.
+	var derr error
+	if !paidThrough {
+		ref := "founding:join:" + m.ID.Hex() + ":" + strconv.Itoa(m.Joins)
+		_, derr = s.debitAs(ctx, consumerID, price, "founding", ref, foundingLedgerLabel)
+	}
+	if derr != nil {
 		s.repo.releaseFarmSeat(ctx, farmID)
 		if inserted {
 			_, _ = s.repo.foundingMembers().DeleteOne(ctx, bson.D{{Key: "_id", Value: m.ID}})
@@ -719,9 +743,31 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 	return memberView(m, code), nil
 }
 
+// retakeFoundingSeat puts a stopped member back on the farm they were active
+// on, inside the month they already paid: active again with the same line
+// and the same next bill date, no seat taken (an unlocked farm never gave
+// theirs back) and no money moved.
+func (s *service) retakeFoundingSeat(ctx context.Context, consumerID primitive.ObjectID, existing *foundingMember) (*foundingMemberView, error) {
+	m, err := s.repo.updateFoundingMember(ctx, existing.ID,
+		bson.D{{Key: "status", Value: memberActive}},
+		bson.D{{Key: "perks_until", Value: ""}, {Key: "stopped_at", Value: ""}, {Key: "stop_reason", Value: ""}},
+		bson.D{{Key: "status", Value: memberStopped}, {Key: "farm_id", Value: existing.FarmID}})
+	if err != nil {
+		return nil, err
+	}
+	if m == nil { // re-joined concurrently
+		return nil, errAlreadyMember
+	}
+	code, _ := s.repo.mintReferralCode(ctx, consumerID)
+	return memberView(m, code), nil
+}
+
 // unlockFoundingFarm flips the farm (exactly once), activates every waiting
 // member with month one starting today, and sends the unlock and you-are-in
 // notifications. Safe to call again: a farm already unlocked does nothing.
+// A member who re-joined inside a paid month is billed from the day after
+// that month instead; one whose paid month ran out while waiting joined
+// without paying, so month one is billed today.
 func (s *service) unlockFoundingFarm(ctx context.Context, farm *foundingFarm, at time.Time) {
 	flipped, err := s.repo.unlockFarm(ctx, farm.ID, at)
 	if err != nil || !flipped {
@@ -736,11 +782,22 @@ func (s *service) unlockFoundingFarm(ctx context.Context, farm *foundingFarm, at
 	anchor, _ := parseDay(today)
 	for i := range waiting {
 		w := &waiting[i]
+		memberBill, memberDay := bill, anchor.Day()
+		switch {
+		case w.PerksUntil != "" && w.PerksUntil >= today:
+			memberBill = addDaysIST(w.PerksUntil, 1)
+			if memberDay = w.BillDay; memberDay <= 0 {
+				d, _ := parseDay(memberBill)
+				memberDay = d.Day()
+			}
+		case w.PerksUntil != "":
+			memberBill = today // the billing worker takes month one within the hour
+		}
 		upd, err := s.repo.updateFoundingMember(ctx, w.ID,
 			bson.D{
 				{Key: "status", Value: memberActive}, {Key: "activated_at", Value: at},
-				{Key: "next_bill_date", Value: bill}, {Key: "bill_day", Value: anchor.Day()}, {Key: "bill_attempts", Value: 0},
-			}, nil, bson.D{{Key: "status", Value: memberWaiting}})
+				{Key: "next_bill_date", Value: memberBill}, {Key: "bill_day", Value: memberDay}, {Key: "bill_attempts", Value: 0},
+			}, bson.D{{Key: "perks_until", Value: ""}}, bson.D{{Key: "status", Value: memberWaiting}})
 		if err != nil || upd == nil {
 			continue
 		}
