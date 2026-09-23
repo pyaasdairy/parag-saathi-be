@@ -34,12 +34,17 @@ const crmComplaintSLA = "24 hours"
 // crmRouteGeneric fires every event trigger in the config whose event is the
 // outbox topic and whose conditions all hold. Skipped by design: internal
 // triggers (operator-side, handled explicitly), triggers with no customer
-// template, aliases and schedules. A trigger's "delay" is not honoured; it
-// fires on the worker tick that drains the event. The dispatch claim is
-// (trigger, consumer, IST day, scope): scoped to the order or complaint the
-// event is about (crmEventScopeKey), so a per_order trigger fires once per
-// order, not once per day.
+// template, aliases and schedules. A trigger with a non-zero "delay" is
+// queued instead (crm_schedule.go) and fired by the scheduler tick after
+// re-checking its conditions. The dispatch claim is (trigger, consumer, IST
+// day, scope): scoped to the order or complaint the event is about
+// (crmEventScopeKey), so a per_order trigger fires once per order, not once
+// per day.
 func (s *service) crmRouteGeneric(ctx context.Context, ev crmEvent) {
+	s.crmRouteGenericAt(ctx, ev, time.Now().UTC())
+}
+
+func (s *service) crmRouteGenericAt(ctx context.Context, ev crmEvent, now time.Time) {
 	if ev.ConsumerID.IsZero() {
 		return
 	}
@@ -55,7 +60,6 @@ func (s *service) crmRouteGeneric(ctx context.Context, ev crmEvent) {
 	}
 	sort.Strings(ids) // deterministic dispatch order
 	e := &crmEventCtx{s: s, ctx: ctx, ev: ev}
-	var params map[string]string
 	for _, id := range ids {
 		t := cfg.Triggers[id]
 		ok, err := crmEvalConditions(t.Conditions, e.fact)
@@ -66,27 +70,29 @@ func (s *service) crmRouteGeneric(ctx context.Context, ev crmEvent) {
 		if !ok {
 			continue
 		}
-		if params == nil {
-			var o *order
-			if ev.Topic == "complaint.created" { // [AMOUNT] and the label come from the order
-				o = e.order()
-			}
-			params = crmEventParams(ev.Topic, ev.Payload, o)
-			for k, v := range s.crmStandardParams(ctx, ev.ConsumerID) {
-				if _, taken := params[k]; !taken {
-					params[k] = v
-				}
-			}
-		}
-		// C-01: a message that cannot resolve its values is refused, never
-		// half-rendered. Checked before the day claim so a later tick with
-		// the value present can still fire.
-		if tok, ok := crmTemplateResolvable(cfg.Templates[t.Template.String()], params); !ok {
-			s.log.Warn("crm: unresolved template token, trigger not fired", "trigger", t.ID, "token", tok)
+		if d := crmTriggerDelay(t); d > 0 {
+			s.crmEnqueueSchedule(ctx, t, ev, now.Add(d))
 			continue
 		}
-		s.crmDispatchWith(ctx, t.ID, ev.ConsumerID, params, time.Now().UTC(), crmDispatchOpts{Scope: crmEventScopeKey(ev.Payload)})
+		s.crmFireTrigger(ctx, t, e, now)
 	}
+}
+
+// crmFireTrigger renders and dispatches one trigger for one event whose
+// conditions hold: the shared tail of the immediate route and the delayed
+// fire. Reports whether a dispatch was attempted and, when not, why.
+func (s *service) crmFireTrigger(ctx context.Context, t crmTrigger, e *crmEventCtx, now time.Time) (bool, string) {
+	cfg := crmConfigLoad()
+	params := e.params()
+	// C-01: a message that cannot resolve its values is refused, never
+	// half-rendered. Checked before the claim so a later tick with the value
+	// present can still fire.
+	if tok, ok := crmTemplateResolvable(cfg.Templates[t.Template.String()], params); !ok {
+		s.log.Warn("crm: unresolved template token, trigger not fired", "trigger", t.ID, "token", tok)
+		return false, "unresolved template token " + tok
+	}
+	s.crmDispatchWith(ctx, t.ID, e.ev.ConsumerID, params, now, crmDispatchOpts{Scope: crmEventScopeKey(e.ev.Payload)})
+	return true, ""
 }
 
 // crmEventScopeKey is the claim scope of one outbox event: what the emitter
@@ -122,6 +128,7 @@ type crmEventCtx struct {
 	ev      crmEvent
 	ord     *order
 	ordDone bool
+	prm     map[string]string
 }
 
 func (e *crmEventCtx) order() *order {
@@ -134,6 +141,26 @@ func (e *crmEventCtx) order() *order {
 		}
 	}
 	return e.ord
+}
+
+// params builds the template params for this event once: the topic's own
+// tokens (crmEventParams) over the standard ones (crmStandardParams).
+func (e *crmEventCtx) params() map[string]string {
+	if e.prm != nil {
+		return e.prm
+	}
+	var o *order
+	if e.ev.Topic == "complaint.created" { // [AMOUNT] and the label come from the order
+		o = e.order()
+	}
+	p := crmEventParams(e.ev.Topic, e.ev.Payload, o)
+	for k, v := range e.s.crmStandardParams(e.ctx, e.ev.ConsumerID) {
+		if _, taken := p[k]; !taken {
+			p[k] = v
+		}
+	}
+	e.prm = p
+	return p
 }
 
 // fact resolves one condition key. Only the keys listed here exist; any

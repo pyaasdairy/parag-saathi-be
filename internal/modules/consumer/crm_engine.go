@@ -75,6 +75,9 @@ type crmTrigger struct {
 	// fallback) — consumed by the Phase B transports in crm_channels.go. The
 	// in-app inbox is NOT listed there; it always runs (Phase A behaviour).
 	Delivery crmDelivery `json:"delivery"`
+	// Delay is an ISO-8601 duration ("PT2H") an event trigger waits after
+	// its event before sending (crm_schedule.go); PT0S or absent = now.
+	Delay string `json:"delay"`
 }
 
 // crmTemplateRef tolerates the three shapes the Rev3 config actually uses for
@@ -786,8 +789,14 @@ func (s *service) crmWorker(ctx context.Context) {
 // at 5 attempts → FAILED + log). All route side effects are CAS/claim-
 // idempotent, so replays are harmless — losing an event was not.
 func (s *service) crmProcessEvents(ctx context.Context) {
+	s.crmProcessEventsAt(ctx, time.Now().UTC())
+}
+
+// crmProcessEventsAt is crmProcessEvents with the tick's clock injected, so
+// a test can enqueue a delayed trigger at one instant and fire it at another.
+func (s *service) crmProcessEventsAt(ctx context.Context, now time.Time) {
 	col := s.repo.accounts.Database().Collection(collCRMEvents)
-	now := time.Now().UTC()
+	now = now.UTC()
 	// Crash recovery: a PROCESSING lease older than 10 minutes belongs to a
 	// dead worker — hand the event back to the queue.
 	_, _ = col.UpdateMany(ctx,
@@ -805,7 +814,7 @@ func (s *service) crmProcessEvents(ctx context.Context) {
 		if err != nil {
 			return // drained (or transient — next tick retries)
 		}
-		if rerr := s.crmRouteEvent(ctx, ev); rerr != nil {
+		if rerr := s.crmRouteEventAt(ctx, ev, now); rerr != nil {
 			next := "NEW"
 			if ev.Attempts >= 5 {
 				next = "FAILED"
@@ -821,6 +830,10 @@ func (s *service) crmProcessEvents(ctx context.Context) {
 }
 
 func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) error {
+	return s.crmRouteEventAt(ctx, ev, time.Now().UTC())
+}
+
+func (s *service) crmRouteEventAt(ctx context.Context, ev crmEvent, now time.Time) error {
 	switch ev.Topic {
 	case "order.delivered":
 		packNo, _ := ev.Payload["offer_pack"].(int32)
@@ -846,7 +859,7 @@ func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) error {
 	// Every other event trigger in the config (D-, E-, A-02 ...) routes by
 	// its topic and conditions. The explicit cases above own their state
 	// machines and return before this line on the paths they handle.
-	s.crmRouteGeneric(ctx, ev)
+	s.crmRouteGenericAt(ctx, ev, now)
 	return nil
 }
 
@@ -854,6 +867,9 @@ func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) error {
 // offer. The enrolled-offer count is pilot-scale (hundreds); a single indexed
 // scan per tick is deliberate simplicity.
 func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
+	// Delayed event triggers whose wait has elapsed (crm_schedule.go).
+	s.crmFireDueSchedules(ctx, now)
+
 	cur, err := s.repo.offers().Find(ctx, bson.D{{Key: "offer_id", Value: offerWelcomeLitre}})
 	if err != nil {
 		return

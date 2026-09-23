@@ -261,6 +261,15 @@ func (s *service) ensureCRMIndexes(ctx context.Context) bool {
 		s.log.Warn("crm: inbox index setup failed (continuing)", "err", err)
 		ok = false
 	}
+	if _, err := s.repo.crmSchedulesCol().Indexes().CreateMany(ctx, []mongo.IndexModel{
+		// One deferred dispatch per (trigger, event): an outbox replay is dropped.
+		{Keys: bson.D{{Key: "trigger_id", Value: 1}, {Key: "event_id", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "status", Value: 1}, {Key: "due_at", Value: 1}}},
+	}); err != nil {
+		s.log.Warn("crm: schedules index setup failed (continuing)", "err", err)
+		ok = false
+	}
 	return ok
 }
 
