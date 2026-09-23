@@ -54,6 +54,9 @@ func (s *service) crmRouteGenericAt(ctx context.Context, ev crmEvent, now time.T
 	cfg := crmConfigLoad()
 	var ids []string
 	for id, t := range cfg.Triggers {
+		if _, waiting := cfg.AwaitingEvent[id]; waiting {
+			continue // no product event exists for it yet (meta.awaiting_event)
+		}
 		if t.Kind == "event" && t.Event == ev.Topic && t.Category != "internal" && t.Template.String() != "" {
 			ids = append(ids, id)
 		}
@@ -113,12 +116,13 @@ func (s *service) crmFireTrigger(ctx context.Context, t crmTrigger, e *crmEventC
 }
 
 // crmEventScopeKey is the claim scope of one outbox event: what the emitter
-// named explicitly (scope_key), else the order, else the complaint the event
+// named explicitly (scope_key), else the complaint, else the order the event
 // is about, else "" (a per-day claim). Two orders on one day are two scopes,
-// so each gets its own D-01 and D-06; a scheduled trigger has no event and
-// keeps the per-day claim.
+// so each gets its own D-01 and D-06; two complaints on one order are two
+// scopes too, so the complaint wins over the order it names; a scheduled
+// trigger has no event and keeps the per-day claim.
 func crmEventScopeKey(payload map[string]any) string {
-	for _, k := range []string{"scope_key", "order_id", "complaint_id"} {
+	for _, k := range []string{"scope_key", "complaint_id", "order_id"} {
 		if v, _ := payload[k].(string); strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
 		}

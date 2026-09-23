@@ -21,6 +21,31 @@
   "revision": 3,
   "revision_note": "Revision 2, 20 August 2026 — all ten open values resolved by the client. Wallet ladder re-timed for a 12:00 noon cut-off; AI-call windows constrained to hours in which a human can receive a transfer.",
   "aligned_to": "PYAAS_Welcome_Litre_Campaign_Full.pdf, 20 August 2026",
+  "awaiting_event_note": "Triggers listed under awaiting_event have NO product event or runner in the backend yet. They stay in the config so the copy and routing survive, the engine never evaluates them, and the matrix test skips them. Remove an entry only together with the emitter (or scheduled runner) that makes it real.",
+  "awaiting_event": {
+   "A-04": "no server-side cart: the basket lives on the phone (app cart.tsx); no scheduled runner",
+   "A-06": "no scheduled runner for days_since_registration; data exists (accounts.created_at, orders)",
+   "B-04": "wallet plans have no renewal date; the nearest fact is a mandate's next_charge",
+   "B-05": "ai_call is not a transport; the pause_subscription action is not built",
+   "C-01": "no scheduled runner for days_since_last_order",
+   "C-02": "no scheduled runner; the Rs75 promo credit has no production grant path (promoCredit is dev-only)",
+   "C-05": "no delivery or read-receipt store to count unread WhatsApp messages",
+   "C-06": "ai_call is not a transport; no high_value segment computation",
+   "C-07": "no miss detector: a task that fails emits order.failed (D-09); a task that is late emits delivery.delayed (D-03)",
+   "D-04": "no substitution flow: the store adjust is reduce-only, there is no swap and no YES/NO reply handling",
+   "D-07": "the template carries an unrendered alternative-text block ([Recharge by 12 noon today to resume / Resumes [DATE]]); B-02 covers the unfunded cause",
+   "D-08": "zones carry no effective date and their edits emit no event",
+   "E-03": "no lateness confirmation and no production grant path for the Rs20 apology credit",
+   "F-01": "ai_call is not a transport",
+   "F-02": "ai_call is not a transport; no server-side cart",
+   "F-03": "ai_call is not a transport",
+   "F-04": "ai_call is not a transport",
+   "F-05": "ai_call is not a transport; no high_value segment computation",
+   "F-06": "ai_call is not a transport",
+   "F-07": "ai_call is not a transport",
+   "F-08": "ai_call is not a transport",
+   "F-09": "ai_call is not a transport"
+  },
   "change_register": "PYAAS_Campaign_CRM_Change_Register.pdf — items CH-01 to CH-20"
  },
  "enums": {
@@ -374,8 +399,9 @@
   "T-D05": {
    "dlt_category": "transactional",
    "cta": null,
-   "en": "[LABELLED_PRODUCT] is unavailable; ₹[X] refunded to your Wallet. Sorry!",
-   "hi": "[LABELLED_PRODUCT] uplabdh nahi; ₹[X] Wallet mein wapas. Maaf kijiye."
+   "en": "[LABELLED_PRODUCT] is unavailable today; Rs[X] has been taken off your bill and nothing is charged for it. Sorry!",
+   "hi": "[LABELLED_PRODUCT] aaj uplabdh nahi; Rs[X] bill se hata diya, iske liye koi shulk nahi. Maaf kijiye.",
+   "note": "Money moves only at delivery, so a removed line is never refunded - it is simply not charged. The earlier 'refunded to your Wallet' wording stated a movement that never happens."
   },
   "T-D06": {
    "dlt_category": "service_implicit",
@@ -667,7 +693,7 @@
    "event": "subscription.created_unpaid",
    "delay": "PT2H",
    "conditions": [
-    "wallet.topup_balance < plan.first_cycle_amount",
+    "wallet.covers_first_cycle == false",
     "offer.entitled_free_deliveries_remaining == 0"
    ],
    "segments": [
@@ -1544,7 +1570,7 @@
    "event": "complaint.created",
    "delay": "PT0S",
    "conditions": [
-    "complaint.type in ['wrong_item','damaged','missing']"
+    "complaint.type in ['missing']"
    ],
    "segments": [
     "*"
@@ -1580,7 +1606,7 @@
    "event": "complaint.created",
    "delay": "PT0S",
    "conditions": [
-    "complaint.type == 'quality_safety'"
+    "complaint.type == 'quality'"
    ],
    "segments": [
     "*"
@@ -1661,9 +1687,7 @@
    "delay": "PT4H",
    "conditions": [
     "rating == 5",
-    "consent.promotional.valid == true",
-    "complaint_open == false",
-    "opt_out_at == null || days_since_opt_out > 90"
+    "complaint_open == false"
    ],
    "segments": [
     "active",
@@ -2193,7 +2217,7 @@
    "id": "W-01",
    "name": "Welcome offer confirmed",
    "kind": "event",
-   "event": "subscription.activated",
+   "event": "offer.finalized",
    "delay": "PT0S",
    "conditions": [
     "offer.id == 'welcome_litre'"
@@ -2724,7 +2748,7 @@
   },
   {
    "token": "[DATE] [ALT] [X] [N] [NEW]",
-   "note": "runtime values from the event payload, still unwired: [DATE] in T-A03/T-B04/T-D08, [ALT] in T-D04, [X] in T-B05/T-C02/T-D05/T-E03 and the T-SMS bodies, [N] in T-C02, [NEW] in T-D08"
+   "note": "runtime values from the event payload, still unwired: [DATE] in T-B04/T-D08, [ALT] in T-D04, [X] in T-C02/T-E03 and the T-SMS bodies, [N] in T-C02, [NEW] in T-D08"
   }
  ],
  "wired_placeholders": {
@@ -2736,7 +2760,10 @@
    "[PARTNER]",
    "[SLA]",
    "[AMOUNT]",
-   "[REASON] (order.failed only; no template routes it yet)",
+   "[REASON] (order.failed, wallet.credited, payment.failed)",
+   "[X] (wallet.credited: amount credited; order.line_cancelled: amount taken off the bill)",
+   "[ETA] in T-D03 (delivery.delayed)",
+   "[DATE] in T-A03 (subscription.activated: the first delivery morning)",
    "[LINK]",
    "[SUPPORT_NUMBER]",
    "[DATE] in T-W06"

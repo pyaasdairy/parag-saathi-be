@@ -151,6 +151,10 @@ type crmConfig struct {
 	Triggers  map[string]crmTrigger
 	Templates map[string]crmTemplate
 	Offer     crmOffer
+	// AwaitingEvent lists the triggers (meta.awaiting_event) whose product
+	// event or runner does not exist yet, with the reason. Visible in the
+	// config, skipped by the matrix test, never evaluated by the router.
+	AwaitingEvent map[string]string
 }
 
 var (
@@ -169,6 +173,9 @@ func crmConfigLoad() *crmConfig {
 
 func crmConfigParse() {
 	var raw struct {
+		Meta struct {
+			AwaitingEvent map[string]string `json:"awaiting_event"`
+		} `json:"meta"`
 		Guards map[string]json.RawMessage `json:"guards"`
 		Config struct {
 			Offer map[string]struct {
@@ -184,7 +191,7 @@ func crmConfigParse() {
 	if err := json.Unmarshal(embeddedCRMConfig, &raw); err != nil {
 		panic("crm: embedded trigger config is malformed: " + err.Error())
 	}
-	c := &crmConfig{Triggers: map[string]crmTrigger{}, Templates: raw.Templates}
+	c := &crmConfig{Triggers: map[string]crmTrigger{}, Templates: raw.Templates, AwaitingEvent: raw.Meta.AwaitingEvent}
 	for _, t := range raw.Triggers {
 		c.Triggers[t.ID] = t
 	}
@@ -847,18 +854,16 @@ func (s *service) crmRouteEventAt(ctx context.Context, ev crmEvent, now time.Tim
 	case "wallet.recharge_settled":
 		amt, _ := ev.Payload["amount"].(float64)
 		return s.crmOnRechargeSettled(ctx, ev.ConsumerID, amt)
-	case "offer.finalized":
-		// W-01 off the HTTP request (crmEnrolCore emits, the worker sends).
-		s.crmDispatch(ctx, "W-01", ev.ConsumerID, map[string]string{})
 	case "waitlist.joined":
 		// Recorded for analytics only. The W-08 message ships in Phase B over
 		// SMS with its own rate limits — the join endpoint is UNAUTHENTICATED,
 		// so writing into an existing account's inbox keyed on an attacker-
 		// supplied phone would be a spam vector, not a feature.
 	}
-	// Every other event trigger in the config (D-, E-, A-02 ...) routes by
-	// its topic and conditions. The explicit cases above own their state
-	// machines and return before this line on the paths they handle.
+	// Every other event trigger in the config (W-01 on offer.finalized, D-,
+	// E-, A-02 ...) routes by its topic and conditions. The explicit cases
+	// above own their state machines and return before this line on the
+	// paths they handle.
 	s.crmRouteGenericAt(ctx, ev, now)
 	return nil
 }
