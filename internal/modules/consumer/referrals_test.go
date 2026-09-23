@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -245,5 +246,52 @@ func TestReferralDerivedCodeResolvesWithoutAStoredOne(t *testing.T) {
 	ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
 	if ref == nil || ref.ReferrerID != referrer {
 		t.Fatalf("link: %+v", ref)
+	}
+}
+
+// Two accounts created in the same millisecond with the same derived code
+// (same-second ObjectIDs collide in the four base-36 characters): the
+// OLDER account must win every time, whichever row Mongo returns first
+// for the created_at tie. The ObjectID breaks the tie - its counter
+// orders accounts created within one second - so the answer never
+// depends on insertion or index order.
+func TestReferralCodeCollisionTieGoesToTheOlderAccount(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	var older, younger primitive.ObjectID
+	for i := 0; i < 1000 && older.IsZero(); i++ {
+		a, b := primitive.NewObjectID(), primitive.NewObjectID()
+		if referralCodeFor(a.Hex()) == referralCodeFor(b.Hex()) {
+			older, younger = a, b
+		}
+	}
+	if older.IsZero() {
+		t.Skip("no colliding same-second pair found")
+	}
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	// The younger row goes in first, so natural order favours it.
+	for _, id := range []primitive.ObjectID{younger, older} {
+		if err := w.svc.repo.insertAccount(ctx, &account{ID: id, Phone: "+91" + id.Hex()[14:], Status: "ACTIVE", CreatedAt: at, UpdatedAt: at}); err != nil {
+			t.Fatalf("account: %v", err)
+		}
+	}
+	code := referralCodeFor(older.Hex())
+	referee := w.customer(t, "9000007301", 0)
+	out, err := w.svc.applyReferral(ctx, referee, code)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
+	if ref == nil || ref.ReferrerID != older || out.Code != code {
+		t.Fatalf("the derived-code tie went to %v, want the older account %s", ref, older.Hex())
+	}
+	// The match was stored on the older account; the stored-code lookup
+	// breaks the same tie the same way once both hold the code.
+	if _, err := w.svc.repo.mintReferralCode(ctx, younger); err != nil {
+		t.Fatalf("mint younger: %v", err)
+	}
+	if got, _ := w.svc.repo.findAccountByReferralCode(ctx, code); got == nil || got.ID != older {
+		t.Fatalf("the stored-code tie went to %+v, want %s", got, older.Hex())
 	}
 }

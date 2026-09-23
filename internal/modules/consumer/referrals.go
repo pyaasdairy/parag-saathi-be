@@ -126,6 +126,13 @@ func (r *repository) mintReferralCode(ctx context.Context, consumerID primitive.
 	return code, nil
 }
 
+// oldestAccountFirst orders code owners oldest first. created_at alone ties
+// for accounts created in the same millisecond, and same-second accounts are
+// exactly the ones whose derived codes collide; the ObjectID breaks the tie
+// (its counter orders ids minted within one second), so "the oldest account
+// wins" never depends on which row Mongo happens to return first.
+var oldestAccountFirst = bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}
+
 // referralScanCap bounds the derivation fallback: the pilot book is a few
 // thousand accounts, and one pass per unknown code is cheap at that size.
 const referralScanCap = 50000
@@ -137,7 +144,7 @@ const referralScanCap = 50000
 func (r *repository) findAccountByReferralCode(ctx context.Context, code string) (*account, error) {
 	var a account
 	err := r.accounts.FindOne(ctx, bson.D{{Key: "referral_code", Value: code}},
-		options.FindOne().SetSort(bson.D{{Key: "created_at", Value: 1}})).Decode(&a)
+		options.FindOne().SetSort(oldestAccountFirst)).Decode(&a)
 	if err == nil {
 		return &a, nil
 	}
@@ -151,7 +158,7 @@ func (r *repository) findAccountByReferralCode(ctx context.Context, code string)
 			bson.D{{Key: "referral_code", Value: ""}},
 		}}},
 		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}).
-			SetSort(bson.D{{Key: "created_at", Value: 1}}).SetLimit(referralScanCap))
+			SetSort(oldestAccountFirst).SetLimit(referralScanCap))
 	if err != nil {
 		return nil, errInternal("referral scan failed")
 	}
