@@ -364,6 +364,7 @@ type storeStockResponse struct {
 type variantInput struct {
 	VariantID   string            `json:"variant_id"`
 	VariantIDC  string            `json:"variantId"`
+	ID          string            `json:"id"` // the Saathi console's spelling on PATCH variants[]
 	Label       string            `json:"label"`
 	Price       *float64          `json:"price"`
 	ImageURL    string            `json:"image_url"`
@@ -379,6 +380,9 @@ type variantInput struct {
 func (v *variantInput) normalize() {
 	if v.VariantID == "" && v.VariantIDC != "" {
 		v.VariantID = v.VariantIDC
+	}
+	if v.VariantID == "" && v.ID != "" {
+		v.VariantID = v.ID
 	}
 	if v.ImageURL == "" && v.ImageURLC != "" {
 		v.ImageURL = v.ImageURLC
@@ -464,6 +468,10 @@ func (a *addSkuRequest) normalize() {
 // fields are optional pointers (only sent keys are applied). When edit_variant
 // is present it patches the single variant it names (variantId); otherwise the
 // body patches the base / baseline override. snake+camel accepted throughout.
+//
+// variants, when the key is present, is the product's NEW FULL variant list:
+// the Saathi console sends the whole array for add, edit and remove alike (an
+// empty array clears every variant). Entries without an id are minted fresh.
 type patchSkuRequest struct {
 	Price        *float64       `json:"price"`
 	InStock      *bool          `json:"in_stock"`
@@ -482,6 +490,7 @@ type patchSkuRequest struct {
 
 	EditVariant  *variantInput `json:"edit_variant"`
 	EditVariantC *variantInput `json:"editVariant"`
+	Variants     []variantInput `json:"variants"`
 }
 
 func (p *patchSkuRequest) normalize() {
@@ -508,6 +517,9 @@ func (p *patchSkuRequest) normalize() {
 	}
 	if p.EditVariant != nil {
 		p.EditVariant.normalize()
+	}
+	for i := range p.Variants {
+		p.Variants[i].normalize()
 	}
 }
 
@@ -549,6 +561,33 @@ func validatePhysical(p *physicalInput) *apiError {
 		return errUnprocessable("INVALID_PHYSICAL", "physical volume/weight must not be negative")
 	}
 	return nil
+}
+
+// variantListToDocs validates a full replacement variant list (PATCH variants[])
+// and materialises it. Two entries naming the same variant id, or carrying the
+// same label, are rejected: the consumer could not tell the two apart.
+func variantListToDocs(in []variantInput) ([]variantDoc, *apiError) {
+	out := make([]variantDoc, 0, len(in))
+	seenID := map[string]struct{}{}
+	seenLabel := map[string]struct{}{}
+	for _, v := range in {
+		if err := validateVariant(v); err != nil {
+			return nil, err
+		}
+		if id := strings.TrimSpace(v.VariantID); id != "" {
+			if _, dup := seenID[id]; dup {
+				return nil, errUnprocessable("DUPLICATE_VARIANT", "variant id "+id+" appears twice")
+			}
+			seenID[id] = struct{}{}
+		}
+		label := strings.ToLower(strings.TrimSpace(v.Label))
+		if _, dup := seenLabel[label]; dup {
+			return nil, errUnprocessable("DUPLICATE_VARIANT", "variant label "+strings.TrimSpace(v.Label)+" appears twice")
+		}
+		seenLabel[label] = struct{}{}
+		out = append(out, variantToDoc(v))
+	}
+	return out, nil
 }
 
 // variantToDoc materialises a validated variantInput into a stored variantDoc,
@@ -1260,8 +1299,18 @@ func (s *service) patchStoreSku(ctx context.Context, actor auth.Actor, storeID, 
 		set = append(set, bson.E{Key: "physical", Value: req.Physical.toDoc()})
 		additionOnly = true
 	}
+	// A present variants key (even an empty array) is the new full list: the
+	// Saathi console adds, edits and removes variants by resending them all.
+	if req.Variants != nil {
+		vdocs, err := variantListToDocs(req.Variants)
+		if err != nil {
+			return nil, err
+		}
+		set = append(set, bson.E{Key: "variants", Value: vdocs})
+		additionOnly = true
+	}
 	if len(set) == 0 {
-		return nil, errBadRequest("nothing to update: set price, stock, hidden, name, category, variant, photo, physical, or edit_variant")
+		return nil, errBadRequest("nothing to update: set price, stock, hidden, name, category, variant, photo, physical, variants, or edit_variant")
 	}
 	if additionOnly {
 		return s.repo.patchExisting(ctx, storeID, skuID, set, actor.PartyID)
