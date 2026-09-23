@@ -100,6 +100,10 @@ type foundingMember struct {
 	BillDay      int    `bson:"bill_day,omitempty"`
 	LastBillDate string `bson:"last_bill_date,omitempty"`
 	BillAttempts int    `bson:"bill_attempts,omitempty"`
+	// LastAttemptDate is the IST day of the last short-wallet attempt: the
+	// worker ticks hourly, and every failed tick on one day is that day's
+	// single attempt, so BillAttempts counts billing DAYS (spec 5.6).
+	LastAttemptDate string `bson:"last_attempt_date,omitempty"`
 	// PerksUntil: after a stop, the last IST day the paid month still covers.
 	PerksUntil string     `bson:"perks_until,omitempty"`
 	StoppedAt  *time.Time `bson:"stopped_at,omitempty"`
@@ -788,9 +792,10 @@ func (s *service) stopFoundingFamily(ctx context.Context, consumerID primitive.O
 
 // billFoundingMembers charges every active member whose bill day has come.
 // Each (member, bill day) is one ledger ref, so a repeated tick or a second
-// replica can never charge a month twice. A short wallet is retried on the
-// following ticks for FoundingBillRetries days, then the membership stops
-// with the perks ending the day before the missed bill.
+// replica can never charge a month twice. A short wallet is retried on every
+// tick, but counted once per IST day (last_attempt_date): the membership
+// stops on the FoundingBillRetries-th distinct short day, with the perks
+// ending the day before the missed bill.
 func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (billed, stopped int) {
 	today := istToday(now)
 	due, err := s.repo.listMembersDueForBilling(ctx, today)
@@ -806,25 +811,37 @@ func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (bille
 			if !errors.As(derr, &ae) || ae.Code != "INSUFFICIENT_FUNDS" {
 				continue // transient: try again next tick
 			}
+			// The worker ticks hourly, but the member is promised three
+			// billing DAYS ("we will try again tomorrow"). Every tick still
+			// tries the debit, so a top-up later today is billed within the
+			// hour, but only the first short tick of an IST day counts.
+			if m.LastAttemptDate == today {
+				continue
+			}
 			attempts := m.BillAttempts + 1
+			// The guard on last_attempt_date makes the day's count exactly
+			// one even when two replicas tick in the same hour.
+			guard := bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate},
+				{Key: "last_attempt_date", Value: bson.D{{Key: "$ne", Value: today}}}}
 			if attempts >= s.deps.Cfg.FoundingBillRetries() {
 				if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
 					bson.D{{Key: "status", Value: memberStopped}, {Key: "stopped_at", Value: now.UTC()},
 						{Key: "stop_reason", Value: "wallet_short"}, {Key: "perks_until", Value: addDaysIST(m.NextBillDate, -1)},
-						{Key: "bill_attempts", Value: attempts}},
-					nil, bson.D{{Key: "status", Value: memberActive}}); upd != nil {
+						{Key: "bill_attempts", Value: attempts}, {Key: "last_attempt_date", Value: today}},
+					nil, guard); upd != nil {
 					stopped++
 				}
 				continue
 			}
-			_, _ = s.repo.updateFoundingMember(ctx, m.ID, bson.D{{Key: "bill_attempts", Value: attempts}}, nil,
-				bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate}})
+			_, _ = s.repo.updateFoundingMember(ctx, m.ID,
+				bson.D{{Key: "bill_attempts", Value: attempts}, {Key: "last_attempt_date", Value: today}}, nil, guard)
 			continue
 		}
 		next := nextBillDate(m.NextBillDate, m.BillDay)
 		if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
 			bson.D{{Key: "last_bill_date", Value: m.NextBillDate}, {Key: "next_bill_date", Value: next}, {Key: "bill_attempts", Value: 0}},
-			nil, bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate}}); upd != nil {
+			bson.D{{Key: "last_attempt_date", Value: ""}},
+			bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate}}); upd != nil {
 			billed++
 		}
 	}

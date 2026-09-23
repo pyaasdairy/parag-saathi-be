@@ -526,3 +526,76 @@ func TestFoundingAdminFarmsUpsert(t *testing.T) {
 		t.Fatalf("seed overwrote a live farm: %+v", f)
 	}
 }
+
+// The billing worker ticks hourly, but a short wallet is retried for three
+// billing DAYS (spec 5.6, "we will try again tomorrow"): every failed tick on
+// one IST day counts as that day's single attempt, and only the third
+// distinct short day stops the membership. A top-up later the same day is
+// still picked up by the next tick.
+func TestFoundingBillingRetriesOncePerDay(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 1)
+	a := w.customer(t, "9000009111", 99)
+	if _, err := w.svc.joinFoundingFamily(ctx, a, "gonard-dairy"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	m, _ := w.svc.repo.findFoundingMember(ctx, a)
+	if m.Status != memberActive {
+		t.Fatalf("a one-seat farm unlocks on the first join: %+v", m)
+	}
+	if _, err := w.db.Collection(collFoundingMembers).UpdateByID(ctx, m.ID, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "next_bill_date", Value: "2026-10-31"}, {Key: "bill_day", Value: 31}}}}); err != nil {
+		t.Fatalf("pin bill date: %v", err)
+	}
+	at := func(day string, hour int) time.Time {
+		d, _ := parseDay(day)
+		return d.Add(time.Duration(hour) * time.Hour)
+	}
+	// Bill day, empty wallet, a full day of hourly ticks: one attempt, still active.
+	for h := 0; h < 24; h++ {
+		if _, stopped := w.svc.billFoundingMembers(ctx, at("2026-10-31", h)); stopped != 0 {
+			t.Fatalf("stopped at %02d:00 on the first short day", h)
+		}
+	}
+	m, _ = w.svc.repo.findFoundingMember(ctx, a)
+	if m.Status != memberActive || m.BillAttempts != 1 {
+		t.Fatalf("after 24 hourly ticks on one day: status=%s attempts=%d, want active and 1", m.Status, m.BillAttempts)
+	}
+	// Day two, hourly again: attempt two, still active.
+	for h := 0; h < 24; h++ {
+		w.svc.billFoundingMembers(ctx, at("2026-11-01", h))
+	}
+	m, _ = w.svc.repo.findFoundingMember(ctx, a)
+	if m.Status != memberActive || m.BillAttempts != 2 {
+		t.Fatalf("after the second short day: status=%s attempts=%d, want active and 2", m.Status, m.BillAttempts)
+	}
+	// Day three: the third distinct short day stops it on its first tick.
+	if _, stopped := w.svc.billFoundingMembers(ctx, at("2026-11-02", 0)); stopped != 1 {
+		t.Fatalf("the third short day must stop the membership")
+	}
+	m, _ = w.svc.repo.findFoundingMember(ctx, a)
+	if m.Status != memberStopped || m.StopReason != "wallet_short" || m.PerksUntil != "2026-10-30" {
+		t.Fatalf("after three short days: %+v", m)
+	}
+
+	// A top-up later on a short day is billed by the next tick, and the
+	// retry count starts again.
+	b := w.customer(t, "9000009112", 0)
+	bm := &foundingMember{ID: primitive.NewObjectID(), ConsumerID: b, FarmID: "gonard-dairy", Status: memberActive,
+		LineNumber: 2, NextBillDate: "2026-10-31", BillDay: 31, Joins: 1}
+	if _, err := w.db.Collection(collFoundingMembers).InsertOne(ctx, bm); err != nil {
+		t.Fatalf("seed member b: %v", err)
+	}
+	w.svc.billFoundingMembers(ctx, at("2026-10-31", 9))
+	if _, err := w.svc.creditTopup(ctx, b, 150, "test", "topup-same-day"); err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+	if billed, _ := w.svc.billFoundingMembers(ctx, at("2026-10-31", 15)); billed != 1 {
+		t.Fatalf("a same-day top-up must be billed by the next tick")
+	}
+	if got, _ := w.svc.repo.findFoundingMember(ctx, b); got.Status != memberActive || got.NextBillDate != "2026-11-30" || got.BillAttempts != 0 || got.LastAttemptDate != "" {
+		t.Fatalf("after the same-day top-up: %+v", got)
+	}
+}
