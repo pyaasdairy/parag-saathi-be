@@ -82,6 +82,10 @@ func newChainWorld(t *testing.T) (*chainWorld, func()) {
 		cancel()
 		t.Fatalf("ensureIndexes: %v", err)
 	}
+	if _, err := repo.ensureSubscriptionDayIndex(ctx); err != nil {
+		cancel()
+		t.Fatalf("ensureSubscriptionDayIndex: %v", err)
+	}
 	svc := newService(d, repo, log)
 	svc.ensureCRMIndexes(ctx)
 

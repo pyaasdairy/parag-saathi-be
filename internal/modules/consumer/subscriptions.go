@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -188,6 +189,120 @@ func (r *repository) ensureSubscriptionIndexes(ctx context.Context) error {
 	}
 	_, err := r.subscriptions.Indexes().CreateMany(ctx, specs)
 	return err
+}
+
+// subscriptionDayIndexName is the DB backstop behind claimSubscriptionDay: at
+// most ONE live order per (subscription, day). The claim is what stops a
+// second order on the happy path; the index is what stops it when two workers
+// both believed they won (a pre-check read racing the other's insert, a
+// replica whose claim update was lost). Partial on two counts: it applies only
+// to rows that carry a subscription_id (one-off orders never collide), and
+// only to LIVE statuses. The status clause is load-bearing: a pause before
+// midnight cancels tomorrow's preview and releases the day, and the resume
+// schedules that day again - a second row with the same key beside the
+// cancelled one, which a full-key index would refuse and the resumed member
+// would get no milk. ($in inside a partial filter needs MongoDB 6.0+; an older
+// server refuses the build, the boot logs it and the claim stays the guard.)
+const subscriptionDayIndexName = "subscription_day_unique"
+
+// subscriptionLiveStatuses are the statuses the day index covers: everything
+// an order holds between placement and delivery. "cancelled" is the one
+// status left out, on purpose (see subscriptionDayIndexName).
+var subscriptionLiveStatuses = bson.A{"placed", "confirmed", "assigned", "out_for_delivery", "delivered"}
+
+// ensureSubscriptionDayIndex builds the (subscription_id, scheduled_for)
+// unique index. When the build is refused because rows from before the index
+// already collide, dups is how many (subscription, day) pairs hold more than
+// one live order - what an operator has to clean up before the backstop can
+// exist - and err is the refusal. Never fatal for the caller: the insert path
+// stays protected by claimSubscriptionDay either way.
+func (r *repository) ensureSubscriptionDayIndex(ctx context.Context) (dups int64, err error) {
+	_, err = r.orders.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "subscription_id", Value: 1}, {Key: "scheduled_for", Value: 1}},
+		Options: options.Index().SetName(subscriptionDayIndexName).SetUnique(true).
+			SetPartialFilterExpression(bson.D{
+				{Key: "subscription_id", Value: bson.D{{Key: "$exists", Value: true}}},
+				{Key: "status", Value: bson.D{{Key: "$in", Value: subscriptionLiveStatuses}}},
+			}),
+	})
+	if err == nil {
+		return 0, nil
+	}
+	if !mongo.IsDuplicateKeyError(err) {
+		return 0, err
+	}
+	dups, cerr := r.countSubscriptionDayDuplicates(ctx)
+	if cerr != nil {
+		return 0, fmt.Errorf("%w (duplicate count failed: %v)", err, cerr)
+	}
+	return dups, err
+}
+
+// countSubscriptionDayDuplicates counts the (subscription, day) pairs holding
+// more than one live order - the rows the day index refuses to be built over.
+func (r *repository) countSubscriptionDayDuplicates(ctx context.Context) (int64, error) {
+	cur, err := r.orders.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "subscription_id", Value: bson.D{{Key: "$exists", Value: true}}},
+			{Key: "status", Value: bson.D{{Key: "$in", Value: subscriptionLiveStatuses}}},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{{Key: "sub", Value: "$subscription_id"}, {Key: "day", Value: "$scheduled_for"}}},
+			{Key: "n", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$match", Value: bson.D{{Key: "n", Value: bson.D{{Key: "$gt", Value: 1}}}}}},
+		{{Key: "$count", Value: "pairs"}},
+	})
+	if err != nil {
+		return 0, err
+	}
+	defer cur.Close(ctx)
+	var out []struct {
+		Pairs int64 `bson:"pairs"`
+	}
+	if err := cur.All(ctx, &out); err != nil {
+		return 0, err
+	}
+	if len(out) == 0 {
+		return 0, nil
+	}
+	return out[0].Pairs, nil
+}
+
+// insertSubscriptionOrderDoc inserts one subscription day's order. placed is
+// false, with a nil error, when the day index already holds a live order for
+// this (subscription, day): another worker placed it first, and "already
+// placed today" is the whole outcome - no error, no second order. Any other
+// duplicate (the order_id index) or failure is reported as insertOrder does.
+func (r *repository) insertSubscriptionOrderDoc(ctx context.Context, o *order) (placed bool, err error) {
+	if _, err := r.orders.InsertOne(ctx, o); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			if strings.Contains(err.Error(), "index: "+subscriptionDayIndexName) {
+				return false, nil
+			}
+			return false, errConflict("ORDER_EXISTS", "order already exists")
+		}
+		return false, errInternal("order create failed")
+	}
+	return true, nil
+}
+
+// findLiveSubscriptionOrder returns the one live order for (subscription,
+// day), or (nil, nil) when there is none.
+func (r *repository) findLiveSubscriptionOrder(ctx context.Context, subID, day string) (*order, error) {
+	var o order
+	err := r.orders.FindOne(ctx, bson.D{
+		{Key: "subscription_id", Value: subID},
+		{Key: "scheduled_for", Value: day},
+		{Key: "status", Value: bson.D{{Key: "$in", Value: subscriptionLiveStatuses}}},
+	}).Decode(&o)
+	if isNoDocs(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errInternal("subscription order lookup failed")
+	}
+	return &o, nil
 }
 
 func (r *repository) insertSubscription(ctx context.Context, s *subscription) error {
@@ -616,8 +731,21 @@ func (s *service) insertSubscriptionOrder(ctx context.Context, sub *subscription
 	if locked {
 		o.SubLockedAt = now.Format(time.RFC3339)
 	}
-	if err := s.repo.insertOrder(ctx, o); err != nil {
+	placed, err := s.repo.insertSubscriptionOrderDoc(ctx, o)
+	if err != nil {
 		return nil, err
+	}
+	if !placed {
+		// The day index refused a second live order for this day: another
+		// worker's insert won after both passed the claim. Its order IS the
+		// day's order - nothing else (task, last_order_id) is repeated here.
+		existing, ferr := s.repo.findLiveSubscriptionOrder(ctx, sub.SubscriptionID, day)
+		if ferr != nil {
+			return nil, ferr
+		}
+		s.log.InfoContext(ctx, "subscription day already placed - duplicate insert dropped",
+			"subscription", sub.SubscriptionID, "day", day)
+		return existing, nil
 	}
 	if locked {
 		s.createDeliveryForOrder(ctx, o)

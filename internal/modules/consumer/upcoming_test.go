@@ -44,8 +44,13 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	// (b) a locked subscription day already has a task: not upcoming.
-	live, err := w.svc.insertSubscriptionOrder(ctx, sub, &addrs[0], tomorrow, true, time.Now())
+	// (b) a locked subscription day already has a task: not upcoming. Its
+	// own subscription: one live order per (subscription, day) is the
+	// invariant the day index enforces, and a preview is locked in place,
+	// never re-inserted beside itself.
+	sub2 := *sub
+	sub2.SubscriptionID = "sub_upcoming_2"
+	live, err := w.svc.insertSubscriptionOrder(ctx, &sub2, &addrs[0], tomorrow, true, time.Now())
 	if err != nil {
 		t.Fatalf("locked: %v", err)
 	}

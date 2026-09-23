@@ -34,6 +34,16 @@ func Register(r chi.Router, d *deps.Deps) {
 		log.Error("consumer index setup failed — refusing to boot", slog.Any("err", err))
 		panic("consumer: index setup failed: " + err.Error())
 	}
+	// Subscription-day backstop (subscriptions.go): Mongo refuses a second
+	// live order for one (subscription, day) underneath the day-claim
+	// pre-check. Deliberately NON-fatal: rows from before the index can
+	// collide, and a boot without the backstop still has the claim, while a
+	// boot refused over history nobody has cleaned up yet has no morning
+	// orders at all. The count says how many pairs to clean up.
+	if dups, err := repo.ensureSubscriptionDayIndex(ctx); err != nil {
+		log.Error("subscription day unique index not built - the day-claim pre-check is the only guard until the duplicates are cleaned up",
+			slog.Int64("duplicate_days", dups), slog.Any("err", err))
+	}
 	// Rider-console indexes (rider_ops.go). Deliberately NON-fatal, unlike the
 	// money-gate indexes above: these are query indexes plus the unique
 	// (rider, day) attendance guard. A transient failure here degrades the
