@@ -16,31 +16,24 @@
 package consumer
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/pyaas/saathi-backend/internal/platform/push"
 )
 
-const crmExpoPushEndpoint = "https://exp.host/--/api/v2/push/send"
-
 type pushChannel struct {
-	enabled     bool
-	accessToken string // EXPO_ACCESS_TOKEN, optional (Expo push security)
-	baseURL     string // crmExpoPushEndpoint; a struct field so tests point it at httptest
-	client      *http.Client
-	repo        *repository
-	log         *slog.Logger
+	expo *push.Expo // the pipe (internal/platform/push); knows nothing of members or templates
+	repo *repository
+	log  *slog.Logger
 	// consumerID binds one dispatch. The crmTransport seam hands a transport
 	// the member's phone; push needs the member's device rows instead, so
 	// crmDispatchAt binds a per-dispatch copy (bind) and the shared instance
@@ -55,18 +48,15 @@ var _ crmTransport = (*pushChannel)(nil)
 // exactly "true" -> disabled, and the dispatcher never resolves it.
 func newPushChannel(log *slog.Logger, repo *repository) *pushChannel {
 	return &pushChannel{
-		enabled:     os.Getenv("EXPO_PUSH_ENABLED") == "true",
-		accessToken: strings.TrimSpace(os.Getenv("EXPO_ACCESS_TOKEN")),
-		baseURL:     crmExpoPushEndpoint,
-		client:      &http.Client{Timeout: 10 * time.Second},
-		repo:        repo,
-		log:         log,
+		expo: push.New(os.Getenv("EXPO_PUSH_ENABLED") == "true", os.Getenv("EXPO_ACCESS_TOKEN")),
+		repo: repo,
+		log:  log,
 	}
 }
 
 func (c *pushChannel) Name() string { return "push" }
 
-func (c *pushChannel) Enabled() bool { return c != nil && c.enabled }
+func (c *pushChannel) Enabled() bool { return c != nil && c.expo.Enabled() }
 
 // bind returns a copy of the transport that delivers to one member's devices.
 func (c *pushChannel) bind(consumerID primitive.ObjectID) *pushChannel {
@@ -125,6 +115,16 @@ func crmPushAndroidChannel(t crmTrigger) string {
 	return "orders"
 }
 
+// crmPushPriority: the order lifecycle must reach a dozing handset now
+// (Expo "high" wakes the device the way the app's HIGH-importance orders
+// channel does); an offer may wait for the next batch window.
+func crmPushPriority(t crmTrigger) string {
+	if t.Category == "promotional" {
+		return "normal"
+	}
+	return "high"
+}
+
 // expoPushTokens lists a member's Expo tokens, newest first (a handset that
 // changed hands re-registers under its new owner, so the row's owner is the
 // truth). Only expo-provider rows in Expo's token format are sent.
@@ -151,15 +151,6 @@ func (r *repository) expoPushTokens(ctx context.Context, consumerID primitive.Ob
 // dropPushToken forgets a token Expo says no device holds any more.
 func (r *repository) dropPushToken(ctx context.Context, token string) {
 	_, _ = r.pushDevices().DeleteOne(ctx, bson.D{{Key: "token", Value: token}})
-}
-
-// expoPushReceipt is one entry of the push service's per-message answer.
-type expoPushReceipt struct {
-	Status  string `json:"status"` // ok | error
-	Message string `json:"message"`
-	Details struct {
-		Error string `json:"error"` // DeviceNotRegistered, MessageTooBig, ...
-	} `json:"details"`
 }
 
 // deliver posts one message per registered device. The phone argument is
@@ -189,58 +180,27 @@ func (c *pushChannel) deliver(ctx context.Context, _ string, t crmTrigger, tpl c
 	if v := params["COMPLAINT_ID"]; v != "" {
 		data["complaint_id"] = v
 	}
-	msgs := make([]map[string]any, 0, len(tokens))
+	msgs := make([]push.Message, 0, len(tokens))
 	for _, tok := range tokens {
-		msgs = append(msgs, map[string]any{
-			"to": tok, "title": "PYAAS", "body": body, "sound": "default",
-			"channelId": crmPushAndroidChannel(t), "data": data,
+		msgs = append(msgs, push.Message{
+			To: tok, Title: "PYAAS", Body: body, Sound: "default",
+			ChannelID: crmPushAndroidChannel(t), Priority: crmPushPriority(t), Data: data,
 		})
 	}
-	b, err := json.Marshal(msgs)
+	tickets, err := c.expo.Send(ctx, msgs)
 	if err != nil {
-		return fmt.Errorf("push: marshal: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(b))
-	if err != nil {
-		return fmt.Errorf("push: build request: %w", err)
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("accept", "application/json")
-	if c.accessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.accessToken)
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("push: request failed: %v: %w", err, errCRMTransient)
-	}
-	defer resp.Body.Close()
-	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("push: provider unavailable (status %d): %s: %w", resp.StatusCode, rb, errCRMTransient)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("push: send rejected (status %d): %s", resp.StatusCode, rb)
-	}
-	var out struct {
-		Data   []expoPushReceipt `json:"data"`
-		Errors []struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(rb, &out); err != nil {
-		return fmt.Errorf("push: unreadable answer: %s", rb)
-	}
-	if len(out.Errors) > 0 {
-		return fmt.Errorf("push: send rejected: %s %s", out.Errors[0].Code, out.Errors[0].Message)
+		if errors.Is(err, push.ErrUnavailable) {
+			return fmt.Errorf("%v: %w", err, errCRMTransient)
+		}
+		return err
 	}
 	accepted := 0
-	for i, r := range out.Data {
-		if r.Status == "ok" {
+	for i, tk := range tickets {
+		if tk.OK {
 			accepted++
 			continue
 		}
-		if r.Details.Error == "DeviceNotRegistered" && i < len(tokens) {
+		if tk.DeviceNotRegistered() && i < len(tokens) {
 			c.repo.dropPushToken(ctx, tokens[i])
 			if c.log != nil {
 				c.log.Info("crm: push token dropped, device no longer registered", "trigger", t.ID)
@@ -248,7 +208,7 @@ func (c *pushChannel) deliver(ctx context.Context, _ string, t crmTrigger, tpl c
 			continue
 		}
 		if c.log != nil {
-			c.log.Warn("crm: push device refused", "trigger", t.ID, "error", r.Details.Error, "message", r.Message)
+			c.log.Warn("crm: push device refused", "trigger", t.ID, "error", tk.Error, "message", tk.Message)
 		}
 	}
 	if accepted == 0 {

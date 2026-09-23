@@ -17,7 +17,16 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
+
+	"github.com/pyaas/saathi-backend/internal/platform/push"
 )
+
+// testPushChannel binds a transport to an httptest Expo.
+func testPushChannel(url string, accessToken string, w *chainWorld) *pushChannel {
+	e := push.New(true, accessToken)
+	e.SetEndpoint(url)
+	return &pushChannel{expo: e, repo: w.svc.repo, log: w.svc.log}
+}
 
 func TestCRMPushHelpers(t *testing.T) {
 	if crmPushHref(map[string]string{"ORDER_ID": "ord_9"}) != "/order/ord_9" ||
@@ -50,11 +59,14 @@ func TestCRMPushHelpers(t *testing.T) {
 	if !newPushChannel(nil, nil).Enabled() {
 		t.Fatal("EXPO_PUSH_ENABLED=true must enable push")
 	}
-	if got := (&service{crmPush: &pushChannel{enabled: true}}).crmTransports(); got == nil || got["push"] == nil {
+	if got := (&service{crmPush: &pushChannel{expo: push.New(true, "")}}).crmTransports(); got == nil || got["push"] == nil {
 		t.Fatalf("enabled push must be a transport, got %v", got)
 	}
-	if err := (&pushChannel{enabled: true}).available(crmTrigger{}, crmTemplate{EN: "x"}); err == nil {
+	if err := (&pushChannel{expo: push.New(true, "")}).available(crmTrigger{}, crmTemplate{EN: "x"}); err == nil {
 		t.Fatal("an unbound push transport must report unavailable")
+	}
+	if crmPushPriority(crmTrigger{Category: "promotional"}) != "normal" || crmPushPriority(crmTrigger{Section: "D"}) != "high" {
+		t.Fatal("crmPushPriority: offers normal, everything else high")
 	}
 }
 
@@ -78,7 +90,7 @@ func TestCRMPushDeliversAndFallsThrough(t *testing.T) {
 		rw.Write([]byte(answer))
 	}))
 	defer srv.Close()
-	w.svc.crmPush = &pushChannel{enabled: true, baseURL: srv.URL, client: srv.Client(), repo: w.svc.repo, log: w.svc.log}
+	w.svc.crmPush = testPushChannel(srv.URL, "", w)
 
 	cid := w.customer(t, "9000007110", 0)
 	const tok = "ExponentPushToken[cccccccccccccccccccccc]"
@@ -103,7 +115,7 @@ func TestCRMPushDeliversAndFallsThrough(t *testing.T) {
 		t.Fatalf("expo calls: %+v", got)
 	}
 	m := got[0].msgs[0]
-	if m["to"] != tok || m["title"] != "PYAAS" || m["channelId"] != "delivery" ||
+	if m["to"] != tok || m["title"] != "PYAAS" || m["channelId"] != "delivery" || m["priority"] != "high" || m["sound"] != "default" ||
 		m["body"] != "Delivered ✅ "+label+". Enjoy! Tap to rate." {
 		t.Fatalf("expo message: %v", m)
 	}
@@ -147,7 +159,7 @@ func TestCRMPushDeliversAndFallsThrough(t *testing.T) {
 
 	// (4) The access token rides as a Bearer header; a provider 5xx is
 	// transient (no fallback, inbox only); a non-expo token is never sent.
-	w.svc.crmPush.accessToken = "expo-secret"
+	w.svc.crmPush = testPushChannel(srv.URL, "expo-secret", w)
 	answer = `{"data":[{"status":"ok","id":"r2"}]}`
 	other := w.customer(t, "9000007111", 0)
 	if err := w.svc.registerPushDevice(ctx, other, pushRegisterInput{Token: "ExpoPushToken[dddddddddddddddddddddd]", Platform: "ios", Provider: "expo"}); err != nil {
@@ -169,10 +181,33 @@ func TestCRMPushDeliversAndFallsThrough(t *testing.T) {
 	})
 	dead := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { rw.WriteHeader(503) }))
 	defer dead.Close()
-	bound := (&pushChannel{enabled: true, baseURL: dead.URL, client: dead.Client(), repo: w.svc.repo}).bind(other)
+	bound := testPushChannel(dead.URL, "", w).bind(other)
 	delivered := crmDeliverExternal(ctx, testQuietLog, "919000007111", tr, crmTemplate{EN: "Order confirmed", HI: "Order confirm"},
 		map[string]string{}, map[string]crmTransport{"push": bound, "sms": sms})
 	if len(delivered) != 0 || *smsHits != 0 {
 		t.Fatalf("a transient push failure must not fall back to sms: %v hits=%d", delivered, *smsHits)
+	}
+
+	// (5) EXPO_PUSH_ENABLED unset: the transport built from env is not
+	// plugged in, so a member WITH a registered device still gets only the
+	// inbox and nothing leaves the building. Byte-identical to before C5.
+	t.Setenv("EXPO_PUSH_ENABLED", "")
+	w.svc.crmPush = newPushChannel(w.svc.log, w.svc.repo)
+	third := w.customer(t, "9000007112", 0)
+	if err := w.svc.registerPushDevice(ctx, third, pushRegisterInput{Token: "ExponentPushToken[eeeeeeeeeeeeeeeeeeeeee]", Platform: "android", Provider: "expo"}); err != nil {
+		t.Fatalf("register third: %v", err)
+	}
+	calls = len(got)
+	if st, _ := w.svc.crmDispatch(ctx, "D-06", third, params); st != "SENT" {
+		t.Fatalf("D-06 env unset: %q", st)
+	}
+	if len(got) != calls {
+		t.Fatal("with EXPO_PUSH_ENABLED unset no Expo call may be made")
+	}
+	if err := w.db.Collection(collCRMDispatch).FindOne(ctx, bson.D{{Key: "consumer_id", Value: third}, {Key: "trigger_id", Value: "D-06"}}).Decode(&row); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if row.Channel != "inapp" || row.Intended != "push" {
+		t.Fatalf("env unset: channel=%q intended=%q, want inapp/push", row.Channel, row.Intended)
 	}
 }
