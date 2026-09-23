@@ -835,6 +835,17 @@ func (s *service) createAddress(ctx context.Context, consumerID primitive.Object
 		Tower: strings.TrimSpace(in.Tower), Floor: in.Floor, Unit: strings.TrimSpace(in.Unit),
 		Preferences: in.preferencesOf(), CreatedAt: now,
 	}
+	existing, listErr := s.repo.listAddresses(ctx, consumerID)
+	// A create for an address the member already holds is a replay (the app
+	// queues an address it could not send and posts it again later, when the
+	// server may already have it): answer with the stored row, untouched.
+	if listErr == nil {
+		for i := range existing {
+			if sameAddressReplay(&existing[i], a) {
+				return &existing[i], nil
+			}
+		}
+	}
 	// Serving-store resolution seam (§6): resolve address geo → store polygon.
 	// Kept as a pilot stub — the store registry lands in Phase 2.
 	if in.IsDefault {
@@ -843,7 +854,7 @@ func (s *service) createAddress(ctx context.Context, consumerID primitive.Object
 		}
 	} else {
 		// First address is default by default.
-		if existing, err := s.repo.listAddresses(ctx, consumerID); err == nil && len(existing) == 0 {
+		if listErr == nil && len(existing) == 0 {
 			a.IsDefault = true
 		}
 	}
@@ -851,6 +862,33 @@ func (s *service) createAddress(ctx context.Context, consumerID primitive.Object
 		return nil, err
 	}
 	return a, nil
+}
+
+// addressReplayRadiusM is how far apart two pins of one address may be: a
+// re-dropped pin on the same door lands within a few metres.
+const addressReplayRadiusM = 5.0
+
+// sameAddressReplay reports whether a new address describes one the member
+// already holds: the same label (trimmed, case-insensitive), the same
+// structured door (a different flat in the same tower shares the pin, so the
+// door must match), and either both pins within addressReplayRadiusM or, with
+// no pin on either side, the same text. A pin on one side only is a
+// different capture and never matches.
+func sameAddressReplay(have, in *address) bool {
+	norm := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+	if norm(have.Label) != norm(in.Label) || !sameDoor(have, in) {
+		return false
+	}
+	havePin := have.Lat != nil && have.Lng != nil
+	inPin := in.Lat != nil && in.Lng != nil
+	switch {
+	case havePin && inPin:
+		return haversineM(geoPt{Lat: *have.Lat, Lng: *have.Lng}, geoPt{Lat: *in.Lat, Lng: *in.Lng}) <= addressReplayRadiusM
+	case !havePin && !inPin:
+		return norm(have.Line1) == norm(in.Line1) && norm(have.Line2) == norm(in.Line2) &&
+			norm(have.City) == norm(in.City) && norm(have.Pincode) == norm(in.Pincode)
+	}
+	return false
 }
 
 func (s *service) makeDefault(ctx context.Context, consumerID, addrID primitive.ObjectID) (*address, error) {
