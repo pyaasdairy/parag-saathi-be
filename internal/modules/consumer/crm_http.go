@@ -48,6 +48,10 @@ type inboxItemView struct {
 	CTA       string     `json:"cta,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	ReadAt    *time.Time `json:"read_at,omitempty"`
+	// The order / complaint the message is about, when it is about one; the
+	// app pairs its local notice with this row by them (additive, omitempty).
+	OrderID      string `json:"order_id,omitempty"`
+	ComplaintRef string `json:"complaint_ref,omitempty"`
 }
 
 func (h *handler) crmInbox(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +80,8 @@ func (h *handler) crmInbox(w http.ResponseWriter, r *http.Request) {
 		CTA       string             `bson:"cta"`
 		CreatedAt time.Time          `bson:"created_at"`
 		ReadAt    *time.Time         `bson:"read_at"`
+		OrderID   string             `bson:"order_id"`
+		Complaint string             `bson:"complaint_ref"`
 	}
 	if err := cur.All(r.Context(), &rows); err != nil {
 		writeErr(w, errInternal("inbox decode failed"))
@@ -87,6 +93,7 @@ func (h *handler) crmInbox(w http.ResponseWriter, r *http.Request) {
 			ID: m.ID.Hex(), TriggerID: m.TriggerID, Category: m.Category,
 			BodyEN: m.BodyEN, BodyHI: m.BodyHI, CTA: m.CTA,
 			CreatedAt: m.CreatedAt, ReadAt: m.ReadAt,
+			OrderID: m.OrderID, ComplaintRef: m.Complaint,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

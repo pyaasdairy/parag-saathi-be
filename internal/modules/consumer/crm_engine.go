@@ -551,11 +551,32 @@ type crmChannel interface {
 	Send(ctx context.Context, s *service, consumerID primitive.ObjectID, t crmTrigger, tpl crmTemplate, params map[string]string) error
 }
 
-type inappChannel struct{}
+// inappChannel writes the consumer inbox row. OrderID and ComplaintRef name
+// the product event the row is about (crmInboxRefs), so the app can pair its
+// own local notice with this row exactly; both empty on a scheduled trigger.
+type inappChannel struct {
+	OrderID      string
+	ComplaintRef string
+}
+
+// crmInboxRefs reads the order id and the complaint ref out of an event
+// payload. "ref" is a complaint ref only on a complaint event (one carrying
+// complaint_id): a wallet event's ref is a ledger key and stays off the row.
+func crmInboxRefs(payload map[string]any) inappChannel {
+	str := func(k string) string {
+		v, _ := payload[k].(string)
+		return strings.TrimSpace(v)
+	}
+	ch := inappChannel{OrderID: str("order_id")}
+	if str("complaint_id") != "" {
+		ch.ComplaintRef = str("ref")
+	}
+	return ch
+}
 
 func (inappChannel) Name() string { return "inapp" }
 
-func (inappChannel) Send(ctx context.Context, s *service, consumerID primitive.ObjectID, t crmTrigger, tpl crmTemplate, params map[string]string) error {
+func (c inappChannel) Send(ctx context.Context, s *service, consumerID primitive.ObjectID, t crmTrigger, tpl crmTemplate, params map[string]string) error {
 	bodyEN := crmRender(tpl.EN, params)
 	bodyHI := crmRender(tpl.HI, params)
 	if tpl.HIDev != "" {
@@ -571,6 +592,12 @@ func (inappChannel) Send(ctx context.Context, s *service, consumerID primitive.O
 		{Key: "cta", Value: tpl.CTA},
 		{Key: "created_at", Value: time.Now().UTC()},
 		{Key: "read_at", Value: nil},
+	}
+	if c.OrderID != "" {
+		doc = append(doc, bson.E{Key: "order_id", Value: c.OrderID})
+	}
+	if c.ComplaintRef != "" {
+		doc = append(doc, bson.E{Key: "complaint_ref", Value: c.ComplaintRef})
 	}
 	_, err := s.repo.accounts.Database().Collection(collConsumerInbox).InsertOne(ctx, doc)
 	return err
@@ -656,7 +683,7 @@ func (s *service) crmDispatchWith(ctx context.Context, triggerID string, consume
 	// rows are byte-identical to Phase A.
 	// (No log on an inbox failure — HEAD had none, and the keys-unset path must
 	// stay byte-identical; the SUPPRESSED G9 row below is the audit record.)
-	ch := inappChannel{}
+	ch := crmInboxRefs(opts.Payload)
 	delivered := make([]string, 0, 3)
 	// A trigger a person answers (crmHumanOnly, E-05) has no template and
 	// must never auto-respond, so it writes no inbox row.
