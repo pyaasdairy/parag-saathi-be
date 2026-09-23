@@ -975,11 +975,18 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 		for i := range due {
 			o := &due[i]
 			sub, _ := s.repo.findSubscriptionByID(ctx, o.SubscriptionID)
-			if sub == nil || !subscriptionDueOn(sub, o.ScheduledFor) {
-				s.cancelScheduledSubOrder(ctx, o)
-				continue
+			// The tick runs every 15 minutes, so it can reach a day after
+			// its lock moment has passed. A member change stamped after that
+			// moment belongs to the next editable day (the noon rule), so
+			// the preview locks as it stands: no cancel, no refresh.
+			asPreviewed := sub != nil && !sub.subChangedBefore(lockMomentFor(o.ScheduledFor))
+			if !asPreviewed {
+				if sub == nil || !subscriptionDueOn(sub, o.ScheduledFor) {
+					s.cancelScheduledSubOrder(ctx, o)
+					continue
+				}
+				o = s.refreshSubOrder(ctx, o, sub)
 			}
-			o = s.refreshSubOrder(ctx, o, sub)
 			if wv, werr := s.wallet(ctx, sub.ConsumerID); werr != nil || wv.Available < o.Total {
 				continue
 			}

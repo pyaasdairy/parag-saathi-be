@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // chainBackdateSubscription moves a plan's member-change moment to `at` (in
@@ -468,5 +469,88 @@ func TestMissedLockedOrdersAreClosedBySweep(t *testing.T) {
 	// order as terminal (cancelled).
 	if o := liveSubOrder(t, w, "sub_missed_a", Dm2); o != nil {
 		t.Fatalf("a missed order still reads as live: %+v", o)
+	}
+}
+
+// The LOCK step keeps the cut-off even when the tick runs late: the sweep
+// ticks every 15 minutes, so the first tick after noon can run at 12:15. A
+// pause or a qty edit made at 12:05 is after tomorrow's lock moment and
+// must not reach tomorrow (the preview locks as it stands), while a pause
+// made at 11:55 still cancels tomorrow on that same 12:15 tick.
+func TestNoonLockStepIgnoresEditsAfterTheCutOff(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1 := addDaysIST(D, 1)
+	type patch = struct {
+		Qty          *int             `json:"qty"`
+		Frequency    *string          `json:"frequency"`
+		DeliverySlot *string          `json:"delivery_slot"`
+		StartDate    *string          `json:"start_date"`
+		Vacations    *[]vacationRange `json:"vacations"`
+	}
+	plan := func(phone string) (*subscription, primitive.ObjectID) {
+		cid := w.customer(t, phone, 5000)
+		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		if err != nil {
+			t.Fatalf("createSubscription: %v", err)
+		}
+		chainBackdateSubscription(t, w, sub, istDayAt(D, 8, 0))
+		return sub, cid
+	}
+	paused, pausedCID := plan("9000010101")
+	edited, editedCID := plan("9000010102")
+	early, earlyCID := plan("9000010103")
+
+	// 09:00: tomorrow is previewed for all three.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+	previews := map[string]*order{}
+	for _, s := range []*subscription{paused, edited, early} {
+		if previews[s.SubscriptionID] = liveSubOrder(t, w, s.SubscriptionID, D1); previews[s.SubscriptionID] == nil {
+			t.Fatalf("no preview for %s", s.SubscriptionID)
+		}
+	}
+
+	// 11:55: one member pauses before the cut-off.
+	if _, err := w.svc.setSubscriptionStatus(ctx, earlyCID, early.SubscriptionID, "pause"); err != nil {
+		t.Fatalf("pause 11:55: %v", err)
+	}
+	chainStampChange(t, w, early.SubscriptionID, istDayAt(D, 11, 55))
+	// 12:05: one pauses and one doubles the qty, after the cut-off, and no
+	// tick has run since 09:00.
+	if _, err := w.svc.setSubscriptionStatus(ctx, pausedCID, paused.SubscriptionID, "pause"); err != nil {
+		t.Fatalf("pause 12:05: %v", err)
+	}
+	chainStampChange(t, w, paused.SubscriptionID, istDayAt(D, 12, 5))
+	two := 2
+	if _, err := w.svc.patchSubscription(ctx, editedCID, edited.SubscriptionID, patch{Qty: &two}); err != nil {
+		t.Fatalf("patch 12:05: %v", err)
+	}
+	chainStampChange(t, w, edited.SubscriptionID, istDayAt(D, 12, 5))
+
+	// 12:15: the first tick after noon.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 15))
+	for _, s := range []*subscription{paused, edited} {
+		o := liveSubOrder(t, w, s.SubscriptionID, D1)
+		if o == nil || o.OrderID != previews[s.SubscriptionID].OrderID || o.SubLockedAt == "" {
+			t.Fatalf("a change at 12:05 reached tomorrow for %s: %+v", s.SubscriptionID, o)
+		}
+		if o.Items[0].Qty != 1 || o.Total != previews[s.SubscriptionID].Total {
+			t.Fatalf("tomorrow must deliver as previewed for %s: %+v total %v", s.SubscriptionID, o.Items, o.Total)
+		}
+		if d, _ := w.svc.repo.findDeliveryByOrder(ctx, o.OrderID); d == nil {
+			t.Fatalf("the locked order has no store task for %s", s.SubscriptionID)
+		}
+	}
+	if o := liveSubOrder(t, w, early.SubscriptionID, D1); o != nil {
+		t.Fatalf("a pause at 11:55 must still cancel tomorrow: %+v", o)
+	}
+	// The 12:05 changes do reach the day after tomorrow.
+	if o := liveSubOrder(t, w, paused.SubscriptionID, addDaysIST(D, 2)); o != nil {
+		t.Fatalf("the 12:05 pause must take the day after tomorrow: %+v", o)
+	}
+	if o := liveSubOrder(t, w, edited.SubscriptionID, addDaysIST(D, 2)); o == nil || o.Items[0].Qty != 2 {
+		t.Fatalf("the 12:05 edit must reach the day after tomorrow: %+v", o)
 	}
 }
