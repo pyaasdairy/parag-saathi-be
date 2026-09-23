@@ -133,7 +133,11 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	if err != nil || tr.Phase != trialPhaseDone {
 		t.Fatalf("trial not exhausted at enrol: phase=%v err=%v", tr.Phase, err)
 	}
-	// W-01 landed in the in-app inbox.
+	// W-01 lands in the in-app inbox from the WORKER, not the enrol request.
+	if n := inboxCount(t, db, cid, "W-01"); n != 0 {
+		t.Fatalf("W-01 inbox rows before the worker = %d, want 0", n)
+	}
+	svc.crmProcessEvents(ctx)
 	if n := inboxCount(t, db, cid, "W-01"); n != 1 {
 		t.Fatalf("W-01 inbox rows = %d, want 1", n)
 	}

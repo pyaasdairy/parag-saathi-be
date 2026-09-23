@@ -780,6 +780,9 @@ func (s *service) crmRouteEvent(ctx context.Context, ev crmEvent) error {
 	case "wallet.recharge_settled":
 		amt, _ := ev.Payload["amount"].(float64)
 		return s.crmOnRechargeSettled(ctx, ev.ConsumerID, amt)
+	case "offer.finalized":
+		// W-01 off the HTTP request (crmEnrolCore emits, the worker sends).
+		s.crmDispatch(ctx, "W-01", ev.ConsumerID, map[string]string{})
 	case "waitlist.joined":
 		// Recorded for analytics only. The W-08 message ships in Phase B over
 		// SMS with its own rate limits — the join endpoint is UNAUTHENTICATED,

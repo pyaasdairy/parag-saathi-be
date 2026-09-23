@@ -567,8 +567,14 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 			s.emitCRMEvent(ctx, "abuse_flag_raised", acct.ID, map[string]any{"rule": "address_match", "entity": "offer"})
 		}
 	}
-	// W-01 — welcome confirmation; the dispatch-log claim dedupes a resume.
-	s.crmDispatch(ctx, "W-01", acct.ID, map[string]string{})
+	// W-01 — welcome confirmation. Dispatched by the WORKER (crmRouteEvent),
+	// never on the request: the SMS leg is a 10 s provider call, and an app
+	// that backgrounded mid-enrol used to strand the row at CLAIMED with the
+	// day's claim burned. Emitted on EVERY won finalize (a resume too); the
+	// dispatch-log claim dedupes.
+	s.emitCRMEvent(ctx, "offer.finalized", acct.ID, map[string]any{
+		"offer_id": offerWelcomeLitre, "source": source,
+	})
 
 	return &crmEnrolResult{
 		ConsumerID: acct.ID.Hex(), OfferID: offerWelcomeLitre,
