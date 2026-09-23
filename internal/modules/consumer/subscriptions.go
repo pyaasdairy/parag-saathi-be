@@ -550,6 +550,23 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 	if err := s.repo.insertSubscription(ctx, sub); err != nil {
 		return nil, err
 	}
+	// CRM (inert unless CRM_ENABLED): subscription.activated (A-03) for
+	// every plan the app creates, and subscription.created_unpaid (A-05)
+	// when the wallet cannot cover its first delivery day. The campaign's
+	// own plan (crmCreateSubscription) is announced by W-01 instead.
+	if crmEnabled() {
+		s.emitCRMEvent(ctx, "subscription.activated", consumerID, map[string]any{
+			"subscription_id": sub.SubscriptionID, "product_id": sub.ProductID, "qty": sub.Qty,
+			"frequency": sub.Frequency, "start_date": sub.StartDate,
+			"start_label": crmSubscriptionStartLabel(sub, now),
+		})
+		cycle := round2(sub.UnitPrice*float64(sub.Qty)) + subscriptionDeliveryFee
+		if wv, werr := s.wallet(ctx, consumerID); werr == nil && wv.Available < cycle {
+			s.emitCRMEvent(ctx, "subscription.created_unpaid", consumerID, map[string]any{
+				"subscription_id": sub.SubscriptionID, "first_cycle_amount": cycle, "scope_key": sub.SubscriptionID,
+			})
+		}
+	}
 	return sub, nil
 }
 
@@ -601,9 +618,30 @@ func (s *service) setSubscriptionStatus(ctx context.Context, consumerID primitiv
 	if !subscriptionTransitions[sub.Status][target] {
 		return nil, errConflict("SUBSCRIPTION_STATE", fmt.Sprintf("cannot %s a %s subscription", action, sub.Status))
 	}
-	return s.repo.updateSubscription(ctx, subID, consumerID,
+	updated, err := s.repo.updateSubscription(ctx, subID, consumerID,
 		bson.D{{Key: "status", Value: target}},
 		bson.D{{Key: "status", Value: sub.Status}})
+	if err != nil {
+		return nil, err
+	}
+	// CRM subscription.modified (C-03 reads change in paused/quantity_reduced).
+	s.emitCRMEvent(ctx, "subscription.modified", consumerID, map[string]any{
+		"subscription_id": subID, "change": crmSubscriptionChange(action), "scope_key": subID + ":" + action,
+	})
+	return updated, nil
+}
+
+// crmSubscriptionChange names a status action for the CRM (C-03 conditions).
+func crmSubscriptionChange(action string) string {
+	switch action {
+	case "pause":
+		return "paused"
+	case "resume":
+		return "resumed"
+	case "cancel":
+		return "cancelled"
+	}
+	return action
 }
 
 // patchSubscription edits the live plan (qty / frequency / slot / re-anchored
@@ -652,7 +690,27 @@ func (s *service) patchSubscription(ctx context.Context, consumerID primitive.Ob
 	if len(set) == 0 {
 		return s.repo.findSubscription(ctx, subID, consumerID)
 	}
-	return s.repo.updateSubscription(ctx, subID, consumerID, set, bson.D{})
+	// The quantity before the edit, so the CRM can tell a reduction (C-03)
+	// from an increase. Read only when a qty is being set.
+	var before *subscription
+	if in.Qty != nil && crmEnabled() {
+		before, _ = s.repo.findSubscription(ctx, subID, consumerID)
+	}
+	updated, err := s.repo.updateSubscription(ctx, subID, consumerID, set, bson.D{})
+	if err != nil {
+		return nil, err
+	}
+	if before != nil && before.Qty != updated.Qty {
+		change := "quantity_increased"
+		if updated.Qty < before.Qty {
+			change = "quantity_reduced"
+		}
+		s.emitCRMEvent(ctx, "subscription.modified", consumerID, map[string]any{
+			"subscription_id": subID, "change": change, "qty": updated.Qty, "previous_qty": before.Qty,
+			"scope_key": subID + ":qty",
+		})
+	}
+	return updated, nil
 }
 
 // ── The morning-order lifecycle (server twin of lib/subscriptionSweep.ts) ───

@@ -429,6 +429,16 @@ func (s *service) runMandateCharge(ctx context.Context, consumerID primitive.Obj
 	// the same day reuses this ref and does NOT move money a second time.
 	view, err := s.debit(ctx, consumerID, m.Amount, ref, "subscription auto-renewal")
 	if err != nil {
+		// CRM payment.failed (B-03): the wallet could not fund the charge.
+		// Once per (mandate, day) - the sweep retries every tick, the claim
+		// scopes on the same day ref. A transient error is not a failure to
+		// announce.
+		if crmErrCode(err) == "INSUFFICIENT_FUNDS" {
+			s.emitCRMEvent(ctx, "payment.failed", consumerID, map[string]any{
+				"mandate_id": mandateID, "amount": m.Amount, "reason": "insufficient wallet balance",
+				"source": "mandate", "scope_key": ref,
+			})
+		}
 		return walletView{}, err
 	}
 	// Bookkeeping — advance the schedule at most once per day (guarded by the day

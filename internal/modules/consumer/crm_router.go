@@ -25,6 +25,9 @@ import (
 var crmLifecycleTopics = []string{
 	"order.confirmed", "order.dispatched", "order.delivered", "order.failed",
 	"complaint.created", "complaint.resolved", "rating.submitted",
+	"user.registered", "wallet.credited", "payment.failed",
+	"subscription.activated", "subscription.created_unpaid", "subscription.modified",
+	"order.line_cancelled", "delivery.delayed", "serviceability.checked",
 }
 
 // crmComplaintSLA fills [SLA] in T-E02: the config's support.sla_resolve
@@ -84,14 +87,28 @@ func (s *service) crmRouteGenericAt(ctx context.Context, ev crmEvent, now time.T
 func (s *service) crmFireTrigger(ctx context.Context, t crmTrigger, e *crmEventCtx, now time.Time) (bool, string) {
 	cfg := crmConfigLoad()
 	params := e.params()
+	// A conditional template ({"if": ..., "then": ..., "else": ...}, B-06)
+	// picks its branch on the same condition grammar and facts; an
+	// unevaluable "if" fails closed like any other condition.
+	tplID := t.Template.String()
+	if t.Template.If != "" {
+		then, err := crmEvalConditions([]string{t.Template.If}, e.fact)
+		if err != nil {
+			s.crmCondFailClosed(t, err)
+			return false, "template condition failed closed: " + err.Error()
+		}
+		if !then {
+			tplID = t.Template.Else
+		}
+	}
 	// C-01: a message that cannot resolve its values is refused, never
 	// half-rendered. Checked before the claim so a later tick with the value
 	// present can still fire.
-	if tok, ok := crmTemplateResolvable(cfg.Templates[t.Template.String()], params); !ok {
+	if tok, ok := crmTemplateResolvable(cfg.Templates[tplID], params); !ok {
 		s.log.Warn("crm: unresolved template token, trigger not fired", "trigger", t.ID, "token", tok)
 		return false, "unresolved template token " + tok
 	}
-	s.crmDispatchWith(ctx, t.ID, e.ev.ConsumerID, params, now, crmDispatchOpts{Scope: crmEventScopeKey(e.ev.Payload)})
+	s.crmDispatchWith(ctx, t.ID, e.ev.ConsumerID, params, now, crmDispatchOpts{Scope: crmEventScopeKey(e.ev.Payload), Template: tplID})
 	return true, ""
 }
 
@@ -128,6 +145,8 @@ type crmEventCtx struct {
 	ev      crmEvent
 	ord     *order
 	ordDone bool
+	off     *consumerOffer
+	offDone bool
 	prm     map[string]string
 }
 
@@ -206,8 +225,80 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 			return f, nil
 		}
 		return nil, fmt.Errorf("payload carries no rating")
+	case "offer.id":
+		// The consumer's campaign offer id; "" when they have none, so a
+		// W trigger's "offer.id == 'welcome_litre'" reads false, never errors.
+		if o := e.offer(); o != nil {
+			return o.OfferID, nil
+		}
+		return "", nil
+	case "offer.entitled_free_deliveries_remaining":
+		return float64(entitledFreeDeliveries(e.offer())), nil
+	case "wallet.topup_balance":
+		wv, err := e.s.wallet(e.ctx, e.ev.ConsumerID)
+		if err != nil {
+			return nil, err
+		}
+		return wv.Cash, nil
+	case "wallet.covers_first_cycle":
+		// The live wallet against the cycle cost the emitter recorded, so a
+		// top-up made during the delay is seen at fire time.
+		amt, ok := crmPayloadNumber(p["first_cycle_amount"])
+		if !ok {
+			return nil, fmt.Errorf("payload carries no first_cycle_amount")
+		}
+		wv, err := e.s.wallet(e.ctx, e.ev.ConsumerID)
+		if err != nil {
+			return nil, err
+		}
+		return wv.Available >= amt, nil
+	case "change":
+		if v, ok := p["change"].(string); ok && v != "" {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no change")
+	case "complaint_open":
+		n, err := e.s.repo.complaints().CountDocuments(e.ctx, bson.D{
+			{Key: "consumer_id", Value: e.ev.ConsumerID},
+			{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{complaintOpen, complaintInReview}}}},
+		})
+		if err != nil {
+			return nil, err
+		}
+		return n > 0, nil
+	case "before_delivery":
+		if v, ok := p["before_delivery"].(bool); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no before_delivery")
+	case "serviceability.in_zone":
+		if v, ok := p["in_zone"].(bool); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no in_zone")
+	case "credit.account":
+		if v, ok := p["account"].(string); ok && v != "" {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no account")
+	case "order.contains_promotional_line":
+		// The shipped model mints each free pack as its own order, so an
+		// order carries a promotional line iff it is a pack order.
+		n, _ := crmPayloadNumber(p["offer_pack"])
+		return n > 0, nil
 	}
 	return nil, fmt.Errorf("unknown condition key %q", key)
+}
+
+// offer resolves the consumer's campaign offer at most once, lazily.
+func (e *crmEventCtx) offer() *consumerOffer {
+	if !e.offDone {
+		e.offDone = true
+		if o, err := e.s.repo.findOffer(e.ctx, e.ev.ConsumerID); err == nil {
+			e.off = o
+		}
+	}
+	return e.off
 }
 
 // crmCondition is one parsed line of a trigger's conditions. Shapes: a
@@ -445,6 +536,28 @@ func crmEventParams(topic string, payload map[string]any, o *order) map[string]s
 	case "rating.submitted":
 		if n, ok := crmPayloadNumber(payload["rating"]); ok {
 			p["RATING"] = strconv.Itoa(int(n))
+		}
+	case "wallet.credited", "order.line_cancelled":
+		// [X] is the rupee amount credited (B-06) or taken off the bill (D-05).
+		if n, ok := crmPayloadNumber(payload["amount"]); ok {
+			p["X"] = crmRupees(n)
+		}
+		if v := str("reason"); v != "" {
+			p["REASON"] = v
+		}
+	case "subscription.activated":
+		// [DATE] in T-A03 is the first delivery morning, worded by the emitter
+		// ("today", "tomorrow", "2 Jan"); it overrides the Welcome Litre DATE.
+		if v := str("start_label"); v != "" {
+			p["DATE"] = v
+		}
+	case "delivery.delayed":
+		if v := str("eta"); v != "" {
+			p["ETA"] = v
+		}
+	case "payment.failed":
+		if v := str("reason"); v != "" {
+			p["REASON"] = v
 		}
 	}
 	return p

@@ -251,6 +251,9 @@ func (s *service) verifyOTP(ctx context.Context, phone, code string) (*tokenPair
 		_ = s.repo.insertWallet(ctx, &wallet{
 			ID: primitive.NewObjectID(), ConsumerID: acct.ID, Currency: "INR", Seq: 0,
 		})
+		// CRM user.registered (A-01): the first verify that creates the
+		// shopper, never a re-login and never the Play review account above.
+		s.emitCRMEvent(ctx, "user.registered", acct.ID, map[string]any{"source": "otp"})
 	}
 	return s.issueTokens(ctx, acct, now)
 }
@@ -510,6 +513,11 @@ func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID
 		s.emitCRMEvent(ctx, "wallet.recharge_settled", consumerID, map[string]any{
 			"amount": amount, "method": method, "ref": ref,
 		})
+		// wallet.credited (B-06, the top-up receipt): one per ledger ref, the
+		// refundable account, worded as a recharge.
+		s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
+			"amount": amount, "account": "topup", "reason": "recharge", "ref": ref, "scope_key": ref,
+		})
 	}
 	if dup {
 		return s.getOrCreateWallet(ctx, consumerID) // already credited
@@ -600,6 +608,14 @@ func (s *service) promoCredit(ctx context.Context, consumerID primitive.ObjectID
 		return walletView{}, err
 	}
 	s.repo.updateWalletTxnBalances(ctx, row.ID, updated.ID, updated.Seq, updated.CashBalance, updated.RewardsBalance)
+	// wallet.credited (B-06): the non-refundable Pyaas credit wording.
+	reason := strings.TrimSpace(remark)
+	if reason == "" {
+		reason = "Pyaas credit"
+	}
+	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
+		"amount": amount, "account": "promo_credit", "reason": reason, "ref": ref, "scope_key": ref,
+	})
 	return walletToView(updated), nil
 }
 
@@ -797,6 +813,10 @@ func (s *service) refund(ctx context.Context, consumerID primitive.ObjectID, amo
 		return walletView{}, err
 	}
 	s.repo.updateWalletTxnBalances(ctx, gate.ID, updated.ID, updated.Seq, updated.CashBalance, updated.RewardsBalance)
+	// wallet.credited (B-06): a refund lands in the refundable account.
+	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
+		"amount": amount, "account": "topup", "reason": remark, "ref": ref, "scope_key": ref,
+	})
 	return walletToView(updated), nil
 }
 

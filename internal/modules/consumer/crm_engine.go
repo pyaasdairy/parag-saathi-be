@@ -867,8 +867,10 @@ func (s *service) crmRouteEventAt(ctx context.Context, ev crmEvent, now time.Tim
 // offer. The enrolled-offer count is pilot-scale (hundreds); a single indexed
 // scan per tick is deliberate simplicity.
 func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
-	// Delayed event triggers whose wait has elapsed (crm_schedule.go).
+	// Delayed event triggers whose wait has elapsed (crm_schedule.go), then
+	// the product events only a clock can notice (crm_detectors.go).
 	s.crmFireDueSchedules(ctx, now)
+	s.crmSweepDelayedDeliveries(ctx, now)
 
 	cur, err := s.repo.offers().Find(ctx, bson.D{{Key: "offer_id", Value: offerWelcomeLitre}})
 	if err != nil {

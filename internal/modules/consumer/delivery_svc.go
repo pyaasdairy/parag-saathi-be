@@ -575,6 +575,7 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 		want[adjustKey(c.ProductID, c.Name, c.Variant)] = c.Qty
 	}
 	newItems := make([]orderItem, 0, len(o.Items))
+	var removed []orderItem // lines taken off entirely: D-05 tells the member
 	changed := false
 	for _, it := range o.Items {
 		q, ok := want[adjustKey(it.ProductID, it.Name, it.Variant)]
@@ -593,6 +594,7 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 			changed = true
 		}
 		if q == 0 {
+			removed = append(removed, it)
 			continue // damaged out entirely — the line is removed
 		}
 		it.Qty = q
@@ -623,9 +625,28 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 		}}}); uerr != nil {
 		return nil, errInternal("order adjust failed")
 	}
+	// CRM order.line_cancelled (D-05), one event per removed line. Money
+	// has not moved (settle-on-delivery), so amount is what comes off the
+	// bill, not a refund; before_delivery is always true on this path.
+	if crmEnabled() {
+		if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
+			for _, it := range removed {
+				line := &order{Items: []orderItem{it}}
+				s.emitCRMEvent(ctx, "order.line_cancelled", cid, map[string]any{
+					"order_id": o.OrderID, "line_id": it.ID, "labelled_product": crmLabelledProductOf(line),
+					"amount": round2(it.Price * float64(it.Qty)), "before_delivery": true,
+					"scope_key": o.OrderID + ":" + it.ID,
+				})
+			}
+		}
+	}
 	dItems := deliveryItemsFor(newItems)
+	// updateDelivery stamps updated_at itself; naming it here too made Mongo
+	// reject the whole $set as a path conflict (the same fault
+	// storeCancelDelivery had), so the order was re-billed while the task
+	// kept its old lines and amount.
 	return s.repo.updateDelivery(ctx, deliveryID,
-		bson.D{{Key: "items", Value: dItems}, {Key: "amount", Value: total}, {Key: "updated_at", Value: now}},
+		bson.D{{Key: "items", Value: dItems}, {Key: "amount", Value: total}},
 		bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
 	)
 }
@@ -997,10 +1018,16 @@ func (s *service) syncOrderOutForDelivery(ctx context.Context, d *delivery) {
 	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "out_for_delivery"}, {Key: "rider_id", Value: d.RiderPartyID}, {Key: "riders", Value: rd}, {Key: "updated_at", Value: time.Now().UTC()}}}})
 	// CRM (contract C6, inert unless CRM_ENABLED): order.dispatched. Best-effort.
+	// promotional_only rides along so D-02's condition can read it (a free
+	// pack out for delivery sends no D-02).
 	if crmEnabled() {
 		if cid, cerr := primitive.ObjectIDFromHex(d.ConsumerID); cerr == nil {
+			var o *order
+			if found, err := s.repo.findOrderAnyUser(ctx, d.OrderID); err == nil {
+				o = found
+			}
 			s.emitCRMEvent(ctx, "order.dispatched", cid, map[string]any{
-				"order_id": d.OrderID, "labelled_product": s.crmLabelledProduct(ctx, d.OrderID),
+				"order_id": d.OrderID, "labelled_product": crmLabelledProductOf(o), "promotional_only": o != nil && o.OfferPack > 0,
 				"partner": crmPartnerName(name, d.RiderPartyID), "eta_min": crmDeliveryETAMinutes(d, time.Now()),
 			})
 		}
@@ -1052,8 +1079,11 @@ func (s *service) syncOrderFailed(ctx context.Context, d *delivery, reason strin
 		return
 	}
 	if cid, cerr := primitive.ObjectIDFromHex(d.ConsumerID); cerr == nil {
+		// reason is worded for the member: the rider's evidence trail
+		// ("| photo=... | geo=...") never leaves the task record.
 		s.emitCRMEvent(ctx, "order.failed", cid, map[string]any{
-			"order_id": d.OrderID, "labelled_product": s.crmLabelledProduct(ctx, d.OrderID), "reason": reason,
+			"order_id": d.OrderID, "labelled_product": s.crmLabelledProduct(ctx, d.OrderID),
+			"reason": crmFailureReasonForCustomer(reason),
 		})
 	}
 }

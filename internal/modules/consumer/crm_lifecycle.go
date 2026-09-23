@@ -81,3 +81,72 @@ func crmPartnerName(name, partyID string) string {
 	}
 	return name
 }
+
+// crmFailureReasonForCustomer words a task's failure reason for the member.
+// The rider app posts "<picklist label> | <free remark> | photo=... |
+// geo=... | called=true": only the first segment is the customer-readable
+// cause, the rest is the rider's evidence and must never reach a message.
+// A bare picklist code is mapped through the server's own catalog; anything
+// empty or unreadable becomes a neutral phrase.
+func crmFailureReasonForCustomer(reason string) string {
+	first := strings.TrimSpace(strings.SplitN(reason, "|", 2)[0])
+	for _, r := range riderNDReasonCatalog {
+		if first == r.Code {
+			first = r.Label
+			break
+		}
+	}
+	if first == "" || strings.ContainsAny(first, "=\n") {
+		return "the delivery could not be completed"
+	}
+	if len(first) > 80 {
+		first = first[:80]
+	}
+	return first
+}
+
+// crmSubscriptionStartLabel is the [DATE] token of T-A03: the first morning
+// the plan delivers on or after its start date, worded against `now`
+// ("today", "tomorrow", else "2 Jan"). A plan that never delivers inside a
+// fortnight reports its start date as written.
+func crmSubscriptionStartLabel(sub *subscription, now time.Time) string {
+	day := sub.StartDate
+	for i := 0; i < 14; i++ {
+		d := addDaysIST(sub.StartDate, i)
+		if subscriptionDeliversOn(sub.Frequency, sub.StartDate, d) {
+			day = d
+			break
+		}
+	}
+	return crmDayLabel(day, now)
+}
+
+// crmDayLabel words an IST day relative to now.
+func crmDayLabel(day string, now time.Time) string {
+	switch day {
+	case istDay(now):
+		return "today"
+	case istDay(now.Add(24 * time.Hour)):
+		return "tomorrow"
+	}
+	if t, err := time.ParseInLocation("2006-01-02", day, istZone); err == nil {
+		return t.Format("2 Jan")
+	}
+	return day
+}
+
+// crmClockLabel is the [ETA] token of T-D03: a clock time worded as an
+// estimate ("about 7:52 am").
+func crmClockLabel(t time.Time) string {
+	return "about " + strings.ToLower(t.In(istZone).Format("3:04 PM"))
+}
+
+// crmCreditAccount maps a wallet bucket onto the config's two ledger
+// accounts (C-02): CASH is the refundable top-up balance, REWARDS the
+// non-refundable Pyaas credit.
+func crmCreditAccount(bucket string) string {
+	if bucket == "REWARDS" {
+		return "promo_credit"
+	}
+	return "topup"
+}

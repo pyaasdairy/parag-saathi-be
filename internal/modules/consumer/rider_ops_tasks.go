@@ -854,6 +854,12 @@ func (s *service) riderReverseDeliveryDebit(ctx context.Context, d *delivery, ma
 	s.repo.updateWalletTxnBalances(ctx, gate.ID, updated.ID, updated.Seq, updated.CashBalance, updated.RewardsBalance)
 	s.log.InfoContext(ctx, "delivery debit reversed by rider undo",
 		"delivery", d.ID, "order", d.OrderID, "amount", amount, "bucket", bucket)
+	// CRM wallet.credited (B-06): the member is told their money is back.
+	// order_id is deliberately absent - the claim scopes on the undo ref.
+	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
+		"amount": amount, "account": crmCreditAccount(bucket),
+		"reason": "delivery " + d.OrderCode + " reversed", "ref": undoRef, "scope_key": undoRef,
+	})
 	return nil
 }
 

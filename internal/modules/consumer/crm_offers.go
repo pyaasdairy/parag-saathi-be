@@ -483,6 +483,11 @@ func (s *service) crmSelfEnrol(ctx context.Context, consumerID primitive.ObjectI
 		return nil, serr
 	}
 	if !sv.Serviceable {
+		// W-08 (serviceability.checked): the signed-in member asked and the
+		// answer is no; the trigger's per_customer cap makes it one message ever.
+		s.emitCRMEvent(ctx, "serviceability.checked", consumerID, map[string]any{
+			"in_zone": false, "pincode": addr.Pincode, "source": "enrol",
+		})
 		return nil, errUnprocessable("NOT_SERVICEABLE", "we don't deliver to this address yet — join the waitlist and the offer stays available for you")
 	}
 	// Abuse hash + audit fields derive from the STORED address so a self and a

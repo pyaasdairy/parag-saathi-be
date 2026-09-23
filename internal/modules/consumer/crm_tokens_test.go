@@ -22,6 +22,17 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		"complaint.created":  {"complaint_id": "cmp_1", "ref": "PYS-1", "category": "missing", "order_id": "ord_1"},
 		"complaint.resolved": {"complaint_id": "cmp_1", "ref": "PYS-1", "resolution": "Refunded one pack"},
 		"rating.submitted":   {"order_id": "ord_1", "rating": int32(4)},
+		"user.registered":    {"source": "otp"},
+		"wallet.credited":    {"amount": float64(500), "account": "topup", "reason": "recharge", "ref": "order_1", "scope_key": "order_1"},
+		"payment.failed":     {"payment_order_id": "order_1", "payment_id": "pay_1", "amount": float64(500), "reason": "declined", "source": "razorpay"},
+		"subscription.activated": {"subscription_id": "sub_1", "product_id": "gold-500ml", "qty": int32(2),
+			"frequency": "daily", "start_date": "2026-09-25", "start_label": "tomorrow"},
+		"subscription.created_unpaid": {"subscription_id": "sub_1", "first_cycle_amount": float64(70)},
+		"subscription.modified":       {"subscription_id": "sub_1", "change": "paused"},
+		"order.line_cancelled": {"order_id": "ord_1", "line_id": "item_1", "labelled_product": label,
+			"amount": float64(35), "before_delivery": true},
+		"delivery.delayed":       {"order_id": "ord_1", "labelled_product": label, "new_eta_known": true, "eta": "about 7:52 am"},
+		"serviceability.checked": {"in_zone": false, "pincode": "226030"},
 	}
 	for _, topic := range crmLifecycleTopics {
 		if _, ok := sample[topic]; !ok {

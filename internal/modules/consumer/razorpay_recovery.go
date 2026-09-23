@@ -101,6 +101,9 @@ type rzpWebhookEnvelope struct {
 				OrderID string `json:"order_id"`
 				Status  string `json:"status"`
 				Amount  int64  `json:"amount"`
+				// ErrorDescription is Razorpay's customer-facing failure text
+				// on payment.failed (unused by the credit path).
+				ErrorDescription string `json:"error_description"`
 			} `json:"entity"`
 		} `json:"payment"`
 	} `json:"payload"`
@@ -121,8 +124,14 @@ func (s *service) razorpayWebhookEvent(ctx context.Context, raw []byte) error {
 	}
 	switch ev.Event {
 	case "payment.captured", "order.paid":
+	case "payment.failed":
+		// Nothing to credit; the member is told the recharge did not go
+		// through (CRM B-03, payment.failed). The owner comes from OUR order
+		// row, never from the payload. Unknown order: ignored, never retried.
+		s.crmPaymentFailed(ctx, ev.Payload.Payment.Entity.OrderID, ev.Payload.Payment.Entity.ID, ev.Payload.Payment.Entity.ErrorDescription)
+		return nil
 	default:
-		return nil // authorized / failed / refund / settlement events: not ours
+		return nil // authorized / refund / settlement events: not ours
 	}
 	p := ev.Payload.Payment.Entity
 	if p.OrderID == "" || p.ID == "" {
@@ -159,6 +168,28 @@ func (h *handler) razorpayWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// crmPaymentFailed emits payment.failed (CRM B-03) for a gateway payment that
+// failed against one of our top-up orders. Once per gateway payment (the
+// claim scopes on the payment id), and only when the order is a wallet
+// top-up we issued - an order payment or an unknown order is ignored.
+func (s *service) crmPaymentFailed(ctx context.Context, orderID, paymentID, reason string) {
+	if !crmEnabled() || orderID == "" {
+		return
+	}
+	ord, err := s.repo.findPaymentOrderByID(ctx, orderID)
+	if err != nil || (ord.Purpose != "" && ord.Purpose != "topup") || ord.Status == "PAID" {
+		return
+	}
+	scope := paymentID
+	if scope == "" {
+		scope = orderID
+	}
+	s.emitCRMEvent(ctx, "payment.failed", ord.ConsumerID, map[string]any{
+		"payment_order_id": orderID, "payment_id": paymentID, "amount": round2(float64(ord.AmountPaise) / 100),
+		"reason": reason, "source": "razorpay", "scope_key": scope,
+	})
 }
 
 // ── The shared credit path ─────────────────────────────────────────────────

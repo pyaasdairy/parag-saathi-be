@@ -801,6 +801,19 @@ func (h *handler) joinWaitlist(w http.ResponseWriter, r *http.Request) {
 	h.svc.emitCRMEvent(r.Context(), "waitlist.joined", primitive.NilObjectID, map[string]any{
 		"phone": body.Phone, "pincode": body.Pincode,
 	})
+	// serviceability.checked (W-08) needs a member to write to. This route is
+	// app-key gated, not JWT gated, so the identity comes ONLY from a valid
+	// bearer token the app happens to send - never from the posted phone,
+	// which anyone could name.
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if id, _, err := h.svc.parseAccessToken(strings.TrimPrefix(auth, "Bearer ")); err == nil {
+			if cid, cerr := primitive.ObjectIDFromHex(id); cerr == nil {
+				h.svc.emitCRMEvent(r.Context(), "serviceability.checked", cid, map[string]any{
+					"in_zone": false, "pincode": strings.TrimSpace(body.Pincode), "source": "waitlist",
+				})
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "waitlisted": true})
 }
 
