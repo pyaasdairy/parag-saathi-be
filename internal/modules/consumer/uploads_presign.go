@@ -11,11 +11,13 @@ import (
 // Consumer presign (contract C4): POST /consumer/uploads/presign.
 //
 // The member's complaint and door photos go to the same private B2 bucket the
-// operator apps use, through the uploads module's presign core. The app then
-// sends the bytes straight to B2 with the returned method and headers and
-// stores file_url (an authenticated view path, never a file:// path) on the
-// complaint / address record; proofPhotoURL and the admin CRM already resolve
-// that prefix.
+// operator apps use, through the uploads module's presign core. The upload
+// method comes from the RESPONSE, and for B2 it is POST: b2_upload_file
+// accepts nothing else, so an app that assumes PUT gets a 405 from the
+// bucket. The app sends the bytes straight to B2 with the method and headers
+// it was given, then stores file_url (an authenticated view path, never a
+// file:// path) on the complaint / address record; proofPhotoURL and the
+// admin CRM already resolve that prefix.
 
 // presignCore is what this handler needs from the uploads seam; an interface so
 // the handler shape is testable without B2 keys.

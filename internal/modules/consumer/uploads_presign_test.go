@@ -30,7 +30,8 @@ func (f *fakePresign) Presign(_ context.Context, prefix, ct string) (uploads.Tar
 	}, nil
 }
 
-// Contract C4: the handler's wire shape, without B2 keys.
+// Contract C4: the handler's wire shape, without B2 keys. The method comes
+// from the response and is POST for B2 - the app must not assume PUT.
 func TestConsumerPresignShape(t *testing.T) {
 	fp := &fakePresign{ok: true}
 	h := &handler{svc: &service{presign: fp, log: slog.New(slog.NewTextHandler(io.Discard, nil))}}
