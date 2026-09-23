@@ -608,11 +608,13 @@ func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerI
 }
 
 // crmDispatchOpts carries what an EVENT dispatch adds to the plain per-day
-// one: the claim scope (order / complaint id) and, for a trigger whose
-// template is conditional (B-06's if/then/else), the branch the router chose.
+// one: the claim scope (order / complaint id), for a trigger whose template
+// is conditional (B-06's if/then/else) the branch the router chose, and the
+// event payload (the human_call queue row carries it for the operator).
 type crmDispatchOpts struct {
 	Scope    string
 	Template string
+	Payload  map[string]any
 }
 
 // crmDispatchWith is the one dispatch body every entry point shares.
@@ -656,10 +658,23 @@ func (s *service) crmDispatchWith(ctx context.Context, triggerID string, consume
 	// stay byte-identical; the SUPPRESSED G9 row below is the audit record.)
 	ch := inappChannel{}
 	delivered := make([]string, 0, 3)
-	if err := ch.Send(ctx, s, consumerID, t, tpl, std); err == nil {
-		delivered = append(delivered, ch.Name())
+	// A trigger a person answers (crmHumanOnly, E-05) has no template and
+	// must never auto-respond, so it writes no inbox row.
+	if !crmHumanOnly(t) {
+		if err := ch.Send(ctx, s, consumerID, t, tpl, std); err == nil {
+			delivered = append(delivered, ch.Name())
+		}
 	}
-	if ext := s.crmTransports(); len(ext) > 0 {
+	ext := s.crmTransports()
+	if crmRoutesChannel(t, crmChanHumanCall) {
+		// human_call is plugged only for the triggers that name it, so every
+		// other dispatch keeps its keys-unset, inbox-only shape.
+		if ext == nil {
+			ext = map[string]crmTransport{}
+		}
+		ext[crmChanHumanCall] = &callbackChannel{repo: s.repo, consumerID: consumerID, scope: opts.Scope, payload: opts.Payload}
+	}
+	if len(ext) > 0 {
 		if t.Category == "promotional" {
 			// G2b — channel-granular consent: the aggregate G2 already passed,
 			// but it ORs every marketing channel, so drop each transport whose

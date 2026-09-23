@@ -92,9 +92,11 @@ func crmIsTransient(err error) bool { return errors.Is(err, errCRMTransient) }
 // crmDelivery is a trigger's channel routing: one primary (with ordered
 // fallbacks taken only on unavailability or definitive rejection) plus
 // best-effort parallel channels. Channels Phase B does not ship (rcs,
-// ai_call, human_call, admin_console, email) resolve to nothing and are
-// skipped — the config keeps naming them so later phases need no config edit.
-// push ships via crm_push.go (contract C5) once EXPO_PUSH_ENABLED is set.
+// ai_call, admin_console, email) resolve to nothing and are skipped — the
+// config keeps naming them so later phases need no config edit. push ships
+// via crm_push.go (contract C5) once EXPO_PUSH_ENABLED is set; human_call is
+// the operator call-back queue (crm_callbacks.go), plugged for the triggers
+// that name it.
 type crmDelivery struct {
 	Primary  string        `json:"primary"`
 	Parallel []string      `json:"parallel"`
@@ -311,7 +313,7 @@ func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t c
 		if tr == nil {
 			// A channel the config names but nothing serves: keys unset, or a
 			// kind Phase B does not ship (push before its sender, rcs,
-			// human_call). Say so once per dispatch; a silent skip made the
+			// ai_call). Say so once per dispatch; a silent skip made the
 			// WhatsApp gap invisible and the row read as if the inbox had
 			// been the plan all along.
 			if log != nil {

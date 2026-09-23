@@ -920,5 +920,6 @@ func registerAdminCRM(cr chi.Router, h *handler, jwtm *auth.JWTManager) {
 		ar.Get("/crm/duplicate-subscription-orders", h.crmDuplicateSubscriptionOrders)
 		ar.Get("/crm/complaints", h.crmComplaints)
 		ar.Post("/crm/complaints/{complaintId}", h.crmUpdateComplaint)
+		ar.Get("/crm/callbacks", h.crmCallbacks) // the human_call queue (crm_callbacks.go)
 	})
 }

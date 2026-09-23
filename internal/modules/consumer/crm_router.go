@@ -57,7 +57,9 @@ func (s *service) crmRouteGenericAt(ctx context.Context, ev crmEvent, now time.T
 		if _, waiting := cfg.AwaitingEvent[id]; waiting {
 			continue // no product event exists for it yet (meta.awaiting_event)
 		}
-		if t.Kind == "event" && t.Event == ev.Topic && t.Category != "internal" && t.Template.String() != "" {
+		// A trigger needs a template to speak, except one a person answers
+		// (primary human_call, no template: E-05), which queues a call-back.
+		if t.Kind == "event" && t.Event == ev.Topic && t.Category != "internal" && (t.Template.String() != "" || crmHumanOnly(t)) {
 			ids = append(ids, id)
 		}
 	}
@@ -111,7 +113,7 @@ func (s *service) crmFireTrigger(ctx context.Context, t crmTrigger, e *crmEventC
 		s.log.Warn("crm: unresolved template token, trigger not fired", "trigger", t.ID, "token", tok)
 		return false, "unresolved template token " + tok
 	}
-	s.crmDispatchWith(ctx, t.ID, e.ev.ConsumerID, params, now, crmDispatchOpts{Scope: crmEventScopeKey(e.ev.Payload), Template: tplID})
+	s.crmDispatchWith(ctx, t.ID, e.ev.ConsumerID, params, now, crmDispatchOpts{Scope: crmEventScopeKey(e.ev.Payload), Template: tplID, Payload: e.ev.Payload})
 	return true, ""
 }
 

@@ -237,6 +237,8 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 		// CRM rows are consumer-keyed PII surfaces too.
 		db.Collection(collConsumerOffers), db.Collection(collConsumerInbox),
 		db.Collection(collCRMDispatch), db.Collection(collCRMEvents),
+		// The human_call queue names the member, their phone and the event.
+		db.Collection(collCRMCallbacks),
 		// Consent audit trail is consumer-keyed PII too — DPDP erasure takes
 		// the evidence rows with the account (r.consents above already covers
 		// the current-state docs, including the derived "promotional" one).
