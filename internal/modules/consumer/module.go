@@ -319,6 +319,8 @@ func Register(r chi.Router, d *deps.Deps) {
 			op.Group(func(sm chi.Router) {
 				sm.Use(middleware.RequireRoles(domain.RoleStoreManager))
 				sm.Get("/stores/{storeId}/orders", h.storeOrders)
+				// Tomorrow's previews with no task yet (upcoming.go, contract C1).
+				sm.Get("/stores/{storeId}/upcoming", h.storeUpcoming)
 				sm.Get("/stores/{storeId}/riders", h.storeRiders)
 				sm.Post("/stores/{storeId}/orders/{deliveryId}/assign", h.assignRider)
 				// Order surgery at handover: cancel (crate damaged) or reduce
