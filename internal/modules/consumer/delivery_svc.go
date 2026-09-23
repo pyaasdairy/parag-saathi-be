@@ -78,11 +78,11 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	}
 	prefs := s.resolveDeliveryPrefs(ctx, o)
 	// Carry the structured door onto the task when the customer picked one.
-	var society, tower, unit string
+	var society, societyID, tower, unit string
 	var floor *int
 	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
 		if a := s.addressFor(ctx, cid, o.AddressLabel); a != nil {
-			society, tower, unit, floor = a.Society, a.Tower, a.Unit, a.Floor
+			society, societyID, tower, unit, floor = a.Society, a.SocietyID, a.Tower, a.Unit, a.Floor
 		}
 	}
 	del := &delivery{
@@ -91,7 +91,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		PhoneMasked: maskPhone(o.Phone), Phone: o.Phone, AddressLabel: o.AddressLabel, AddressLine: o.AddressText,
 		Geo: dest, GeoExact: geoExact, Items: items, Amount: o.Total, PaymentMode: payMode, TrialEligible: trialEligible, Perishable: false,
 		Slot: slotLabel(o), Lane: o.Lane, EtaAt: eta, DistanceKm: round2(haversineKm(storeGeo, dest)),
-		Society: society, Tower: tower, Floor: floor, Unit: unit,
+		Society: society, SocietyID: societyID, Tower: tower, Floor: floor, Unit: unit,
 		DeliveryPrefs: prefs, DeliveryDate: orderDeliveryDate(o),
 		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}

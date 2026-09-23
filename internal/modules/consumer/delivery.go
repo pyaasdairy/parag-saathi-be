@@ -117,8 +117,9 @@ type delivery struct {
 	// (consumer app §2). addressLine still says the same thing in words; these
 	// let a round be grouped by tower and floor — a rider delivers a whole floor
 	// in one lift ride — instead of parsing it back out of prose.
-	Society string `bson:"society,omitempty"    json:"society,omitempty"`
-	Tower   string `bson:"tower,omitempty"      json:"tower,omitempty"`
+	Society   string `bson:"society,omitempty"    json:"society,omitempty"`
+	SocietyID string `bson:"society_id,omitempty" json:"societyId,omitempty"`
+	Tower     string `bson:"tower,omitempty"      json:"tower,omitempty"`
 	Floor   *int   `bson:"floor,omitempty"      json:"floor,omitempty"`
 	Unit    string `bson:"unit,omitempty"       json:"unit,omitempty"`
 	Geo     geoPt  `bson:"geo"                  json:"geo"`
