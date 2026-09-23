@@ -5,7 +5,7 @@
   "source_document": "Pyaas_CRM_Retention_AI_Calling_Playbook_Rev3.docx, 20 August 2026",
   "generated": "2026-08-20",
   "companion_spec": "PYAAS_CRM_App_Developer_Spec_Rev3.pdf",
-  "trigger_count": 54,
+  "trigger_count": 55,
   "architecture": "hybrid — in-house orchestration core, external vendor for AI outbound calls",
   "note": "Every trigger MUST pass the guard chain in `guards.evaluation_order` before dispatch. A trigger that fires but fails a guard is logged as suppressed with the failing guard id — it is never silently dropped.",
   "deviations_from_playbook": [
@@ -421,6 +421,12 @@
    "cta": "acknowledge",
    "en": "Your delivery time/area is changing from [DATE] to [NEW]. Questions? [SUPPORT_NUMBER].",
    "hi": "Aapki delivery [DATE] se [NEW] ho jaayegi. Sawaal? [SUPPORT_NUMBER]."
+  },
+  "T-D09": {
+   "dlt_category": "service_implicit",
+   "cta": "reorder",
+   "en": "Not delivered - [LABELLED_PRODUCT] could not reach you ([REASON]). Nothing has been charged for it. Tap to order again, or call [SUPPORT_NUMBER].",
+   "hi": "Deliver nahi ho saka - [LABELLED_PRODUCT] ([REASON]). Iske liye koi shulk nahi laga. Dobara order karein, ya [SUPPORT_NUMBER] par call karein."
   },
   "T-E01": {
    "dlt_category": "service_implicit",
@@ -1464,6 +1470,44 @@
     "plus_reminder": 1
    },
    "success_metric": "complaints_avoided"
+  },
+  {
+   "id": "D-09",
+   "section": "D",
+   "name": "Delivery failed",
+   "phase": 1,
+   "kind": "event",
+   "event": "order.failed",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT0S",
+      "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-D09",
+   "frequency_cap": {
+    "per_order": 1
+   },
+   "success_metric": "reorder_pct_after_failure",
+   "corrections": [
+    "C-01"
+   ],
+   "note": "Added 24 September 2026. The backend emits order.failed when a rider marks a task not delivered or the store cancels it; the in-app inbox always carries this, then push, WhatsApp, SMS. Money moves only at delivery, so 'nothing has been charged' is always true. [REASON] is the rider's picklist label only, never the evidence remark."
   },
   {
    "id": "E-01",

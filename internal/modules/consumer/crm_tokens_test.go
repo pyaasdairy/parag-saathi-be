@@ -69,7 +69,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		}
 		routed[id] = true
 	}
-	for _, id := range []string{"A-02", "D-01", "D-02", "D-06", "E-01", "E-02", "E-04", "E-06", "E-07", "W-02", "W-05"} {
+	for _, id := range []string{"A-02", "D-01", "D-02", "D-06", "D-09", "E-01", "E-02", "E-04", "E-06", "E-07", "W-02", "W-05"} {
 		if !routed[id] {
 			t.Errorf("%s should be reachable from a lifecycle topic", id)
 		}
@@ -84,10 +84,13 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		}
 		return fb[len(fb)-1].Channel
 	}
-	for _, id := range []string{"D-01", "D-02", "D-06", "E-06", "B-01", "E-05"} {
+	for _, id := range []string{"D-01", "D-02", "D-06", "D-09", "E-06", "B-01", "E-05"} {
 		if last(id) != "sms" {
 			t.Errorf("%s: last fallback = %q, want sms (%+v)", id, last(id), cfg.Triggers[id].Delivery)
 		}
+	}
+	if d09 := cfg.Triggers["D-09"]; d09.Delivery.Primary != "push" || len(d09.Delivery.Fallback) != 2 || d09.Delivery.Fallback[0].Channel != "whatsapp" || d09.Event != "order.failed" {
+		t.Errorf("D-09 routing: %+v", d09.Delivery)
 	}
 	if fb := cfg.Triggers["D-02"].Delivery.Fallback; len(fb) != 2 || fb[0].Channel != "whatsapp" || fb[0].After != "PT5M" {
 		t.Errorf("D-02 fallback chain: %+v", fb)
@@ -113,7 +116,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	if err := json.Unmarshal(embeddedCRMConfig, &meta); err != nil {
 		t.Fatalf("embedded config: %v", err)
 	}
-	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 54 || len(meta.Templates) != 46 {
+	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 55 || len(meta.Templates) != 47 {
 		t.Fatalf("meta.trigger_count=%d triggers=%d templates=%d", meta.Meta.TriggerCount, len(meta.Triggers), len(meta.Templates))
 	}
 }
