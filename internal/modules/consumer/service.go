@@ -505,20 +505,6 @@ func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID
 	if err != nil {
 		return nil, err
 	}
-	if !dup {
-		// CRM wallet.recharge_settled — SETTLED, not initiated: this line sits
-		// past the wallet's exactly-once gate, on the verified-credit path, so
-		// a replay or a forged initiation can never fire it twice. (No-op
-		// unless CRM_ENABLED.)
-		s.emitCRMEvent(ctx, "wallet.recharge_settled", consumerID, map[string]any{
-			"amount": amount, "method": method, "ref": ref,
-		})
-		// wallet.credited (B-06, the top-up receipt): one per ledger ref, the
-		// refundable account, worded as a recharge.
-		s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
-			"amount": amount, "account": "topup", "reason": "recharge", "ref": ref, "scope_key": ref,
-		})
-	}
 	if dup {
 		return s.getOrCreateWallet(ctx, consumerID) // already credited
 	}
@@ -535,6 +521,19 @@ func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID
 	// Backfill the running balances on the gate row now that we know them.
 	topupSeq := updated.Seq - (seqDelta - 1)
 	s.repo.updateWalletTxnBalances(ctx, cashRow.ID, updated.ID, topupSeq, updated.CashBalance, round2(updated.RewardsBalance-bonus))
+	// CRM events only once the money is really in the wallet: past the
+	// exactly-once gate (a replay or a second recovery net never reaches this
+	// line) AND past the $inc, so no message says "added" over a balance that
+	// did not move. (No-op unless CRM_ENABLED.)
+	// wallet.recharge_settled drives the Welcome Litre pack-2 unlock (W-04).
+	s.emitCRMEvent(ctx, "wallet.recharge_settled", consumerID, map[string]any{
+		"amount": amount, "method": method, "ref": ref,
+	})
+	// wallet.credited (B-06, the top-up receipt): one per ledger ref, the
+	// refundable account, worded as a recharge.
+	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
+		"amount": amount, "account": "topup", "reason": "recharge", "ref": ref, "scope_key": ref,
+	})
 	if bonus > 0 {
 		_, _ = s.repo.insertWalletTxnGate(ctx, walletTxn{
 			ID: primitive.NewObjectID(), WalletID: updated.ID, ConsumerID: consumerID, Seq: updated.Seq,
