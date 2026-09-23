@@ -25,6 +25,8 @@
 package consumer
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
@@ -272,14 +274,21 @@ func (h *handler) crmComposeMessage(w http.ResponseWriter, r *http.Request) {
 	if in.Category == "service_implicit" || in.Category == "service" {
 		cat = "service_implicit"
 	}
+	// The synthetic trigger id is the CONTENT hash (category|body_en|body_hi,
+	// the way crmAddressHash keys an address), not the clock: the (trigger,
+	// consumer, IST day) claim then dedupes an identical send the same day,
+	// and the guard chain's caps and quiet hours apply to a human exactly as
+	// to code. A clock-derived id was unique per second, so nothing ever
+	// matched.
+	sum := sha1.Sum([]byte(cat + "|" + strings.TrimSpace(in.BodyEN) + "|" + strings.TrimSpace(in.BodyHI)))
 	t := crmTrigger{
-		ID: "MANUAL-" + time.Now().UTC().Format("20060102-150405"), Category: cat,
+		ID: "MANUAL-" + hex.EncodeToString(sum[:])[:16], Category: cat,
 		Kind: "manual", Section: "M",
 	}
 	now := time.Now().UTC()
 	row, won := h.svc.crmClaimDispatch(r.Context(), t, acct.ID, istDay(now))
 	if !won {
-		writeErr(w, errConflict("DUPLICATE", "an identical manual send was just made"))
+		writeErr(w, errConflict("DUPLICATE", "an identical manual send was already made today"))
 		return
 	}
 	if guard, pass := h.svc.crmGuardCheck(r.Context(), t, acct.ID, now); !pass {
