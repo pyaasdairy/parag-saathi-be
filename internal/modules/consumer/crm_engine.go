@@ -620,6 +620,11 @@ func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerI
 			}
 		}
 		if len(ext) > 0 {
+			// The push transport addresses the member's devices, not a phone:
+			// bind a per-dispatch copy so the shared instance stays stateless.
+			if p, ok := ext["push"].(*pushChannel); ok {
+				ext["push"] = p.bind(consumerID)
+			}
 			if phone, err := s.crmDeliveryPhone(ctx, consumerID); err != nil {
 				s.log.Warn("crm: no deliverable phone for external channels", "trigger", t.ID, "consumer", consumerID.Hex(), "err", err)
 			} else {

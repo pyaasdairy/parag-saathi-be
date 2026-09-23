@@ -100,6 +100,9 @@ type service struct {
 	// byte-identical to the inbox-only Phase A behaviour.
 	crmSMS *smsChannel
 	crmWA  *whatsappChannel
+	// crmPush is the Expo push transport (crm_push.go, contract C5). Disabled
+	// until EXPO_PUSH_ENABLED=true; nil-safe.
+	crmPush *pushChannel
 }
 
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
@@ -119,6 +122,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		presign:            newConsumerPresigner(),
 		crmSMS:             newSMSChannel(log),
 		crmWA:              newWhatsAppChannel(log),
+		crmPush:            newPushChannel(log, repo),
 		dolibarrKick:       make(chan struct{}, 1),
 	}
 }
