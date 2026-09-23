@@ -120,9 +120,9 @@ type delivery struct {
 	Society   string `bson:"society,omitempty"    json:"society,omitempty"`
 	SocietyID string `bson:"society_id,omitempty" json:"societyId,omitempty"`
 	Tower     string `bson:"tower,omitempty"      json:"tower,omitempty"`
-	Floor   *int   `bson:"floor,omitempty"      json:"floor,omitempty"`
-	Unit    string `bson:"unit,omitempty"       json:"unit,omitempty"`
-	Geo     geoPt  `bson:"geo"                  json:"geo"`
+	Floor     *int   `bson:"floor,omitempty"      json:"floor,omitempty"`
+	Unit      string `bson:"unit,omitempty"       json:"unit,omitempty"`
+	Geo       geoPt  `bson:"geo"                  json:"geo"`
 	// GeoExact — Geo is the CUSTOMER's own pin, not the store's fallback. Only
 	// then can the server judge the 300 m door check: an order placed without
 	// coordinates points the task at the store, where a rider at the real door

@@ -488,8 +488,8 @@ type patchSkuRequest struct {
 	PhotoURLC    *string        `json:"photoUrl"`
 	Physical     *physicalInput `json:"physical"`
 
-	EditVariant  *variantInput `json:"edit_variant"`
-	EditVariantC *variantInput `json:"editVariant"`
+	EditVariant  *variantInput  `json:"edit_variant"`
+	EditVariantC *variantInput  `json:"editVariant"`
 	Variants     []variantInput `json:"variants"`
 }
 
