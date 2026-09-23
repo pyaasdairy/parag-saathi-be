@@ -548,36 +548,40 @@ func crmRender(body string, params map[string]string) string {
 // crmDispatch runs ONE trigger for ONE consumer end-to-end: claim → guards →
 // per-offer caps → render → channel send → log. Safe to call from anywhere;
 // every failure mode lands in the dispatch log.
-func (s *service) crmDispatch(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string) {
-	s.crmDispatchAt(ctx, triggerID, consumerID, params, time.Now().UTC())
+func (s *service) crmDispatch(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string) (status, guard string) {
+	return s.crmDispatchAt(ctx, triggerID, consumerID, params, time.Now().UTC())
 }
 
 // crmDispatchAt is crmDispatch with the tick's clock injected: the scheduler
 // passes its own `now` so the exactly-once (trigger, consumer, IST-day) claim
 // keys on the SAME day the schedule condition was evaluated on — event-driven
 // callers keep the wall clock via crmDispatch.
-func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string, now time.Time) {
+//
+// It returns what the dispatch log recorded: ("SENT", ""), ("SUPPRESSED",
+// guard), or ("", "") when nothing was recorded this call (CRM off, unknown
+// trigger, or the day's claim already taken by an earlier tick or replica).
+func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerID primitive.ObjectID, params map[string]string, now time.Time) (status, guard string) {
 	if !crmEnabled() {
-		return
+		return "", ""
 	}
 	cfg := crmConfigLoad()
 	t, ok := cfg.Triggers[triggerID]
 	if !ok {
 		s.log.Warn("crm: unknown trigger", "id", triggerID)
-		return
+		return "", ""
 	}
 	row, won := s.crmClaimDispatch(ctx, t, consumerID, istDay(now))
 	if !won {
-		return // already handled today (exactly-once)
+		return "", "" // already handled today (exactly-once)
 	}
 	// Per-offer / total caps from the trigger's own frequency_cap block.
 	if capN := crmCapLimit(t); capN > 0 && s.crmCountTriggerSent(ctx, consumerID, t.ID) >= capN {
 		s.crmFinishDispatch(ctx, row, "SUPPRESSED", "G6_frequency_cap", "")
-		return
+		return "SUPPRESSED", "G6_frequency_cap"
 	}
 	if guard, pass := s.crmGuardCheck(ctx, t, consumerID, now); !pass {
 		s.crmFinishDispatch(ctx, row, "SUPPRESSED", guard, "")
-		return
+		return "SUPPRESSED", guard
 	}
 	tpl := cfg.Templates[t.Template.String()]
 	std := s.crmStandardParams(ctx, consumerID)
@@ -620,9 +624,10 @@ func (s *service) crmDispatchAt(ctx context.Context, triggerID string, consumerI
 	}
 	if len(delivered) == 0 {
 		s.crmFinishDispatch(ctx, row, "SUPPRESSED", "G9_channel_availability", ch.Name())
-		return
+		return "SUPPRESSED", "G9_channel_availability"
 	}
 	s.crmFinishDispatch(ctx, row, "SENT", "", strings.Join(delivered, "+"))
+	return "SENT", ""
 }
 
 // crmStandardParams resolves the placeholders every template may carry.
@@ -846,11 +851,17 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 			if day > crmOfferConfig().Pack2GraceDays && o.Pack2State == pack2Locked {
 				// The MANDATORY "nothing has been charged" message goes FIRST
 				// (the dispatch-log claim + per-offer cap make it exactly-once);
-				// only then the irreversible CAS. A transient send failure
-				// leaves the state locked, so the next tick retries BOTH —
-				// dispatch-then-expire is at-least-once, expire-then-dispatch
-				// silently lost the spec's one non-negotiable message.
-				s.crmDispatchAt(ctx, "W-07", o.ConsumerID, nil, now)
+				// only then the irreversible CAS, and ONLY once the message is
+				// on record as SENT: today's dispatch, or one an earlier day
+				// already sent (a transition that failed that day retries
+				// here). A suppressed or unclaimed W-07 leaves the pack locked
+				// and the next day's claim tries again; the recharge unlock is
+				// already closed past the grace day, so nothing is promised
+				// meanwhile that cannot be honoured.
+				status, _ := s.crmDispatchAt(ctx, "W-07", o.ConsumerID, nil, now)
+				if status != "SENT" && s.crmCountTriggerSent(ctx, o.ConsumerID, "W-07") == 0 {
+					continue
+				}
 				if moved, _ := s.repo.transitionPack(ctx, o.ConsumerID, 2, pack2Locked, pack2Expired, "grace window elapsed", nil); moved {
 					s.emitCRMEvent(ctx, "offer_pack_state_change", o.ConsumerID, map[string]any{"pack_no": 2, "from": pack2Locked, "to": pack2Expired})
 				}
