@@ -17,29 +17,46 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/httpx"
 )
 
-// COMPLAINT REGISTER — the customer's grievance channel, to the contract the
-// consumer app already calls (HANDOFF-FRONTEND-PHASE2-2026-09-18 §5).
+// COMPLAINT REGISTER - the customer's grievance channel, to the contract the
+// consumer app calls (HANDOFF-FRONTEND-PHASE2 s5, pyaas-consumer
+// lib/complaints.ts).
 //
-// Until now there was no route behind it. The app wrote the complaint on the
-// phone, showed the member a reference ("PYS-4F21A registered"), and retried a
-// POST that 404ed forever — while the same screen printed the grievance
-// officer's name and duties from the Privacy Policy. A grievance channel that
-// reaches nobody is worse than no channel at all, so this is the missing half.
+// The app never blocks a member from complaining: it writes the row on the
+// phone with a human reference (PYS-XXXXX), shows it immediately, POSTs it
+// here, and retries anything filed offline on every refresh. Two rules
+// follow from that design:
 //
-// The app owns the reference: it files offline first and syncs later, so `ref`
-// arrives from the client and is what the member quotes on the phone. It is
-// unique PER CONSUMER (a retry of the same filing must not create a second
-// row), never globally — two members can hold the same short code without one
-// of them being refused.
+//  1. THE REFERENCE IS THE CLIENT'S. The member has already been shown it and
+//     may have quoted it to support before the row ever reached the server,
+//     so `ref` is required on the wire, is what support searches by, and
+//     re-POSTing the same ref must return the row already held rather than
+//     file a duplicate. It is unique PER CONSUMER, never globally: two members
+//     can hold the same short code without one of them being refused.
+//  2. `resolution` IS READ BY THE CUSTOMER verbatim. It is not an internal
+//     note field; whatever an operator types here is what the member sees.
+//
+// The client keeps a `queued` status for rows it has not yet synced. That
+// value never travels - a row that reaches this register is at least `open`.
+//
+// Three surfaces share the one store below: the member's own routes
+// (/consumer/complaints), the Saathi operator queue (/consumer/ops/complaints,
+// STORE_MANAGER or SUPER_ADMIN token) and the website's admin CRM
+// (/consumer/admin/crm/complaints, X-Admin-Key). The two operator surfaces
+// deliberately live under their own prefixes: the member group and the
+// operator group are mounted on the same /consumer router, and chi does not
+// panic on a duplicate pattern, it silently serves the last one registered.
 const collComplaints = "consumer_complaints"
 
+// The closed category set the app ships. A blank category defaults to
+// "other" (the member typed a complaint and must not lose it to a dropdown
+// they skipped); anything else is refused rather than stored, so the support
+// queue cannot grow categories nobody filters on.
 var complaintCategories = map[string]bool{
 	"missing": true, "quality": true, "late": true,
 	"payment": true, "rider": true, "app": true, "other": true,
 }
 
-// Status vocabulary, as the app renders it. "queued" is the client's own
-// not-yet-synced state and is never stored here.
+// Status vocabulary, as the app renders it.
 const (
 	complaintOpen     = "open"
 	complaintInReview = "in_review"
@@ -50,6 +67,9 @@ const (
 var complaintStatuses = map[string]bool{
 	complaintOpen: true, complaintInReview: true, complaintResolved: true, complaintClosed: true,
 }
+
+// complaintTextMax caps the member's detail and the operator's resolution.
+const complaintTextMax = 4000
 
 type complaint struct {
 	MongoID    primitive.ObjectID `bson:"_id,omitempty"      json:"-"`
@@ -62,7 +82,7 @@ type complaint struct {
 	Detail     string             `bson:"detail"             json:"detail"`
 	PhotoURI   string             `bson:"photo_uri,omitempty" json:"photo_uri,omitempty"`
 	Status     string             `bson:"status"             json:"status"`
-	// Resolution is shown to the MEMBER verbatim — write it as something a
+	// Resolution is shown to the MEMBER verbatim - write it as something a
 	// customer should read.
 	Resolution string    `bson:"resolution,omitempty" json:"resolution,omitempty"`
 	CreatedAt  time.Time `bson:"created_at"         json:"created_at"`
@@ -75,22 +95,17 @@ func newComplaintID() string {
 	return "cmp_" + hex.EncodeToString(b)
 }
 
-// newComplaintRef mints the short code the member quotes on the phone, for the
-// rare filing that arrives without one.
-func newComplaintRef() string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
-	return "PYS-" + strings.ToUpper(hex.EncodeToString(b))
-}
-
 func (r *repository) complaints() *mongo.Collection {
 	return r.accounts.Database().Collection(collComplaints)
 }
 
+// ensureComplaintIndexes - the unique (consumer_id, ref) index is the race
+// guard behind rule 1. Its build is NON-fatal at boot (module.go): the
+// register is not a money gate and must never refuse to boot a backend that
+// is also serving orders and wallets. fileComplaint therefore checks for the
+// row before it inserts, so a retry stays idempotent with the index absent.
 func (r *repository) ensureComplaintIndexes(ctx context.Context) error {
 	_, err := r.complaints().Indexes().CreateMany(ctx, []mongo.IndexModel{
-		// One row per (consumer, ref): the app retries the same filing until it
-		// syncs, and a retry must never mint a second complaint.
 		{Keys: bson.D{{Key: "consumer_id", Value: 1}, {Key: "ref", Value: 1}}, Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "consumer_id", Value: 1}, {Key: "created_at", Value: -1}}},
 		{Keys: bson.D{{Key: "status", Value: 1}, {Key: "created_at", Value: -1}}},
@@ -106,25 +121,46 @@ type complaintInput struct {
 	PhotoURI string `json:"photo_uri"`
 }
 
+// fileComplaint stores one complaint. Idempotent by (consumer, ref): a repeat
+// of a ref already held returns the stored row untouched - status and any
+// resolution an operator has since written included - so the app's offline
+// retry is safe to run as often as it likes.
 func (s *service) fileComplaint(ctx context.Context, consumerID primitive.ObjectID, in complaintInput) (*complaint, error) {
+	category := strings.ToLower(strings.TrimSpace(in.Category))
+	if category == "" {
+		category = "other"
+	}
+	if !complaintCategories[category] {
+		return nil, errBadRequest("unknown complaint category: " + category)
+	}
 	detail := strings.TrimSpace(in.Detail)
 	if detail == "" {
-		return nil, errBadRequest("tell us what went wrong")
+		return nil, errBadRequest("a complaint needs a detail")
 	}
-	if len(detail) > 2000 {
-		detail = detail[:2000]
-	}
-	category := strings.ToLower(strings.TrimSpace(in.Category))
-	if !complaintCategories[category] {
-		category = "other" // never refuse a complaint over a category typo
+	if len(detail) > complaintTextMax {
+		detail = detail[:complaintTextMax]
 	}
 	ref := strings.ToUpper(strings.TrimSpace(in.Ref))
 	if ref == "" {
-		ref = newComplaintRef()
+		return nil, errBadRequest("a complaint reference (ref) is required")
 	}
 	if len(ref) > 32 {
 		ref = ref[:32]
 	}
+	byRef := bson.D{{Key: "consumer_id", Value: consumerID}, {Key: "ref", Value: ref}}
+
+	// IDEMPOTENCY MUST NOT DEPEND ON THE INDEX ALONE. The unique index is the
+	// race guard, but its build is non-fatal at boot, so a failed build would
+	// otherwise turn every retry into a duplicate. Check first, and keep the
+	// duplicate-key path below for the genuine race: correct with the index,
+	// still correct without it.
+	var existing complaint
+	if err := s.repo.complaints().FindOne(ctx, byRef).Decode(&existing); err == nil {
+		return &existing, nil
+	} else if err != mongo.ErrNoDocuments {
+		return nil, errInternal("could not check the complaint register")
+	}
+
 	now := time.Now().UTC()
 	c := &complaint{
 		MongoID: primitive.NewObjectID(), ID: newComplaintID(), Ref: ref, ConsumerID: consumerID,
@@ -137,19 +173,17 @@ func (s *service) fileComplaint(ctx context.Context, consumerID primitive.Object
 	}
 	if _, err := s.repo.complaints().InsertOne(ctx, c); err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			// The same filing, retried after an offline spell — hand back the row
-			// that already exists so the app stops queueing it.
-			var existing complaint
-			if e := s.repo.complaints().FindOne(ctx,
-				bson.D{{Key: "consumer_id", Value: consumerID}, {Key: "ref", Value: ref}}).Decode(&existing); e == nil {
+			// The same filing, retried in the window between the check and the
+			// insert - hand back the row that won.
+			if e := s.repo.complaints().FindOne(ctx, byRef).Decode(&existing); e == nil {
 				return &existing, nil
 			}
 		}
-		return nil, errInternal("complaint could not be filed")
+		return nil, errInternal("could not file the complaint")
 	}
 	s.log.InfoContext(ctx, "consumer complaint filed", "ref", ref, "category", category, "order", c.OrderID)
 	// CRM (contract C6, inert unless CRM_ENABLED): only a NEW row emits; the
-	// duplicate return above is the app's retry of a filing already made.
+	// duplicate returns above are the app's retry of a filing already made.
 	if crmEnabled() {
 		s.emitCRMEvent(ctx, "complaint.created", consumerID, map[string]any{
 			"complaint_id": c.ID, "ref": c.Ref, "category": c.Category, "order_id": c.OrderID,
@@ -158,21 +192,106 @@ func (s *service) fileComplaint(ctx context.Context, consumerID primitive.Object
 	return c, nil
 }
 
+// listComplaints returns the member's own complaints, newest first.
 func (s *service) listComplaints(ctx context.Context, consumerID primitive.ObjectID) ([]complaint, error) {
 	cur, err := s.repo.complaints().Find(ctx,
 		bson.D{{Key: "consumer_id", Value: consumerID}},
 		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(200))
 	if err != nil {
-		return nil, errInternal("complaints lookup failed")
+		return nil, errInternal("could not read complaints")
 	}
-	out := []complaint{}
+	out := []complaint{} // never nil - the app renders a list, not a null
 	if err := cur.All(ctx, &out); err != nil {
-		return nil, errInternal("complaints decode failed")
+		return nil, errInternal("could not decode complaints")
 	}
 	return out, nil
 }
 
-// ── HTTP (consumer) ─────────────────────────────────────────────────────────
+// -- Answering a complaint (operator side) -----------------------------------
+
+// complaintUpdateInput is the operator's side. `resolution` is READ BY THE
+// CUSTOMER verbatim, so it is written as something a member should read.
+type complaintUpdateInput struct {
+	Status     string `json:"status"`
+	Resolution string `json:"resolution"`
+}
+
+// answerComplaint is the ONE write path behind both operator surfaces: it
+// moves the status and/or writes the resolution the member reads, on the row
+// the filter selects (by ref for the Saathi queue, by complaint id for the
+// website's admin CRM). Without this the register was write-only: a member
+// could file, and nothing in the product could ever answer them.
+func (s *service) answerComplaint(ctx context.Context, filter bson.D, in complaintUpdateInput) (*complaint, error) {
+	set := bson.D{{Key: "updated_at", Value: time.Now().UTC()}}
+	st := strings.ToLower(strings.TrimSpace(in.Status))
+	if st != "" {
+		if !complaintStatuses[st] {
+			return nil, errBadRequest("unknown complaint status: " + st)
+		}
+		set = append(set, bson.E{Key: "status", Value: st})
+	}
+	if res := strings.TrimSpace(in.Resolution); res != "" {
+		if len(res) > complaintTextMax {
+			res = res[:complaintTextMax]
+		}
+		set = append(set, bson.E{Key: "resolution", Value: res})
+	}
+	if len(set) == 1 { // only the timestamp - nothing was actually asked for
+		return nil, errBadRequest("send a status or a resolution")
+	}
+	var updated complaint
+	err := s.repo.complaints().FindOneAndUpdate(ctx, filter,
+		bson.D{{Key: "$set", Value: set}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&updated)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, errNotFound("no complaint with that reference")
+		}
+		return nil, errInternal("could not update the complaint")
+	}
+	// CRM (contract C6, inert unless CRM_ENABLED): the member hears back.
+	if st == complaintResolved && crmEnabled() {
+		s.emitCRMEvent(ctx, "complaint.resolved", updated.ConsumerID, map[string]any{
+			"complaint_id": updated.ID, "ref": updated.Ref, "resolution": updated.Resolution,
+		})
+	}
+	return &updated, nil
+}
+
+// updateComplaint answers the complaint the operator names by its reference -
+// the code the member quotes on the phone.
+func (s *service) updateComplaint(ctx context.Context, ref string, in complaintUpdateInput) (*complaint, error) {
+	ref = strings.ToUpper(strings.TrimSpace(ref))
+	if ref == "" {
+		return nil, errBadRequest("a complaint reference is required")
+	}
+	return s.answerComplaint(ctx, bson.D{{Key: "ref", Value: ref}}, in)
+}
+
+// listAllComplaints is the support queue, newest first, optionally filtered
+// to one status. An unknown status is refused rather than silently widened.
+func (s *service) listAllComplaints(ctx context.Context, status string) ([]complaint, error) {
+	f := bson.D{}
+	if st := strings.ToLower(strings.TrimSpace(status)); st != "" {
+		if !complaintStatuses[st] {
+			return nil, errBadRequest("unknown complaint status: " + st)
+		}
+		f = bson.D{{Key: "status", Value: st}}
+	}
+	cur, err := s.repo.complaints().Find(ctx, f,
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(500))
+	if err != nil {
+		return nil, errInternal("could not read the complaint queue")
+	}
+	out := []complaint{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("could not decode the complaint queue")
+	}
+	return out, nil
+}
+
+// -- HTTP (consumer) -----------------------------------------------------------
 
 func (h *handler) fileComplaint(w http.ResponseWriter, r *http.Request) {
 	id, aerr := actorID(r)
@@ -207,26 +326,42 @@ func (h *handler) listComplaints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// ── HTTP (admin CRM) ────────────────────────────────────────────────────────
-//
-// The half that makes the register real: somebody at PYAAS has to see these,
-// and the member has to get an answer back. Mounted under /consumer/admin/*
-// (SUPER_ADMIN token or the website's admin key), like the rest of the CRM.
+// -- HTTP (Saathi operator queue, /consumer/ops/complaints) -------------------
 
-func (h *handler) crmComplaints(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	filter := bson.D{}
-	if st := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status"))); complaintStatuses[st] {
-		filter = append(filter, bson.E{Key: "status", Value: st})
-	}
-	cur, err := h.svc.repo.complaints().Find(ctx, filter,
-		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(500))
+func (h *handler) opsListComplaints(w http.ResponseWriter, r *http.Request) {
+	list, err := h.svc.listAllComplaints(r.Context(), r.URL.Query().Get("status"))
 	if err != nil {
-		httpx.Error(w, r, toHTTPErr(errInternal("complaints lookup failed")))
+		writeErr(w, err)
 		return
 	}
-	var rows []complaint
-	_ = cur.All(ctx, &rows)
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (h *handler) opsUpdateComplaint(w http.ResponseWriter, r *http.Request) {
+	var in complaintUpdateInput
+	if err := decode(r, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	c, err := h.svc.updateComplaint(r.Context(), chi.URLParam(r, "ref"), in)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+// -- HTTP (admin CRM, /consumer/admin/crm/complaints) -------------------------
+//
+// The website's half of the register: SUPER_ADMIN token or the website's
+// admin key (admin_crm.go), camelCase rows in an {items,total,open} envelope.
+
+func (h *handler) crmComplaints(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.svc.listAllComplaints(r.Context(), r.URL.Query().Get("status"))
+	if err != nil {
+		httpx.Error(w, r, toHTTPErr(err))
+		return
+	}
 	out := make([]map[string]any, 0, len(rows))
 	open := 0
 	for _, c := range rows {
@@ -243,46 +378,18 @@ func (h *handler) crmComplaints(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"items": out, "total": len(out), "open": open})
 }
 
-// crmUpdateComplaint moves a complaint along and writes the answer the member
-// reads. `resolution` is rendered to them verbatim.
+// crmUpdateComplaint answers the complaint the website names by its id.
 func (h *handler) crmUpdateComplaint(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	var body struct {
-		Status     string `json:"status"`
-		Resolution string `json:"resolution"`
-	}
-	if err := decode(r, &body); err != nil {
+	var in complaintUpdateInput
+	if err := decode(r, &in); err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
-	st := strings.ToLower(strings.TrimSpace(body.Status))
-	if !complaintStatuses[st] {
-		httpx.Error(w, r, httpx.BadRequest("BAD_STATUS", "status must be open, in_review, resolved or closed"))
-		return
-	}
-	set := bson.D{{Key: "status", Value: st}, {Key: "updated_at", Value: time.Now().UTC()}}
-	if res := strings.TrimSpace(body.Resolution); res != "" {
-		if len(res) > 2000 {
-			res = res[:2000]
-		}
-		set = append(set, bson.E{Key: "resolution", Value: res})
-	}
-	after := options.After
-	var updated complaint
-	err := h.svc.repo.complaints().FindOneAndUpdate(ctx,
-		bson.D{{Key: "complaint_id", Value: chi.URLParam(r, "complaintId")}},
-		bson.D{{Key: "$set", Value: set}},
-		&options.FindOneAndUpdateOptions{ReturnDocument: &after},
-	).Decode(&updated)
+	updated, err := h.svc.answerComplaint(r.Context(),
+		bson.D{{Key: "complaint_id", Value: chi.URLParam(r, "complaintId")}}, in)
 	if err != nil {
-		httpx.Error(w, r, toHTTPErr(errNotFound("complaint not found")))
+		httpx.Error(w, r, toHTTPErr(err))
 		return
-	}
-	// CRM (contract C6, inert unless CRM_ENABLED): the member hears back.
-	if st == complaintResolved && crmEnabled() {
-		h.svc.emitCRMEvent(ctx, "complaint.resolved", updated.ConsumerID, map[string]any{
-			"complaint_id": updated.ID, "ref": updated.Ref, "resolution": updated.Resolution,
-		})
 	}
 	httpx.JSON(w, http.StatusOK, updated)
 }

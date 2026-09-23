@@ -77,14 +77,15 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		status, offeredAt = "OFFERED", now.Format(time.RFC3339)
 	}
 	prefs := s.resolveDeliveryPrefs(ctx, o)
-	// Carry the structured door onto the task when the customer picked one.
+	// Carry the structured door onto the task when it is certain which saved
+	// address the order ships to (structuredDoorFor): a route is grouped by
+	// (society, tower, floor), and a guessed tower is worse than none.
 	var society, societyID, tower, unit string
 	var floor *int
-	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
-		if a := s.addressFor(ctx, cid, o.AddressID, o.AddressLabel); a != nil {
-			society, societyID, tower, unit, floor = a.Society, a.SocietyID, a.Tower, a.Unit, a.Floor
-		}
+	if door := s.structuredDoorFor(ctx, o); door != nil {
+		society, societyID, tower, unit, floor = door.Society, door.SocietyID, door.Tower, door.Unit, door.Floor
 	}
+
 	del := &delivery{
 		MongoID: primitive.NewObjectID(), ID: newDeliveryID(), OrderID: o.OrderID, OrderCode: o.OrderID,
 		StoreID: storeID, RiderPartyID: "", ConsumerID: o.UserID, ConsumerName: o.ConsumerName,
@@ -192,12 +193,8 @@ func (s *service) addressFor(ctx context.Context, consumerID primitive.ObjectID,
 	// The saved address's id wins when the order carries one: two rows can
 	// both be called "Home", and the label alone stamped the wrong flat on
 	// the task. Scoped to this consumer, so someone else's id is ignored.
-	if id := strings.TrimSpace(addressID); id != "" {
-		if oid, perr := primitive.ObjectIDFromHex(id); perr == nil {
-			if a, ferr := s.repo.findAddress(ctx, oid, consumerID); ferr == nil && a != nil {
-				return a
-			}
-		}
+	if a := s.addressByID(ctx, consumerID, addressID); a != nil {
+		return a
 	}
 	addrs, err := s.repo.listAddresses(ctx, consumerID)
 	if err != nil || len(addrs) == 0 {
@@ -247,6 +244,79 @@ func (s *service) addressPrefs(ctx context.Context, consumerID primitive.ObjectI
 		return nil
 	}
 	return p
+}
+
+// addressByID resolves the saved address an order names, scoped to the
+// consumer so someone else's id is ignored. Nil when absent or foreign.
+func (s *service) addressByID(ctx context.Context, consumerID primitive.ObjectID, addressID string) *address {
+	id := strings.TrimSpace(addressID)
+	if id == "" {
+		return nil
+	}
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil
+	}
+	a, err := s.repo.findAddress(ctx, oid, consumerID)
+	if err != nil {
+		return nil
+	}
+	return a
+}
+
+// structuredDoorFor picks the saved address whose society/tower/floor/unit
+// is copied onto the task. A door is copied only when it is CERTAIN which
+// row the order ships to: mis-grouping a route is worse than not grouping
+// it. Nil means "copy nothing".
+//
+//   - address_id names the row (the app sends the server's id): certain.
+//   - otherwise the rows that could be the destination are gathered: the
+//     ones whose label matches the order's, narrowed to those that compose
+//     to the order's address_text ([line1, line2, city, pincode] joined, the
+//     way the app builds it) when any do. The door is copied only when every
+//     candidate names the SAME door (sameDoor). Two rows saved twice by a
+//     lost response are identical and still group; two "Home" rows in
+//     different towers yield nothing.
+func (s *service) structuredDoorFor(ctx context.Context, o *order) *address {
+	cid, err := primitive.ObjectIDFromHex(o.UserID)
+	if err != nil {
+		return nil
+	}
+	if a := s.addressByID(ctx, cid, o.AddressID); a != nil {
+		return a
+	}
+	list, lerr := s.repo.listAddresses(ctx, cid)
+	if lerr != nil || len(list) == 0 {
+		return nil
+	}
+	label := strings.TrimSpace(o.AddressLabel)
+	cands := make([]*address, 0, len(list))
+	for i := range list {
+		if label == "" || strings.EqualFold(strings.TrimSpace(list[i].Label), label) {
+			cands = append(cands, &list[i])
+		}
+	}
+	if want := strings.TrimSpace(o.AddressText); want != "" {
+		byText := make([]*address, 0, len(cands))
+		for _, c := range cands {
+			if joinAddress(c) == want {
+				byText = append(byText, c)
+			}
+		}
+		if len(byText) > 0 {
+			cands = byText
+		}
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	hit := cands[0]
+	for _, c := range cands[1:] {
+		if !sameDoor(hit, c) {
+			return nil // genuinely ambiguous: different doors
+		}
+	}
+	return hit
 }
 
 // ── Store manager ───────────────────────────────────────────────────────────
@@ -1241,4 +1311,21 @@ func slotLabel(o *order) string {
 		return o.DeliveryDate
 	}
 	return o.DeliveryWindow
+}
+
+// sameDoor reports whether two saved addresses name the same physical door.
+// A nil floor and a set floor are different answers, so the comparison is on
+// the pointer's VALUE-or-absence, not on the pointer itself.
+func sameDoor(a, b *address) bool {
+	if a.SocietyID != b.SocietyID || a.Tower != b.Tower || a.Unit != b.Unit {
+		return false
+	}
+	switch {
+	case a.Floor == nil && b.Floor == nil:
+		return true
+	case a.Floor == nil || b.Floor == nil:
+		return false
+	default:
+		return *a.Floor == *b.Floor
+	}
 }

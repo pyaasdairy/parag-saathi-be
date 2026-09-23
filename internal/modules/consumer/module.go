@@ -57,6 +57,19 @@ func Register(r chi.Router, d *deps.Deps) {
 		log.Warn("delivery query index setup incomplete", slog.Any("err", err))
 	}
 
+	// Phase-2 feature indexes (complaints, push devices). NON-fatal for the
+	// same reason as the rider console: the complaint uniqueness guard makes a
+	// retried filing idempotent and the push token index keeps one row per
+	// device, but neither guards money. A transient build failure must degrade
+	// those two features, never refuse to boot a backend that is also serving
+	// orders, wallets and deliveries.
+	if err := repo.ensureComplaintIndexes(ctx); err != nil {
+		log.Warn("complaint index setup incomplete", slog.Any("err", err))
+	}
+	if err := repo.ensurePushIndexes(ctx); err != nil {
+		log.Warn("push index setup incomplete", slog.Any("err", err))
+	}
+
 	// Seed the baseline catalog products (idempotent, single BulkWrite). Runs
 	// AFTER the money-gate indexes and is deliberately NON-FATAL: unlike the
 	// wallet index above, a transient DB blip while loading catalog DATA must not
@@ -327,6 +340,20 @@ func Register(r chi.Router, d *deps.Deps) {
 				cm.Post("/crm/offers/{phone}/override", h.crmOverrideOffer)
 				cm.Get("/crm/dispatch-log/{phone}", h.crmDispatchLog)
 				cm.Post("/crm/flags", h.crmSetFlag)
+
+				// Support queue for the customer complaint register. Without
+				// these the register was write-only — a member could file and
+				// nothing in the product could answer them.
+				//
+				// The path MUST NOT be "/complaints": this operator group and the
+				// member group are both mounted on the same /consumer router, so
+				// that pattern collides with the member's own list and the
+				// operator handler silently wins — chi does not panic on the
+				// duplicate, it just serves the last one, and members are then
+				// told their valid token is invalid. Hence the /ops prefix, which
+				// the neighbouring CRM routes get for free from their /crm one.
+				cm.Get("/ops/complaints", h.opsListComplaints)
+				cm.Patch("/ops/complaints/{ref}", h.opsUpdateComplaint)
 			})
 
 			// Store manager (STORE_MANAGER): orders in the store's vicinity, its

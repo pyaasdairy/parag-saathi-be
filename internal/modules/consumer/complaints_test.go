@@ -50,11 +50,15 @@ func TestComplaintFilingIsIdempotentPerMember(t *testing.T) {
 		t.Errorf("another member's identical ref was refused: %v", err)
 	}
 
-	// An unknown category is filed as "other" — never refused, because the
-	// complaint matters more than its label.
-	odd, err := w.svc.fileComplaint(ctx, cid, complaintInput{Ref: "PYS-ZZZ", Category: "nonsense", Detail: "x"})
+	// A category outside the app's closed set is refused rather than stored
+	// (phase2_contracts_mongo_test.go pins it); a BLANK one files as "other",
+	// because the complaint matters more than a dropdown the member skipped.
+	if _, err := w.svc.fileComplaint(ctx, cid, complaintInput{Ref: "PYS-ZZZ", Category: "nonsense", Detail: "x"}); err == nil {
+		t.Error("an unknown category should be refused")
+	}
+	odd, err := w.svc.fileComplaint(ctx, cid, complaintInput{Ref: "PYS-ZZZ", Detail: "x"})
 	if err != nil || odd.Category != "other" {
-		t.Errorf("odd category should file as other, got %+v (%v)", odd, err)
+		t.Errorf("blank category should file as other, got %+v (%v)", odd, err)
 	}
 	// An empty complaint is refused: there is nothing for an operator to answer.
 	if _, err := w.svc.fileComplaint(ctx, cid, complaintInput{Ref: "PYS-EMPTY", Detail: "   "}); err == nil {

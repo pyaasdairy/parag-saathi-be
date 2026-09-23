@@ -126,15 +126,9 @@ func (r *repository) ensureIndexes(ctx context.Context) error {
 	if err := r.ensureCatalogIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer catalog indexes: %w", err)
 	}
-	// The complaint register's (consumer, ref) uniqueness is what stops a
-	// retried offline filing becoming a second ticket — like the other
-	// correctness indexes above, a boot without it is a boot that can duplicate.
-	if err := r.ensureComplaintIndexes(ctx); err != nil {
-		return fmt.Errorf("consumer complaint indexes: %w", err)
-	}
-	if err := r.ensurePushIndexes(ctx); err != nil {
-		return fmt.Errorf("consumer push indexes: %w", err)
-	}
+	// The complaint and push-device indexes are built in module.go, NON-fatally:
+	// neither guards money, and fileComplaint checks for the row before it
+	// inserts, so a retried filing stays idempotent with the index absent.
 	if err := r.ensureGeoIndexes(ctx); err != nil {
 		return fmt.Errorf("consumer geofence indexes: %w", err)
 	}
