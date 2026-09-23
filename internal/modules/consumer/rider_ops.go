@@ -62,8 +62,9 @@ const (
 	collRiderSupport     = "rider_support_concerns"
 	collRiderReferrals   = "rider_referrals"
 	collRiderEmergency   = "rider_emergency_contacts"
+	collRiderTaskScans   = "rider_task_scans"
 	collDeliveryOTP      = "consumer_delivery_otp"
-	collDoorReferencePic = "consumer_door_photos" // no longer written; the erasure cascade still sweeps it
+	collDoorReferencePic = "consumer_door_photos"
 )
 
 // riderColl hands back a rider-ops collection from the same database the rest
@@ -309,11 +310,16 @@ type faceVerifyResponse struct {
 //	rider_ops_route.go       route today/complete, inventory today/verify
 //	rider_ops_money.go       cash list/otp/collect/undo, earnings, penalties/concern/waiver
 //	rider_ops_performance.go performance, feedback, daily timeline
-//	rider_ops_tasks.go       per-task undo (otp/scan/door-photo/compliance removed: no caller)
+//	rider_ops_tasks.go       per-task otp send/verify, scan, door photo, undo, compliance
 func registerRiderOps(dr chi.Router, h *handler) {
 	// Per-task extras — these hang off the existing /delivery/tasks/{deliveryId}
 	// lane and act on one delivery the rider currently holds.
+	dr.Post("/delivery/tasks/{deliveryId}/otp/send", h.riderTaskOTPSend)
+	dr.Post("/delivery/tasks/{deliveryId}/otp/verify", h.riderTaskOTPVerify)
+	dr.Post("/delivery/tasks/{deliveryId}/scan", h.riderTaskScan)
+	dr.Post("/delivery/tasks/{deliveryId}/door-photo", h.riderTaskDoorPhoto)
 	dr.Post("/delivery/tasks/{deliveryId}/undo", h.riderTaskUndo)
+	dr.Get("/delivery/tasks/{deliveryId}/compliance", h.riderTaskCompliance)
 
 	dr.Route("/delivery/rider", func(rr chi.Router) {
 		rr.Get("/me", h.riderMe)
@@ -407,9 +413,14 @@ func (r *repository) ensureRiderOpsIndexes(ctx context.Context) error {
 		{collRiderSupport, bson.D{{Key: "rider_party_id", Value: 1}, {Key: "raised_at", Value: -1}}, nil},
 		{collRiderReferrals, bson.D{{Key: "referrer_party_id", Value: 1}}, nil},
 		{collRiderEmergency, bson.D{{Key: "rider_party_id", Value: 1}}, options.Index().SetUnique(true)},
-		// OTP challenges expire themselves (the cash-collection OTP lives here).
+		// One scan binding per physical code — this unique index IS the
+		// "already bound to another task" rejection.
+		{collRiderTaskScans, bson.D{{Key: "code", Value: 1}}, options.Index().SetUnique(true)},
+		{collRiderTaskScans, bson.D{{Key: "delivery_id", Value: 1}}, nil},
+		// OTP challenges expire themselves.
 		{collDeliveryOTP, bson.D{{Key: "scope", Value: 1}, {Key: "ref_id", Value: 1}}, options.Index().SetUnique(true)},
 		{collDeliveryOTP, bson.D{{Key: "expires_at", Value: 1}}, options.Index().SetExpireAfterSeconds(0)},
+		{collDoorReferencePic, bson.D{{Key: "address_key", Value: 1}}, options.Index().SetUnique(true)},
 	}
 	// Keep going after a failure instead of returning: this loop creates the
 	// UNIQUE indexes that enforce one attendance record per rider per day, one
