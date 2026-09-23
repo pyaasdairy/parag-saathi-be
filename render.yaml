@@ -153,3 +153,24 @@ services:
         sync: false
       - key: EXPO_ACCESS_TOKEN
         sync: false
+      # -- Referrals + Founding Family (referrals.go, founding.go) --
+      # Money in PAISE; the ERP's FOUNDING-99 / DELIVERY-FEE prices win over
+      # the fallbacks once the Dolibarr sync sees them. See .env.example.
+      - key: REFERRAL_REWARD_PAISE # Rs 100 to each side on the first delivery
+        value: "10000"
+      - key: FOUNDING_PRICE_MONTH_PAISE # Rs 99 seat and monthly bill
+        value: "9900"
+      - key: FOUNDING_DELIVERY_FEE_PAISE # Rs 5 DELIVERY-FEE fallback
+        value: "500"
+      - key: FOUNDING_LEVEL3_OFF_PAISE_PER_LITRE # member price: level 1 minus Rs 2/L
+        value: "200"
+      - key: FOUNDING_SAVINGS_SKU # 1 L PYAAS line behind the savings line
+        value: pyaas-toned-1l
+      - key: FOUNDING_BILL_RETRY_DAYS # short-wallet billing days before a stop
+        value: "3"
+      - key: FOUNDING_FAMILY_CLOSED # true: the app says "opening soon"
+        value: "false"
+      - key: FOUNDING_PYAAS_MEMBERS_ONLY # spec 5.1; on with the app's lock screens
+        value: "false"
+      - key: FOUNDING_PYAAS_NONMEMBER_FEE # spec 5.3; on only with the founder's yes
+        value: "false"
