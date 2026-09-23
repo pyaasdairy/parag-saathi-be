@@ -121,3 +121,35 @@ services:
       # pyaasdairy.com/admin route sends as X-Admin-Key. ≥ 32 chars; unset = off.
       - key: ADMIN_API_KEY
         sync: false
+      # -- CRM (Welcome Litre campaign + order/complaint lifecycle messages) --
+      # Master switch. Unset or anything but "true": the binary behaves
+      # byte-identically to the pre-CRM build (no worker, no inbox, no sends).
+      - key: CRM_ENABLED
+        sync: false
+      # MSG91 Flow API for DLT-registered campaign SMS. A trigger absent from
+      # CRM_DLT_TEMPLATE_IDS NEVER attempts SMS (unregistered content is a
+      # TRAI violation); the ids come from the founder's DLT registrations.
+      # Format: see .env.example (plain id, or {"en":..,"hi":..} per trigger).
+      - key: CRM_MSG91_AUTHKEY
+        sync: false
+      - key: CRM_MSG91_SENDER
+        sync: false
+      - key: CRM_DLT_TEMPLATE_IDS
+        sync: false
+      # WhatsApp Cloud API with pre-approved templates. Inert unless BOTH the
+      # token and the phone-number id are set; a trigger absent from
+      # CRM_WA_TEMPLATE_NAMES never attempts the channel.
+      - key: CRM_WA_TOKEN
+        sync: false
+      - key: CRM_WA_PHONE_ID
+        sync: false
+      - key: CRM_WA_TEMPLATE_NAMES
+        sync: false
+      # Expo push service: the CRM "push" channel. Sends to the tokens the
+      # consumer app registers at POST /consumer/push/register; needs the
+      # app built with an EAS projectId (eas init) or no token ever exists.
+      # EXPO_ACCESS_TOKEN is optional (Expo push security).
+      - key: EXPO_PUSH_ENABLED
+        sync: false
+      - key: EXPO_ACCESS_TOKEN
+        sync: false
