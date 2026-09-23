@@ -1,0 +1,108 @@
+package consumer
+
+// Every event trigger the backend can reach carries only tokens the router
+// supplies for its topic: this is the "unresolved template token" refusal
+// the audit found, pinned as a test against the embedded config.
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestCRMEventTriggerTokensSupplied(t *testing.T) {
+	cfg := crmConfigLoad()
+	label := "Parag Gold Full Cream 500ml" + crmLabelledSuffix
+	// One representative payload per lifecycle topic, shaped as the emitters
+	// write it (contract C6) and as BSON hands it back.
+	sample := map[string]map[string]any{
+		"order.confirmed":    {"order_id": "ord_1", "labelled_product": label, "promotional_only": false, "eta": "today by 7 am"},
+		"order.dispatched":   {"order_id": "ord_1", "labelled_product": label, "partner": "Ravi", "eta_min": int32(12)},
+		"order.delivered":    {"order_id": "ord_1", "offer_pack": int32(0), "promotional_only": false, "labelled_product": label},
+		"order.failed":       {"order_id": "ord_1", "labelled_product": label, "reason": "Customer not home"},
+		"complaint.created":  {"complaint_id": "cmp_1", "ref": "PYS-1", "category": "missing", "order_id": "ord_1"},
+		"complaint.resolved": {"complaint_id": "cmp_1", "ref": "PYS-1", "resolution": "Refunded one pack"},
+		"rating.submitted":   {"order_id": "ord_1", "rating": int32(4)},
+	}
+	for _, topic := range crmLifecycleTopics {
+		if _, ok := sample[topic]; !ok {
+			t.Errorf("lifecycle topic %s has no sample payload in this test", topic)
+		}
+	}
+	o := &order{Total: 70, Items: []orderItem{{Name: "Parag Gold Full Cream", Variant: "500ml"}}}
+	// What crmStandardParams supplies unconditionally. DATE is deliberately
+	// absent: it exists only for a Welcome Litre household.
+	std := map[string]string{"LINK": "https://pyaasdairy.com/app", "SUPPORT_NUMBER": "96672 60050"}
+
+	routed := map[string]bool{}
+	for id, tr := range cfg.Triggers {
+		if tr.Kind != "event" || tr.Category == "internal" || tr.Template.String() == "" {
+			continue
+		}
+		payload, emitted := sample[tr.Event]
+		if !emitted {
+			continue // dead config: the backend emits no such topic
+		}
+		params := crmEventParams(tr.Event, payload, o)
+		for k, v := range std {
+			if _, taken := params[k]; !taken {
+				params[k] = v
+			}
+		}
+		tpl, ok := cfg.Templates[tr.Template.String()]
+		if !ok {
+			t.Errorf("%s names template %s which does not exist", id, tr.Template.String())
+			continue
+		}
+		if tok, ok := crmTemplateResolvable(tpl, params); !ok {
+			t.Errorf("%s (%s) template %s carries [%s], which the router cannot fill", id, tr.Event, tr.Template.String(), tok)
+		}
+		routed[id] = true
+	}
+	for _, id := range []string{"A-02", "D-01", "D-02", "D-06", "E-01", "E-02", "E-04", "E-06", "E-07", "W-02", "W-05"} {
+		if !routed[id] {
+			t.Errorf("%s should be reachable from a lifecycle topic", id)
+		}
+	}
+
+	// The routing fixes: sms is the LAST fallback where the audit asked for
+	// it, rcs (unshipped) is gone from D-02, and nothing lost an entry.
+	last := func(id string) string {
+		fb := cfg.Triggers[id].Delivery.Fallback
+		if len(fb) == 0 {
+			return ""
+		}
+		return fb[len(fb)-1].Channel
+	}
+	for _, id := range []string{"D-01", "D-02", "D-06", "E-06", "B-01", "E-05"} {
+		if last(id) != "sms" {
+			t.Errorf("%s: last fallback = %q, want sms (%+v)", id, last(id), cfg.Triggers[id].Delivery)
+		}
+	}
+	if fb := cfg.Triggers["D-02"].Delivery.Fallback; len(fb) != 2 || fb[0].Channel != "whatsapp" || fb[0].After != "PT5M" {
+		t.Errorf("D-02 fallback chain: %+v", fb)
+	}
+	if fb := cfg.Triggers["D-01"].Delivery.Fallback; len(fb) != 2 || fb[0].Channel != "whatsapp" || fb[0].After != "PT15M" {
+		t.Errorf("D-01 kept its whatsapp entry: %+v", fb)
+	}
+	if fb := cfg.Triggers["D-06"].Delivery.Fallback; len(fb) != 2 || fb[0].Channel != "whatsapp" || fb[0].After != "PT30M" {
+		t.Errorf("D-06 kept its whatsapp entry: %+v", fb)
+	}
+	if p := cfg.Triggers["B-01"].Delivery.Parallel; len(p) != 1 || p[0] != "push" {
+		t.Errorf("B-01 kept its parallel push: %v", p)
+	}
+
+	// meta.trigger_count is the real count, and the template registry is intact.
+	var meta struct {
+		Meta struct {
+			TriggerCount int `json:"trigger_count"`
+		} `json:"meta"`
+		Triggers  []json.RawMessage          `json:"triggers"`
+		Templates map[string]json.RawMessage `json:"templates"`
+	}
+	if err := json.Unmarshal(embeddedCRMConfig, &meta); err != nil {
+		t.Fatalf("embedded config: %v", err)
+	}
+	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 54 || len(meta.Templates) != 46 {
+		t.Fatalf("meta.trigger_count=%d triggers=%d templates=%d", meta.Meta.TriggerCount, len(meta.Triggers), len(meta.Templates))
+	}
+}

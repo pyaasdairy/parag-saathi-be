@@ -5,7 +5,7 @@
   "source_document": "Pyaas_CRM_Retention_AI_Calling_Playbook_Rev3.docx, 20 August 2026",
   "generated": "2026-08-20",
   "companion_spec": "PYAAS_CRM_App_Developer_Spec_Rev3.pdf",
-  "trigger_count": 43,
+  "trigger_count": 54,
   "architecture": "hybrid — in-house orchestration core, external vendor for AI outbound calls",
   "note": "Every trigger MUST pass the guard chain in `guards.evaluation_order` before dispatch. A trigger that fires but fails a guard is logged as suppressed with the failing guard id — it is never silently dropped.",
   "deviations_from_playbook": [
@@ -356,14 +356,14 @@
   "T-D02": {
    "dlt_category": "service_implicit",
    "cta": "track_live",
-   "en": "Out for delivery — [PARTNER], ETA [X] min.",
-   "hi": "Delivery ke liye nikla — ETA [X] min."
+   "en": "Out for delivery — [PARTNER], ETA [ETA_MIN] min.",
+   "hi": "Delivery ke liye nikla — ETA [ETA_MIN] min."
   },
   "T-D03": {
    "dlt_category": "service_implicit",
    "cta": "track",
-   "en": "Running a little late — new ETA [X]. Sorry for the wait.",
-   "hi": "Thodi der ho rahi hai — naya ETA [X]. Kshama karein."
+   "en": "Running a little late — new ETA [ETA]. Sorry for the wait.",
+   "hi": "Thodi der ho rahi hai — naya ETA [ETA]. Kshama karein."
   },
   "T-D04": {
    "dlt_category": "service_implicit",
@@ -418,8 +418,8 @@
   "T-E04": {
    "dlt_category": "service_implicit",
    "cta": "choose_fix",
-   "en": "Sorry! We'll redeliver [LABELLED_PRODUCT] or refund ₹[X] to your Wallet — your choice.",
-   "hi": "Maaf kijiye! [LABELLED_PRODUCT] dobara bhejein ya ₹[X] Wallet mein — aap batayein."
+   "en": "Sorry! We'll redeliver [LABELLED_PRODUCT] or refund ₹[AMOUNT] to your Wallet — your choice.",
+   "hi": "Maaf kijiye! [LABELLED_PRODUCT] dobara bhejein ya ₹[AMOUNT] Wallet mein — aap batayein."
   },
   "T-E06": {
    "dlt_category": "service_implicit",
@@ -748,7 +748,13 @@
     "parallel": [
      "push"
     ],
-    "fallback": []
+    "fallback": [
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
    },
    "template": "T-B01",
    "frequency_cap": {
@@ -1165,6 +1171,11 @@
       "channel": "whatsapp",
       "after": "PT15M",
       "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
      }
     ]
    },
@@ -1198,8 +1209,13 @@
     "primary": "push",
     "fallback": [
      {
-      "channel": "rcs",
+      "channel": "whatsapp",
       "after": "PT5M",
+      "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
       "if": "not_delivered"
      }
     ]
@@ -1335,6 +1351,11 @@
      {
       "channel": "whatsapp",
       "after": "PT30M",
+      "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
       "if": "not_delivered"
      }
     ]
@@ -1568,7 +1589,13 @@
    "critical": true,
    "delivery": {
     "primary": "human_call",
-    "fallback": []
+    "fallback": [
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
    },
    "ai_permitted": false,
    "template": null,
@@ -1602,7 +1629,13 @@
    "category": "service_implicit",
    "delivery": {
     "primary": "whatsapp",
-    "fallback": []
+    "fallback": [
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
    },
    "template": "T-E06",
    "frequency_cap": {
@@ -2690,18 +2723,25 @@
    "note": "enumerated reason codes, rendered from the event"
   },
   {
-   "token": "[DATE] [ETA] [ALT] [PARTNER] [X]",
-   "note": "runtime values from the event payload"
-  },
-  {
-   "token": "[SUPPORT_NUMBER]",
-   "note": "Resolves to 96672 60050. This is also the number that goes on every printed campaign asset — not a personal mobile (CH-17)."
-  },
-  {
-   "token": "[DATE] in T-W06",
-   "note": "first_delivery_date + 7 days, rendered in the customer language"
+   "token": "[DATE] [ALT] [X] [N] [NEW]",
+   "note": "runtime values from the event payload, still unwired: [DATE] in T-A03/T-B04/T-D08, [ALT] in T-D04, [X] in T-B05/T-C02/T-D05/T-E03 and the T-SMS bodies, [N] in T-C02, [NEW] in T-D08"
   }
  ],
+ "wired_placeholders": {
+  "note": "Filled by the engine at dispatch (crm_router.go crmEventParams, crm_engine.go crmStandardParams). Register each DLT flow's variables under these names lowercased (##labelled_product##, ##eta##, ##eta_min##, ...). [SUPPORT_NUMBER] resolves to 96672 60050, the number on every printed campaign asset (CH-17); [DATE] in T-W06 is first_delivery_date + 7 days.",
+  "tokens": [
+   "[LABELLED_PRODUCT]",
+   "[ETA]",
+   "[ETA_MIN]",
+   "[PARTNER]",
+   "[SLA]",
+   "[AMOUNT]",
+   "[REASON] (order.failed only; no template routes it yet)",
+   "[LINK]",
+   "[SUPPORT_NUMBER]",
+   "[DATE] in T-W06"
+  ]
+ },
  "traceability_display": {
   "correction": "CH-13",
   "rule": "Render the traceability block ONLY when order_line.supply_source == \"pyaas_own_brand\".",
