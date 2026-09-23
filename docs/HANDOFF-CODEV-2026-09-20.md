@@ -214,6 +214,16 @@ one member's order news on another member's phone. The response says
 
 ## 5. CRM / DLT — what actually sends today
 
+> **Superseded (24 Sep).** This section is the 20 Sep state and is kept as the record
+> of what was found. The per-trigger audit that replaced it is
+> `docs/CRM-AUDIT-2026-09-24.md`; the current table of every message (topic, when,
+> channels, env, status, rendered body) is `docs/CRM-MESSAGES.md`; the engine as it
+> works now is `docs/HANDOFF-CODEV-2026-09-24.md` section 4. Bugs 1, 3 and 5 below are
+> fixed (`8afae8f`, `a1b8623`, `c722996`); bug 4 is addressed by `e9c609c` (the manual
+> send now dedups by content); bug 6 is answered (the derived consent row IS written
+> from the member's `marketing_*` grants, `TestCRMW03bConsentGate`); bug 2 (B-02 copy
+> vs horizon) is still the founder's call.
+
 `crm_triggers.json` ships **56 trigger ids**. **11 have a dispatch call site** in Go.
 The other **45 are dead config** — every A-, C-, D-, E-, F- trigger, including the
 whole order lifecycle (confirmed, out for delivery, delivered, delayed, skipped) and
@@ -281,6 +291,54 @@ expiry.
 
 ## 6. Work still open
 
+> **Corrections (24 Sep).** Read these before the list below.
+>
+> - **The five rider per-task routes are RESTORED, not removed.** `29936df` removed
+>   `POST /consumer/delivery/tasks/{id}/otp/send`, `/otp/verify`, `/scan`,
+>   `/door-photo` and `GET .../compliance`; the deployed Saathi `release/26.07.03`
+>   still sends all five (`lib/api/rider_api.dart`, from `proof_sheet.dart` and
+>   `compliance_screen.dart`), so `5b16775` reverted the removal byte-identical and
+>   `TestRiderTaskRoutesAnswerForTheRider` pins it. Rule: never remove a route a
+>   deployed frontend still sends. The "Delete or keep" decision at the end of this
+>   section is closed: keep all five until no deployed build calls them.
+> - **CRM:** see `docs/CRM-AUDIT-2026-09-24.md` (the 54-trigger audit) and
+>   `docs/CRM-MESSAGES.md` (every message and its status today). Section 5 here is
+>   history.
+> - **Dry-run origins** (`d6145f9`). Three env keys replace a provider's
+>   scheme://host and keep every path, header and body exactly as production sends
+>   them, so one local stub captures the real requests. Unset, the real endpoint is
+>   used and the binary behaves byte-identically.
+>
+>   | Key | Replaces | Path the stub receives |
+>   |---|---|---|
+>   | `CRM_MSG91_BASE_URL` | `https://control.msg91.com` for BOTH MSG91 callers (the CRM flow channel and the login/delivery OTP client) | `/api/v5/flow/`, `/api/v5/otp` |
+>   | `CRM_WA_BASE_URL` | `https://graph.facebook.com` | `/v19.0/<CRM_WA_PHONE_ID>/messages` |
+>   | `EXPO_PUSH_BASE_URL` | `https://exp.host` | `/--/api/v2/push/send` |
+>
+>   A channel reaches the stub only when it is plugged: `CRM_MSG91_AUTHKEY` plus a
+>   `CRM_DLT_TEMPLATE_IDS` entry per trigger, `CRM_WA_TOKEN` + `CRM_WA_PHONE_ID` +
+>   `CRM_WA_TEMPLATE_NAMES`, `EXPO_PUSH_ENABLED=true` plus a device row.
+>   `crm_dryrun_seams_test.go` covers the seams.
+> - **The two unique indexes and their boot guards.** Neither can take the backend
+>   down at boot; each keeps an older guard in force when its build is refused.
+>   - `subscription_day_unique` on `consumer_orders (subscription_id, scheduled_for)`,
+>     partial on `subscription_id` existing and a LIVE status (`placed`, `confirmed`,
+>     `assigned`, `out_for_delivery`, `delivered`; `cancelled` is left out so a
+>     resumed day can be placed again) (`b00cc7d`). Built by
+>     `ensureSubscriptionDayIndex` at module boot; a refusal because older rows
+>     already collide is logged as an ERROR with the number of colliding
+>     (subscription, day) pairs, and `claimSubscriptionDay` stays the guard until an
+>     operator cleans them (the admin CRM lists them at
+>     `GET /consumer/admin/crm/duplicate-subscription-orders`). `$in` in a partial
+>     filter needs MongoDB 6.0+.
+>   - `crm_claim_scoped` on `crm_dispatch_log (trigger_id, consumer_id, ist_day,
+>     scope_key)` (`8edd9e1`), the CRM's exactly-once claim. `ensureCRMClaimIndex`
+>     first stamps `scope_key: ""` on legacy rows, builds the scoped index, and only
+>     then drops the legacy `trigger_id_1_consumer_id_1_ist_day_1`. If the build is
+>     refused the legacy per-day index is KEPT (logged as an ERROR with the duplicate
+>     count), so claims stay exactly-once, only coarser. The CRM worker retries
+>     `ensureCRMIndexes` on every tick until all CRM indexes are in place.
+
 **Backend (dev)**
 - `GET /orders` signs proof photos serially, up to 200 orders — sign the newest ~10 or
   do it concurrently.
@@ -326,9 +384,11 @@ expiry.
 - Should attendance gate the rider queue? (Today it does not.)
 - Should the store console be able to hand-assign an unclaimed `OFFERED` order?
   (Today nobody can; the admin CRM can.)
-- Delete or keep the now-unused rider endpoints `/otp/send`, `/otp/verify`,
-  `/door-photo`, `/compliance` — **`/scan` and `/undo` must survive**, the inventory
-  screen and the 15-minute undo still use them.
+- ~~Delete or keep the now-unused rider endpoints `/otp/send`, `/otp/verify`,
+  `/door-photo`, `/compliance`~~ **Closed (24 Sep): keep all five.** The deployed Saathi
+  build still sends them (see the corrections at the top of this section); `/scan` and
+  `/undo` must survive in any case, the inventory screen and the 15-minute undo use
+  them.
 
 ---
 
