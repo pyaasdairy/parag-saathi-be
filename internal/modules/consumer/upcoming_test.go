@@ -24,6 +24,10 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	ctx := context.Background()
 	store := w.storeID.Hex()
 	tomorrow := addDaysIST(istToday(time.Now()), 1)
+	// Before noon the upcoming window is exactly tomorrow (from noon it runs
+	// to the day after); the test drives the endpoint at 09:00 IST today.
+	ist := time.Now().In(istZone)
+	at := time.Date(ist.Year(), ist.Month(), ist.Day(), 9, 0, 0, 0, istZone)
 
 	// (a) a subscription preview: the 13:00 scheduler's unlocked order.
 	cid := w.customer(t, "9000006001", 500)
@@ -66,7 +70,7 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 		t.Fatalf("scheduled order: %v", err)
 	}
 
-	rows, err := w.svc.storeUpcoming(ctx, w.mgr, store)
+	rows, err := w.svc.storeUpcomingAt(ctx, w.mgr, store, at)
 	if err != nil {
 		t.Fatalf("storeUpcoming: %v", err)
 	}
@@ -92,7 +96,7 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	if _, err := w.db.Collection(collDeliveries).DeleteOne(ctx, bson.D{{Key: "order_id", Value: oneOff.OrderID}}); err != nil {
 		t.Fatalf("drop task: %v", err)
 	}
-	rows, err = w.svc.storeUpcoming(ctx, w.mgr, store)
+	rows, err = w.svc.storeUpcomingAt(ctx, w.mgr, store, at)
 	if err != nil {
 		t.Fatalf("storeUpcoming 2: %v", err)
 	}
@@ -140,20 +144,20 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	if _, err := w.db.Collection(collDeliveries).DeleteOne(ctx, bson.D{{Key: "order_id", Value: farOrder.OrderID}}); err != nil {
 		t.Fatalf("drop far task: %v", err)
 	}
-	rows2, err := w.svc.storeUpcoming(ctx, actor2, store2.Hex())
+	rows2, err := w.svc.storeUpcomingAt(ctx, actor2, store2.Hex(), at)
 	if err != nil {
 		t.Fatalf("storeUpcoming store2: %v", err)
 	}
 	if len(rows2) != 1 || rows2[0].OrderID != farOrder.OrderID {
 		t.Fatalf("store2 rows: %+v want only %s", rows2, farOrder.OrderID)
 	}
-	rows, _ = w.svc.storeUpcoming(ctx, w.mgr, store)
+	rows, _ = w.svc.storeUpcomingAt(ctx, w.mgr, store, at)
 	for _, r := range rows {
 		if r.OrderID == farOrder.OrderID {
 			t.Fatalf("the far order leaked into store 1's upcoming")
 		}
 	}
-	if _, err := w.svc.storeUpcoming(ctx, w.mgr, store2.Hex()); err == nil {
+	if _, err := w.svc.storeUpcomingAt(ctx, w.mgr, store2.Hex(), at); err == nil {
 		t.Fatalf("a manager of store 1 read store 2's upcoming")
 	}
 

@@ -114,6 +114,10 @@ type variantDoc struct {
 	VolumeMl   float64           `bson:"volume_ml,omitempty"    json:"volumeMl,omitempty"`
 	Unit       string            `bson:"unit,omitempty"         json:"unit,omitempty"`
 	Attributes map[string]string `bson:"attributes,omitempty"   json:"attributes,omitempty"`
+	// MemberPrice is the Founding Family (ERP level 3) price of this variant
+	// (founding.go). Stored when the ERP carries one; on the wire it is
+	// filled for every PYAAS milk line (derived when not stored).
+	MemberPrice *float64 `bson:"member_price,omitempty" json:"memberPrice,omitempty"`
 }
 
 // physicalDoc is the base product's physical envelope (used by delivery/packing
@@ -151,6 +155,10 @@ type catalogDoc struct {
 	BaseID       string             `bson:"base_id,omitempty"`
 	Variants     []variantDoc       `bson:"variants,omitempty"`
 	Physical     *physicalDoc       `bson:"physical,omitempty"`
+	// MemberPrice is the ERP's price level 3 (Founding Family) when the
+	// Dolibarr sync has seen one for a PYAAS line; nil means derive it
+	// (catalog_price.go memberPriceFor).
+	MemberPrice *float64 `bson:"member_price,omitempty"`
 	// Extended product fields — carried by seeded baseline products (kind=product)
 	// and available to additions. All optional; the consumer view emits them when
 	// present, and the app falls back to its own defaults when absent.
@@ -198,6 +206,9 @@ type overrideView struct {
 	// and hides the strike when it is 0), so an ERP price edit can never render
 	// under an out-of-date bundled MRP.
 	MRP *float64 `json:"mrp,omitempty"`
+	// MemberPrice: the Founding Family price of a PYAAS milk line ("Rs 85 ·
+	// members Rs 83"). Absent on Parag and everything else (never discounted).
+	MemberPrice *float64 `json:"member_price,omitempty"`
 }
 
 // additionView is a store-added SKU as the consumer app consumes it. A base
@@ -228,6 +239,10 @@ type additionView struct {
 	PackCount    *int           `json:"packCount,omitempty"`
 	BackPhotoURL string         `json:"back_photo_url,omitempty"`
 	Compliance   *complianceDoc `json:"compliance,omitempty"`
+	// MemberPrice: the Founding Family price of a PYAAS milk line, beside the
+	// level-1 price the app already reads. Absent when the line is never
+	// discounted (Parag, ghee).
+	MemberPrice *float64 `json:"member_price,omitempty"`
 }
 
 // catalogResponse is the whole overlay: a map of baseline-SKU overrides keyed by
@@ -912,6 +927,9 @@ func valOrZero(p *float64) float64 {
 // are display-only; money is priced here.
 func (s *service) serverPriceFor(ctx context.Context, productID string) (float64, bool) {
 	view, err := s.repo.catalogView(ctx, s.catalogServeSeeded)
+	if err == nil {
+		s.decorateMemberPrices(ctx, view)
+	}
 	if err == nil && view != nil {
 		if ov, ok := view.Overrides[productID]; ok && ov.Price != nil {
 			return *ov.Price, true
@@ -1439,4 +1457,59 @@ func (h *handler) deleteSkuHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// decorateMemberPrices fills member_price on every served PYAAS milk line
+// (and its variants) so the app can show "Rs 85 · members Rs 83" beside the
+// price it already reads. Parag and non-milk rows get nothing: a missing key
+// is the app's cue that the line is never discounted. Best-effort: a price
+// index failure leaves the view exactly as it was.
+func (s *service) decorateMemberPrices(ctx context.Context, view *catalogResponse) {
+	if view == nil {
+		return
+	}
+	ix, err := s.loadPriceIndex(ctx)
+	if err != nil {
+		return
+	}
+	for i := range view.Additions {
+		a := &view.Additions[i]
+		if !ix.isPyaasLine(a.ID) {
+			continue
+		}
+		if mp, ok := ix.memberPriceFor(a.ID, ""); ok && mp < a.Price {
+			p := mp
+			a.MemberPrice = &p
+		}
+		if len(a.Variants) == 0 {
+			continue
+		}
+		vs := make([]variantDoc, len(a.Variants))
+		copy(vs, a.Variants)
+		for j := range vs {
+			key := vs[j].Label
+			if key == "" {
+				key = vs[j].VariantID
+			}
+			if mp, ok := ix.memberPriceFor(a.ID, key); ok && mp < vs[j].Price {
+				p := mp
+				vs[j].MemberPrice = &p
+			}
+		}
+		a.Variants = vs
+	}
+	for sku, ov := range view.Overrides {
+		if !ix.isPyaasLine(sku) {
+			continue
+		}
+		base, ok := ix.priceFor(sku, "")
+		if !ok {
+			continue
+		}
+		if mp, ok := ix.memberPriceFor(sku, ""); ok && mp < base {
+			p := mp
+			ov.MemberPrice = &p
+			view.Overrides[sku] = ov
+		}
+	}
 }

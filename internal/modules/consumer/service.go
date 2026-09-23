@@ -708,6 +708,13 @@ func (s *service) walletTxns(ctx context.Context, consumerID primitive.ObjectID,
 // transient error) the gate row is rolled back on a DETACHED context — a
 // cancelled request can't orphan it — so a later top-up + retry still charges.
 func (s *service) debit(ctx context.Context, consumerID primitive.ObjectID, amount float64, ref, remark string) (walletView, error) {
+	return s.debitAs(ctx, consumerID, amount, "order", ref, remark)
+}
+
+// debitAs is debit with the ledger row's ref_type chosen by the caller: "order"
+// for a delivery settle, "founding" for a FOUNDING-99 seat or month
+// (founding.go). Same gate, same atomic move, same rollback.
+func (s *service) debitAs(ctx context.Context, consumerID primitive.ObjectID, amount float64, refType, ref, remark string) (walletView, error) {
 	amount = round2(amount)
 	if amount <= 0 {
 		return walletView{}, errBadRequest("amount must be positive")
@@ -727,7 +734,7 @@ func (s *service) debit(ctx context.Context, consumerID primitive.ObjectID, amou
 	}
 	gate := walletTxn{
 		ID: primitive.NewObjectID(), ConsumerID: consumerID,
-		Type: "DEBIT", Bucket: bucket, Amount: amount, RefType: "order", RefID: ref, Status: "SUCCESS", Remark: remark, CreatedAt: now,
+		Type: "DEBIT", Bucket: bucket, Amount: amount, RefType: refType, RefID: ref, Status: "SUCCESS", Remark: remark, CreatedAt: now,
 	}
 	dup, err := s.repo.insertWalletTxnGate(ctx, gate)
 	if err != nil {

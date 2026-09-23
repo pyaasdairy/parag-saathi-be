@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"flag"
 	"fmt"
 	"os"
@@ -23,8 +24,16 @@ import (
 
 	"github.com/pyaas/saathi-backend/internal/config"
 	"github.com/pyaas/saathi-backend/internal/domain"
+	"github.com/pyaas/saathi-backend/internal/modules/consumer"
 	"github.com/pyaas/saathi-backend/internal/platform/mongodb"
 )
+
+// foundingFarmsJSON is the Founding Family farm seed (consumer app, pyaas-app-
+// spec.md section 3.3). PLACEHOLDER records marked for the founder inside the
+// file: names, farmer consent, photos and thresholds are still to confirm.
+//
+//go:embed founding_farms.json
+var foundingFarmsJSON []byte
 
 // minimalMode seeds ONLY the org tree + the super admin + one onboarding
 // executive — the clean slate for a deploy-test database (e.g. Atlas):
@@ -157,6 +166,13 @@ func run() error {
 	fmt.Printf("  live-test rider → store %s\n", riderStoreID.Hex())
 
 	orgs := []*domain.OrgUnit{federation, union, plant, bmc, dcs1, dcs2, dcs3}
+
+	// ── Founding Family farms (consumer app) — insert-only, both modes ──────
+	if added, err := consumer.SeedFoundingFarms(ctx, db, foundingFarmsJSON); err != nil {
+		return fmt.Errorf("founding farms: %w", err)
+	} else {
+		fmt.Printf("  founding family farms: %d added (placeholders - see cmd/seed/founding_farms.json founder_todo)\n", added)
+	}
 
 	// ── Deploy-test minimal mode: org tree + admin + one onboarding exec ────
 	if *minimalMode {

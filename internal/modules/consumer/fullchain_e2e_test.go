@@ -323,7 +323,10 @@ func TestFullChainSubscriptionMorningDelivery(t *testing.T) {
 		t.Fatalf("server price authority: unit %v want 29", sub.UnitPrice)
 	}
 
-	// The morning sweep materialises today's delivery (same-day branch).
+	// The morning sweep materialises today's delivery: the catch-up branch,
+	// for a plan that predates today's noon cut-off (a plan created now would
+	// start on the first editable day under the noon rule).
+	chainBackdateSubscription(t, w, sub, time.Now().Add(-48*time.Hour))
 	placed := w.svc.sweepSubscriptionOrders(ctx, time.Now())
 	if placed < 1 {
 		t.Fatalf("sweep placed %d orders — the morning lane produced nothing", placed)

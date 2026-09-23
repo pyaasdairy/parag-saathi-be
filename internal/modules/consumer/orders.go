@@ -141,10 +141,10 @@ type order struct {
 	// Subscription linkage (worker-created morning orders, subscriptions.go).
 	// ScheduledFor is the IST day it delivers — surfaced as delivery_date (the
 	// FE Order field), so tomorrow's order shows as UPCOMING in the app from
-	// the moment it is scheduled. SubLockedAt is stamped at the midnight lock:
-	// before it, the order is a modifiable preview (subscription edits
-	// reconcile it, the shopper may cancel it); after it, the delivery task
-	// exists and the store owns it.
+	// the moment it is scheduled. SubLockedAt is stamped at the noon lock (12:00
+	// IST the day before delivery): before it, the order is a modifiable
+	// preview (subscription edits reconcile it, the shopper may cancel it);
+	// after it, the delivery task exists and the store owns it.
 	SubscriptionID string `bson:"subscription_id,omitempty" json:"-"`
 	ScheduledFor   string `bson:"scheduled_for,omitempty"   json:"scheduled_for,omitempty"`
 	SubLockedAt    string `bson:"sub_locked_at,omitempty"   json:"-"`
@@ -286,6 +286,11 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	if err != nil {
 		return nil, err
 	}
+	// FOUNDING FAMILY (founding.go): an active member bills PYAAS milk lines
+	// at level 3 and never pays delivery; Parag is level 1 for everyone.
+	memberActive := s.foundingActiveHex(ctx, userID)
+	consumerOID, _ := primitive.ObjectIDFromHex(userID)
+	hasPyaas := false
 	var subtotal float64
 	var units int
 	items := make([]orderItem, 0, len(in.Items))
@@ -298,9 +303,15 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 		}
 		// SERVER-AUTHORITATIVE PRICE: the catalog's price index is the one billed —
 		// the client's number is display-only, and unknown ids are refused.
-		price, ok := priceIx.priceFor(it.ProductID, it.Variant)
+		price, ok := priceIx.priceForMember(it.ProductID, it.Variant, memberActive)
 		if !ok {
 			return nil, errBadRequest("unknown product in order: " + it.ProductID)
+		}
+		if priceIx.isPyaasLine(it.ProductID) {
+			hasPyaas = true
+			if gerr := s.foundingGate(ctx, consumerOID, true, memberActive); gerr != nil {
+				return nil, gerr
+			}
 		}
 		name := priceIx.nameFor(it.ProductID)
 		if name == "" {
@@ -317,6 +328,15 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	}
 	subtotal = round2(subtotal)
 	fee := deliveryFeeFor(subtotal)
+	// One Voice 1.2: Founding Family members never pay delivery. Spec rule
+	// 5.3 (DELIVERY-FEE on a PYAAS-milk order by a non-member) waits on the
+	// founder's yes: FOUNDING_PYAAS_NONMEMBER_FEE, off by default, and never
+	// on a Parag-only order.
+	if memberActive {
+		fee = 0
+	} else if hasPyaas && s.deps.Cfg.FoundingPyaasNonMemberFee && fee == 0 {
+		fee = s.foundingDeliveryFee(ctx)
+	}
 	total := round2(subtotal + fee)
 	// Payment mode defaults to 'wallet' — the order is settled from the server
 	// wallet on delivery (the settle sweep debits /wallet/debit, idempotent by

@@ -19,6 +19,8 @@ package consumer
 
 import (
 	"context"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -30,6 +32,19 @@ type catalogPriceIndex struct {
 	names    map[string]string             // sku_id → server-side display name
 	variants map[string]map[string]float64 // sku_id → normalized variant key → price
 	hidden   map[string]bool               // sku_id → not purchasable
+	// The Founding Family dimension (founding.go). member / memberVariants
+	// hold an EXPLICIT level-3 price (the ERP's multiprice level 3, mirrored
+	// by the sync into member_price); pyaas marks the PYAAS milk lines and
+	// litres their pack size, so a line without an explicit level 3 derives
+	// one as level 1 minus memberOffPerLitre per litre. Parag never appears
+	// in pyaas, so it is never discounted.
+	member         map[string]float64
+	memberVariants map[string]map[string]float64
+	pyaas          map[string]bool
+	litres         map[string]float64
+	variantLitres  map[string]map[string]float64
+	// memberOffPerLitre is FOUNDING_LEVEL3_OFF_PAISE_PER_LITRE in rupees (2).
+	memberOffPerLitre float64
 }
 
 // buildPriceIndex folds catalog rows (oldest→newest, so a later write wins on
@@ -37,16 +52,29 @@ type catalogPriceIndex struct {
 // unit-tested without a database.
 func buildPriceIndex(docs []catalogDoc) *catalogPriceIndex {
 	ix := &catalogPriceIndex{
-		base:     map[string]float64{},
-		names:    map[string]string{},
-		variants: map[string]map[string]float64{},
-		hidden:   map[string]bool{},
+		base:              map[string]float64{},
+		names:             map[string]string{},
+		variants:          map[string]map[string]float64{},
+		hidden:            map[string]bool{},
+		member:            map[string]float64{},
+		memberVariants:    map[string]map[string]float64{},
+		pyaas:             map[string]bool{},
+		litres:            map[string]float64{},
+		variantLitres:     map[string]map[string]float64{},
+		memberOffPerLitre: 2,
 	}
 	for _, d := range docs {
 		switch d.Kind {
 		case catalogKindProduct, catalogKindAddition:
 			if d.Price != nil {
 				ix.base[d.SkuID] = *d.Price
+			}
+			if isPyaasMilkSKU(d.SkuID, d.BaseID, d.Category) {
+				ix.pyaas[d.SkuID] = true
+				ix.litres[d.SkuID] = packLitres(d)
+			}
+			if d.MemberPrice != nil && *d.MemberPrice > 0 {
+				ix.member[d.SkuID] = *d.MemberPrice
 			}
 			if d.Name != "" {
 				// EXACT catalog name, no variant concat: order-line names are the
@@ -72,6 +100,27 @@ func buildPriceIndex(docs []catalogDoc) *catalogPriceIndex {
 				if v.Label != "" {
 					m[variantKey(v.Label)] = v.Price
 				}
+				for _, key := range []string{v.VariantID, v.Label} {
+					if key == "" {
+						continue
+					}
+					if v.MemberPrice != nil && *v.MemberPrice > 0 {
+						mv := ix.memberVariants[d.SkuID]
+						if mv == nil {
+							mv = map[string]float64{}
+							ix.memberVariants[d.SkuID] = mv
+						}
+						mv[variantKey(key)] = *v.MemberPrice
+					}
+					if l := litresOf(v.VolumeMl, v.Label, v.Unit); l > 0 {
+						vl := ix.variantLitres[d.SkuID]
+						if vl == nil {
+							vl = map[string]float64{}
+							ix.variantLitres[d.SkuID] = vl
+						}
+						vl[variantKey(key)] = l
+					}
+				}
 			}
 		case catalogKindOverride:
 			if d.Price != nil {
@@ -80,9 +129,129 @@ func buildPriceIndex(docs []catalogDoc) *catalogPriceIndex {
 			if d.Hidden != nil {
 				ix.hidden[d.SkuID] = *d.Hidden
 			}
+			if d.MemberPrice != nil {
+				if *d.MemberPrice > 0 {
+					ix.member[d.SkuID] = *d.MemberPrice
+				} else {
+					delete(ix.member, d.SkuID)
+				}
+			}
 		}
 	}
 	return ix
+}
+
+// packLitres is a catalog row's pack size in litres: the physical envelope
+// when the row carries one, else the size parsed from its unit / variant /
+// name ("1 L", "500ml Pouch", "450 ML"). A milk row that says nothing is
+// taken as one litre.
+func packLitres(d catalogDoc) float64 {
+	if d.Physical != nil && d.Physical.VolumeMl > 0 {
+		return d.Physical.VolumeMl / 1000
+	}
+	if l := litresOf(0, d.Unit, d.Variant, d.Name); l > 0 {
+		return l
+	}
+	return 1
+}
+
+var packSizeRe = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(ml|ltr|litre|liter|l)\b`)
+
+// litresOf reads a pack size from a volume in ml or the first label that
+// names one. 0 when none does.
+func litresOf(volumeMl float64, labels ...string) float64 {
+	if volumeMl > 0 {
+		return volumeMl / 1000
+	}
+	for _, s := range labels {
+		m := packSizeRe.FindStringSubmatch(s)
+		if m == nil {
+			continue
+		}
+		n, err := strconv.ParseFloat(m[1], 64)
+		if err != nil || n <= 0 {
+			continue
+		}
+		if strings.EqualFold(m[2], "ml") {
+			return n / 1000
+		}
+		return n
+	}
+	return 0
+}
+
+// memberPriceFor resolves the Founding Family (level 3) unit price: the
+// explicit level 3 when the catalog carries one for the sku or variant, else
+// level 1 minus the per-litre discount for a PYAAS milk line, else level 1
+// (Parag and everything else are never discounted). ok mirrors priceFor.
+func (ix *catalogPriceIndex) memberPriceFor(productID, variant string) (price float64, ok bool) {
+	base, ok := ix.priceFor(productID, variant)
+	if !ok {
+		return 0, false
+	}
+	if variant != "" {
+		if mv := ix.memberVariants[productID]; mv != nil {
+			if p, hit := mv[variantKey(variant)]; hit && p > 0 && p <= base {
+				return p, true
+			}
+		}
+	}
+	explicitVariant := false
+	if variant != "" {
+		if m := ix.variants[productID]; m != nil {
+			_, explicitVariant = m[variantKey(variant)]
+		}
+	}
+	if p, hit := ix.member[productID]; hit && !explicitVariant && p > 0 && p <= base {
+		return p, true
+	}
+	if !ix.pyaas[productID] {
+		return base, true
+	}
+	litres := ix.litres[productID]
+	if variant != "" {
+		if vl := ix.variantLitres[productID]; vl != nil {
+			if l, hit := vl[variantKey(variant)]; hit {
+				litres = l
+			}
+		}
+	}
+	p := base - memberDiscountFor(litres, ix.memberOffPerLitre)
+	if p < 0 {
+		p = 0
+	}
+	return p, true
+}
+
+// priceForMember is priceFor with the member dimension: level 3 for an
+// active Founding Family member, level 1 for everyone else.
+func (ix *catalogPriceIndex) priceForMember(productID, variant string, member bool) (float64, bool) {
+	if member {
+		return ix.memberPriceFor(productID, variant)
+	}
+	return ix.priceFor(productID, variant)
+}
+
+// isPyaasLine reports whether a sku is a PYAAS milk line (the members-only
+// range and the delivery-fee rule key on it).
+func (ix *catalogPriceIndex) isPyaasLine(productID string) bool { return ix.pyaas[productID] }
+
+// cheapestPyaasLitre finds the lowest-priced purchasable one-litre PYAAS milk
+// line - the savings line's reference when no SKU is configured.
+func (ix *catalogPriceIndex) cheapestPyaasLitre() (sku string, price float64, ok bool) {
+	for id := range ix.pyaas {
+		if ix.hidden[id] || ix.litres[id] != 1 {
+			continue
+		}
+		p, hit := ix.base[id]
+		if !hit || p <= 0 {
+			continue
+		}
+		if !ok || p < price || (p == price && id < sku) {
+			sku, price, ok = id, p, true
+		}
+	}
+	return sku, price, ok
 }
 
 func variantKey(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
@@ -124,5 +293,7 @@ func (s *service) loadPriceIndex(ctx context.Context) (*catalogPriceIndex, error
 	if err := cur.All(ctx, &docs); err != nil {
 		return nil, errInternal("catalog price decode failed")
 	}
-	return buildPriceIndex(docs), nil
+	ix := buildPriceIndex(docs)
+	ix.memberOffPerLitre = s.deps.Cfg.FoundingLevel3OffPerLitre()
+	return ix, nil
 }

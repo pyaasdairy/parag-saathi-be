@@ -5,7 +5,7 @@
   "source_document": "Pyaas_CRM_Retention_AI_Calling_Playbook_Rev3.docx, 20 August 2026",
   "generated": "2026-08-20",
   "companion_spec": "PYAAS_CRM_App_Developer_Spec_Rev3.pdf",
-  "trigger_count": 54,
+  "trigger_count": 57,
   "architecture": "hybrid — in-house orchestration core, external vendor for AI outbound calls",
   "note": "Every trigger MUST pass the guard chain in `guards.evaluation_order` before dispatch. A trigger that fires but fails a guard is logged as suppressed with the failing guard id — it is never silently dropped.",
   "deviations_from_playbook": [
@@ -523,6 +523,27 @@
    "cta": "none",
    "en": "We don't deliver to your area yet. We've noted your pincode and we'll tell you the day we do — that's the only message you'll get from us.",
    "hi": "Abhi aapke kshetra mein delivery nahi hai. Aapka pincode note kar liya hai — jis din shuru hogi, bata denge. Iske alawa koi message nahi aayega."
+  },
+  "T-FF01": {
+   "dlt_category": "service_implicit",
+   "cta": "open_shop",
+   "en": "[FARM] is unlocked! Whole Farm Milk from [FARMER] and the full PYAAS range are open for you. First delivery tomorrow by 7 AM.",
+   "hi": "[FARM] unlock ho gaya! [FARMER] ka Whole Farm Milk aur poori PYAAS range ab aapke liye khuli hai. Pehli delivery kal subah 7 baje tak.",
+   "note": "pyaas-app-spec.md section 6, farm unlocks. Supply source is pyaas_own_brand, so the farm tokens are allowed (claims_freeze extension_ch12)."
+  },
+  "T-FF02": {
+   "dlt_category": "service_implicit",
+   "cta": "open_founding_family",
+   "en": "You are in. Your Founding Family price is on at [FARM]: Rs 2 off every litre of PYAAS milk and free delivery, every morning. Stop any month in Me > Founding Family.",
+   "hi": "Aap Founding Family mein hain. [FARM] par aapka member price chalu: PYAAS milk ke har litre par Rs 2 kam aur har subah free delivery. Kabhi bhi Me > Founding Family se band karein.",
+   "note": "The you-are-in message when a member turns Active. One Voice 1.3 benefits wording; no cash or reward language."
+  },
+  "T-FF03": {
+   "dlt_category": "service_implicit",
+   "cta": "share_founding_link",
+   "en": "Your seat at [FARM] is held: you are #[LINE] in line. [TOGO] more homes and it unlocks. Share your link with your society group.",
+   "hi": "[FARM] par aapki seat pakki: aap line mein #[LINE] par hain. [TOGO] aur ghar judte hi farm unlock. Apna link society group mein share karein.",
+   "note": "pyaas-app-spec.md section 6, seat waiting (the homes-to-unlock line). Refer a friend, move up the line: no reward language."
   }
  },
  "triggers": [
@@ -2568,6 +2589,111 @@
    "corrections": [
     "CH-05"
    ]
+  },
+  {
+   "id": "FF-01",
+   "section": "FF",
+   "name": "Founding Family: farm unlocked",
+   "phase": 2,
+   "kind": "event",
+   "event": "founding.farm_unlocked",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT15M",
+      "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-FF01",
+   "frequency_cap": {
+    "per_farm": 1
+   },
+   "success_metric": "first_pyaas_order_after_unlock",
+   "note": "Emitted by founding.go unlockFoundingFarm for every waiting member of the farm the moment its claims reach unlocks_at. Routed like D-01; the in-app inbox always runs."
+  },
+  {
+   "id": "FF-02",
+   "section": "FF",
+   "name": "Founding Family: you are in",
+   "phase": 2,
+   "kind": "event",
+   "event": "founding.member_active",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT15M",
+      "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-FF02",
+   "frequency_cap": {
+    "per_member": 1
+   },
+   "success_metric": "member_price_used",
+   "note": "Emitted with FF-01 when a waiting member turns Active (the same unlock). Routed like D-01; the in-app inbox always runs."
+  },
+  {
+   "id": "FF-03",
+   "section": "FF",
+   "name": "Founding Family: seat held, homes to go",
+   "phase": 2,
+   "kind": "event",
+   "event": "founding.seat_waiting",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT15M",
+      "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": "T-FF03",
+   "frequency_cap": {
+    "per_join": 1
+   },
+   "success_metric": "share_tapped",
+   "note": "Emitted by founding.go joinFoundingFamily right after the Rs 99 seat is taken on a farm still filling. Routed like D-01; the in-app inbox always runs."
   }
  ],
  "ai_call_guardrails": {

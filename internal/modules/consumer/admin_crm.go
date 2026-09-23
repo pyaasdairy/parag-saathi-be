@@ -413,7 +413,7 @@ func (h *handler) crmOrderDetail(w http.ResponseWriter, r *http.Request) {
 
 	timeline := []crmTimelineEvent{{At: o.PlacedAt.UTC().Format(time.RFC3339), Event: "Order placed", By: "customer"}}
 	if o.SubLockedAt != "" {
-		timeline = append(timeline, crmTimelineEvent{At: o.SubLockedAt, Event: "Subscription day confirmed (midnight lock)", By: "system"})
+		timeline = append(timeline, crmTimelineEvent{At: o.SubLockedAt, Event: "Subscription day confirmed (noon lock)", By: "system"})
 	}
 	detail := map[string]any{"order": row, "deliveryPrefs": o.DeliveryPrefs, "buyerGstin": o.BuyerGSTIN}
 	if d != nil {
@@ -920,5 +920,10 @@ func registerAdminCRM(cr chi.Router, h *handler, jwtm *auth.JWTManager) {
 		ar.Get("/crm/duplicate-subscription-orders", h.crmDuplicateSubscriptionOrders)
 		ar.Get("/crm/complaints", h.crmComplaints)
 		ar.Post("/crm/complaints/{complaintId}", h.crmUpdateComplaint)
+		// Founding Family farms (founding.go): the founder's farm records -
+		// names, farmers, photos, unlock thresholds. Seats and unlocks are
+		// only ever moved by joins.
+		ar.Get("/founding/farms", h.adminFoundingFarms)
+		ar.Put("/founding/farms", h.adminPutFoundingFarms)
 	})
 }

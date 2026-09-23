@@ -69,6 +69,17 @@ func Register(r chi.Router, d *deps.Deps) {
 	if err := repo.ensurePushIndexes(ctx); err != nil {
 		log.Warn("push index setup incomplete", slog.Any("err", err))
 	}
+	// Growth programmes (referrals.go, founding.go). NON-fatal like the rest
+	// of the phase-2 indexes: the referee-unique index makes a retried apply
+	// idempotent and the member-unique index guards a double join, but both
+	// service paths re-check before they write, and neither guards the
+	// wallet's own money gate.
+	if err := repo.ensureReferralIndexes(ctx); err != nil {
+		log.Warn("referral index setup incomplete", slog.Any("err", err))
+	}
+	if err := repo.ensureFoundingIndexes(ctx); err != nil {
+		log.Warn("founding family index setup incomplete", slog.Any("err", err))
+	}
 
 	// Seed the baseline catalog products (idempotent, single BulkWrite). Runs
 	// AFTER the money-gate indexes and is deliberately NON-FATAL: unlike the
@@ -103,6 +114,10 @@ func Register(r chi.Router, d *deps.Deps) {
 	// Subscription auto-renewal (mandate_worker.go): charges due ACTIVE
 	// mandates through the same idempotent money gate as the manual/dev path.
 	go svc.mandateAutoRenewalWorker(context.Background())
+
+	// Founding Family monthly billing (founding.go): the Rs 99 month from the
+	// wallet on next_bill_date, retried for three days, then stopped.
+	go svc.foundingBillingWorker(context.Background())
 
 	// CRM (Welcome Litre) — the worker self-gates on CRM_ENABLED every tick,
 	// so it idles for free until the founder flips the env; indexes are
@@ -214,6 +229,19 @@ func Register(r chi.Router, d *deps.Deps) {
 			// Photo uploads (uploads_presign.go, contract C4): a one-shot B2
 			// upload target for a complaint or door photo.
 			pr.Post("/uploads/presign", h.consumerPresign)
+
+			// Referrals (referrals.go): the member's code (minted with the
+			// app's own derivation), their ledger, and the friend's code
+			// entered at sign-up.
+			pr.Get("/referrals/code", h.referralCode)
+			pr.Get("/referrals", h.listReferrals)
+			pr.Post("/referrals/apply", h.applyReferral)
+
+			// Founding Family (founding.go, pyaas-app-spec.md): the farms,
+			// the member's seat, join (Rs 99 from the wallet) and stop.
+			pr.Get("/founding-family", h.foundingView)
+			pr.Post("/founding-family/join", h.foundingJoin)
+			pr.Post("/founding-family/stop", h.foundingStop)
 
 			// Profile — support the FE's /users/me and the note's /me alias.
 			for _, base := range []string{"/users/me", "/me"} {

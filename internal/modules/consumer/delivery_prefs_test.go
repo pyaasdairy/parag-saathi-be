@@ -70,6 +70,10 @@ func TestDoorstepPrefsReachTheDeliveryTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}
+	// A plan from before today's cut-off whose preview never ran is caught
+	// up by the sweep (noon rule); a plan created just now would start on the
+	// first editable day instead.
+	chainBackdateSubscription(t, w, sub, time.Now().Add(-48*time.Hour))
 	if placed := w.svc.sweepOneSubscription(ctx, sub, time.Now()); placed != 1 {
 		t.Fatalf("subscription order not placed: %d", placed)
 	}

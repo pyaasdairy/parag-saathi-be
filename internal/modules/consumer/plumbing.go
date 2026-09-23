@@ -46,24 +46,33 @@ type apiError struct {
 	status  int
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
+	// Shortfall rides on WALLET_SHORT (founding.go): the rupees the wallet is
+	// short of the Rs 99 seat, as a field beside the message that names it.
+	Shortfall float64 `json:"shortfall,omitempty"`
 }
 
 func (e *apiError) Error() string { return e.Message }
 
-func errBadRequest(msg string) *apiError { return &apiError{http.StatusBadRequest, "BAD_REQUEST", msg} }
-func errUnauthorized(msg string) *apiError {
-	return &apiError{http.StatusUnauthorized, "UNAUTHORIZED", msg}
+func errBadRequest(msg string) *apiError {
+	return &apiError{status: http.StatusBadRequest, Code: "BAD_REQUEST", Message: msg}
 }
-func errForbidden(msg string) *apiError { return &apiError{http.StatusForbidden, "FORBIDDEN", msg} }
-func errNotFound(msg string) *apiError  { return &apiError{http.StatusNotFound, "NOT_FOUND", msg} }
+func errUnauthorized(msg string) *apiError {
+	return &apiError{status: http.StatusUnauthorized, Code: "UNAUTHORIZED", Message: msg}
+}
+func errForbidden(msg string) *apiError {
+	return &apiError{status: http.StatusForbidden, Code: "FORBIDDEN", Message: msg}
+}
+func errNotFound(msg string) *apiError {
+	return &apiError{status: http.StatusNotFound, Code: "NOT_FOUND", Message: msg}
+}
 func errConflict(code, msg string) *apiError {
-	return &apiError{http.StatusConflict, code, msg}
+	return &apiError{status: http.StatusConflict, Code: code, Message: msg}
 }
 func errUnprocessable(code, msg string) *apiError {
-	return &apiError{http.StatusUnprocessableEntity, code, msg}
+	return &apiError{status: http.StatusUnprocessableEntity, Code: code, Message: msg}
 }
 func errInternal(msg string) *apiError {
-	return &apiError{http.StatusInternalServerError, "INTERNAL", msg}
+	return &apiError{status: http.StatusInternalServerError, Code: "INTERNAL", Message: msg}
 }
 
 // writeErr renders an *apiError (or a 500 for anything else). Never leaks a

@@ -59,6 +59,74 @@ type Config struct {
 	DolibarrStockOutHourIST int           // IST hour to post YESTERDAY's net stock-out
 	DolibarrOutWarehouseID  int           // 2 = MOBILE HUB (id 1 AT PLANT is UI-only)
 	DolibarrPostStockOut    bool          // false → compute + log only (dry-run)
+
+	// ── Consumer growth programmes (referrals.go, founding.go) ──────────────
+	// Every value is optional and has an in-code default (see the accessors
+	// below), so a zero Config still prices the programmes the way the app
+	// copy promises them.
+	ReferralRewardPaise int64 // REFERRAL_REWARD_PAISE: promo credit to BOTH sides on the referee's first delivery
+	// Founding Family. Prices are read from the ERP when the sync has seen the
+	// FOUNDING-99 / DELIVERY-FEE services; these are the fallbacks until then.
+	FoundingPriceMonthPaise        int64  // FOUNDING_PRICE_MONTH_PAISE (FOUNDING-99)
+	FoundingDeliveryFeePaise       int64  // FOUNDING_DELIVERY_FEE_PAISE (DELIVERY-FEE)
+	FoundingLevel3OffPaisePerLitre int64  // FOUNDING_LEVEL3_OFF_PAISE_PER_LITRE: level 3 = level 1 minus this per litre on PYAAS milk when the ERP carries no level 3
+	FoundingSavingsSKU             string // FOUNDING_SAVINGS_SKU: the 1 L PYAAS line behind the "1 L a day saves" line
+	FoundingBillRetryDays          int    // FOUNDING_BILL_RETRY_DAYS: retries before a short wallet stops the membership
+	FoundingClosed                 bool   // FOUNDING_FAMILY_CLOSED=true: GET /founding-family answers 404 (the app says opening soon)
+	FoundingPyaasMembersOnly       bool   // FOUNDING_PYAAS_MEMBERS_ONLY=true: PYAAS milk lines refuse non-active members (spec rule 5.1)
+	FoundingPyaasNonMemberFee      bool   // FOUNDING_PYAAS_NONMEMBER_FEE=true: DELIVERY-FEE on PYAAS-milk orders by non-members (spec rule 5.3, needs the founder's yes)
+}
+
+// ReferralReward is the promo credit, in rupees, each side receives when the
+// referee's first order is delivered (the Refer screen's "Gift Rs 100, get
+// Rs 100").
+func (c *Config) ReferralReward() float64 {
+	if c.ReferralRewardPaise > 0 {
+		return float64(c.ReferralRewardPaise) / 100
+	}
+	return 100
+}
+
+// FoundingPriceMonth is the FOUNDING-99 fallback in rupees.
+func (c *Config) FoundingPriceMonth() float64 {
+	if c.FoundingPriceMonthPaise > 0 {
+		return float64(c.FoundingPriceMonthPaise) / 100
+	}
+	return 99
+}
+
+// FoundingDeliveryFee is the DELIVERY-FEE fallback in rupees.
+func (c *Config) FoundingDeliveryFee() float64 {
+	if c.FoundingDeliveryFeePaise > 0 {
+		return float64(c.FoundingDeliveryFeePaise) / 100
+	}
+	return 5
+}
+
+// FoundingLevel3OffPerLitre is the member discount per litre in rupees, used
+// only for PYAAS milk lines the ERP has not priced at level 3 yet.
+func (c *Config) FoundingLevel3OffPerLitre() float64 {
+	if c.FoundingLevel3OffPaisePerLitre > 0 {
+		return float64(c.FoundingLevel3OffPaisePerLitre) / 100
+	}
+	return 2
+}
+
+// FoundingSavingsReferenceSKU is the catalog id behind the savings line.
+func (c *Config) FoundingSavingsReferenceSKU() string {
+	if c.FoundingSavingsSKU != "" {
+		return c.FoundingSavingsSKU
+	}
+	return "pyaas-toned-1l"
+}
+
+// FoundingBillRetries is how many billing days a short wallet is retried
+// before the membership is set to stopped (spec rule 5.6: three days).
+func (c *Config) FoundingBillRetries() int {
+	if c.FoundingBillRetryDays > 0 {
+		return c.FoundingBillRetryDays
+	}
+	return 3
 }
 
 // DolibarrEnabled reports whether the ERP integration is configured at all.
@@ -98,6 +166,16 @@ func Load() (*Config, error) {
 		DolibarrStockOutHourIST: envInt("DOLIBARR_STOCKOUT_HOUR_IST", 1),
 		DolibarrOutWarehouseID:  envInt("DOLIBARR_OUT_WAREHOUSE_ID", 2),
 		DolibarrPostStockOut:    envBool("DOLIBARR_POST_STOCKOUT", false),
+
+		ReferralRewardPaise:            int64(envInt("REFERRAL_REWARD_PAISE", 10000)),
+		FoundingPriceMonthPaise:        int64(envInt("FOUNDING_PRICE_MONTH_PAISE", 9900)),
+		FoundingDeliveryFeePaise:       int64(envInt("FOUNDING_DELIVERY_FEE_PAISE", 500)),
+		FoundingLevel3OffPaisePerLitre: int64(envInt("FOUNDING_LEVEL3_OFF_PAISE_PER_LITRE", 200)),
+		FoundingSavingsSKU:             envStr("FOUNDING_SAVINGS_SKU", "pyaas-toned-1l"),
+		FoundingBillRetryDays:          envInt("FOUNDING_BILL_RETRY_DAYS", 3),
+		FoundingClosed:                 envBool("FOUNDING_FAMILY_CLOSED", false),
+		FoundingPyaasMembersOnly:       envBool("FOUNDING_PYAAS_MEMBERS_ONLY", false),
+		FoundingPyaasNonMemberFee:      envBool("FOUNDING_PYAAS_NONMEMBER_FEE", false),
 	}
 
 	if cfg.MongoURI == "" {

@@ -1,0 +1,472 @@
+package consumer
+
+// The 12-noon cut-off (One Voice 1.2, the owner's rule of 21 Sep): a
+// delivery day's previews lock at 12:00 IST the day before; a change made
+// after noon applies to the day after tomorrow; a plan created after noon
+// starts on the first editable day; the exactly-once claims survive; a
+// duplicate plan is refused; and a locked order whose day passed with no
+// delivery is closed as missed.
+//
+//	CONSUMER_MONGO_TEST_URI=mongodb://localhost:27017 \
+//	  go test ./internal/modules/consumer/ -run 'Noon|Duplicate|Missed' -v
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+)
+
+// chainBackdateSubscription moves a plan's member-change moment to `at` (in
+// the DB and on the struct), modelling a plan that existed before a day's
+// cut-off: the sweep's catch-up serves such a plan, never one changed after
+// the cut-off.
+func chainBackdateSubscription(t *testing.T, w *chainWorld, sub *subscription, at time.Time) {
+	t.Helper()
+	at = at.UTC()
+	if _, err := w.db.Collection(collSubscriptions).UpdateOne(context.Background(),
+		bson.D{{Key: "subscription_id", Value: sub.SubscriptionID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "changed_at", Value: at}, {Key: "created_at", Value: at}}}}); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	sub.ChangedAt, sub.CreatedAt = at, at
+}
+
+// chainStampChange sets only the change moment: the tests drive the sweep on
+// a simulated clock, while pause/resume/patch stamp the real one.
+func chainStampChange(t *testing.T, w *chainWorld, subID string, at time.Time) {
+	t.Helper()
+	if _, err := w.db.Collection(collSubscriptions).UpdateOne(context.Background(),
+		bson.D{{Key: "subscription_id", Value: subID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "changed_at", Value: at.UTC()}}}}); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+}
+
+func istDayAt(day string, hour, min int) time.Time {
+	d, ok := parseDay(day)
+	if !ok {
+		panic("bad day " + day)
+	}
+	return d.Add(time.Duration(hour)*time.Hour + time.Duration(min)*time.Minute)
+}
+
+// The pure day arithmetic behind the rule.
+func TestNoonLockDayArithmetic(t *testing.T) {
+	before := istDayAt("2026-10-06", 11, 59)
+	after := istDayAt("2026-10-06", 12, 0)
+	if lockedThroughDay(before) != "2026-10-06" || firstEditableDay(before) != "2026-10-07" {
+		t.Fatalf("before noon: locked through %s, editable %s", lockedThroughDay(before), firstEditableDay(before))
+	}
+	if lockedThroughDay(after) != "2026-10-07" || firstEditableDay(after) != "2026-10-08" {
+		t.Fatalf("from noon: locked through %s, editable %s", lockedThroughDay(after), firstEditableDay(after))
+	}
+	if lm := lockMomentFor("2026-10-07"); !lm.Equal(istDayAt("2026-10-06", 12, 0)) {
+		t.Fatalf("lock moment for the 7th: %v", lm)
+	}
+	// UTC never leaks in: 06:31 UTC is 12:01 IST.
+	utc := time.Date(2026, 10, 6, 6, 31, 0, 0, time.UTC)
+	if lockedThroughDay(utc) != "2026-10-07" {
+		t.Fatalf("IST hour must decide the lock, got %s", lockedThroughDay(utc))
+	}
+	sub := &subscription{Status: "active", Frequency: "daily", StartDate: "2026-10-01", ChangedAt: istDayAt("2026-10-06", 10, 0)}
+	if !sub.subChangedBefore(lockMomentFor("2026-10-07")) || sub.subChangedBefore(lockMomentFor("2026-10-06")) {
+		t.Fatalf("subChangedBefore")
+	}
+	if nd := subscriptionNextDelivery(sub, after); nd != "2026-10-08" {
+		t.Fatalf("a plan seen after noon next delivers the day after tomorrow, got %s", nd)
+	}
+	if nd := subscriptionNextDelivery(sub, before); nd != "2026-10-07" {
+		t.Fatalf("a plan seen before noon next delivers tomorrow, got %s", nd)
+	}
+	sub.OrderedDays = []string{"2026-10-07"}
+	if nd := subscriptionNextDelivery(sub, after); nd != "2026-10-07" {
+		t.Fatalf("a claimed (locked) tomorrow still counts, got %s", nd)
+	}
+	legacy := &subscription{Status: "active", Frequency: "daily", StartDate: "2026-10-01"}
+	if !legacy.subChangedBefore(lockMomentFor("2026-10-07")) {
+		t.Fatalf("a row without stamps is served by the catch-up")
+	}
+}
+
+func liveSubOrder(t *testing.T, w *chainWorld, subID, day string) *order {
+	t.Helper()
+	o, err := w.svc.repo.findLiveSubscriptionOrder(context.Background(), subID, day)
+	if err != nil {
+		t.Fatalf("findLiveSubscriptionOrder: %v", err)
+	}
+	return o
+}
+
+// One plan through a whole day around the cut-off: preview before noon,
+// edits reconcile it, the noon lock creates the task, a pause after noon
+// spares tomorrow and takes the day after, a resume after noon comes back
+// from the day after tomorrow, and the next morning's catch-up adds nothing.
+func TestNoonLockLifecycle(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000010001", 5000)
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
+		ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D,
+	})
+	if err != nil {
+		t.Fatalf("createSubscription: %v", err)
+	}
+	chainBackdateSubscription(t, w, sub, istDayAt(D, 8, 0))
+
+	// 09:00 on D: tomorrow is previewed (no task), the day after is not yet.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+	prev := liveSubOrder(t, w, sub.SubscriptionID, D1)
+	if prev == nil || prev.SubLockedAt != "" || prev.DeliveryDate != D1 {
+		t.Fatalf("tomorrow's preview at 09:00: %+v", prev)
+	}
+	if d, _ := w.svc.repo.findDeliveryByOrder(ctx, prev.OrderID); d != nil {
+		t.Fatalf("a preview must have no delivery task")
+	}
+	if liveSubOrder(t, w, sub.SubscriptionID, D2) != nil {
+		t.Fatalf("the day after tomorrow is not previewed before noon")
+	}
+	// Nothing for D itself: the plan was created after D's own cut-off.
+	if liveSubOrder(t, w, sub.SubscriptionID, D) != nil {
+		t.Fatalf("a plan created after the cut-off must not deliver the same day")
+	}
+
+	// 10:00: a qty edit reconciles the preview; the store sees it as upcoming.
+	qty := 3
+	if _, err := w.svc.patchSubscription(ctx, cid, sub.SubscriptionID, struct {
+		Qty          *int             `json:"qty"`
+		Frequency    *string          `json:"frequency"`
+		DeliverySlot *string          `json:"delivery_slot"`
+		StartDate    *string          `json:"start_date"`
+		Vacations    *[]vacationRange `json:"vacations"`
+	}{Qty: &qty}); err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 10, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 10, 0))
+	prev = liveSubOrder(t, w, sub.SubscriptionID, D1)
+	if prev.Items[0].Qty != 3 || prev.Total != 87 || prev.SubLockedAt != "" {
+		t.Fatalf("preview after the edit: %+v total %v", prev.Items, prev.Total)
+	}
+	rows, err := w.svc.storeUpcomingAt(ctx, w.mgr, w.storeID.Hex(), istDayAt(D, 10, 0))
+	if err != nil || len(rows) != 1 || rows[0].OrderID != prev.OrderID || rows[0].DeliveryDate != D1 {
+		t.Fatalf("upcoming before noon: %v %+v", err, rows)
+	}
+
+	// 12:00: the lock. Tomorrow gets its task; the day after is previewed.
+	if placed := w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 0)); placed != 1 {
+		t.Fatalf("noon sweep locked %d orders, want 1", placed)
+	}
+	locked := liveSubOrder(t, w, sub.SubscriptionID, D1)
+	if locked.SubLockedAt == "" || locked.Items[0].Qty != 3 {
+		t.Fatalf("tomorrow after noon: %+v", locked)
+	}
+	if d, _ := w.svc.repo.findDeliveryByOrder(ctx, locked.OrderID); d == nil {
+		t.Fatalf("the noon lock must create the store task")
+	}
+	next := liveSubOrder(t, w, sub.SubscriptionID, D2)
+	if next == nil || next.SubLockedAt != "" {
+		t.Fatalf("the day after tomorrow is previewed from noon: %+v", next)
+	}
+	rows, _ = w.svc.storeUpcomingAt(ctx, w.mgr, w.storeID.Hex(), istDayAt(D, 12, 30))
+	if len(rows) != 1 || rows[0].OrderID != next.OrderID || rows[0].DeliveryDate != D2 {
+		t.Fatalf("upcoming after noon shows the next editable day only: %+v", rows)
+	}
+
+	// 13:00: a qty edit after noon leaves tomorrow alone, moves the day after.
+	qty = 1
+	if _, err := w.svc.patchSubscription(ctx, cid, sub.SubscriptionID, struct {
+		Qty          *int             `json:"qty"`
+		Frequency    *string          `json:"frequency"`
+		DeliverySlot *string          `json:"delivery_slot"`
+		StartDate    *string          `json:"start_date"`
+		Vacations    *[]vacationRange `json:"vacations"`
+	}{Qty: &qty}); err != nil {
+		t.Fatalf("patch 2: %v", err)
+	}
+	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 13, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 13, 0))
+	if o := liveSubOrder(t, w, sub.SubscriptionID, D1); o.Items[0].Qty != 3 {
+		t.Fatalf("an edit after noon changed tomorrow's locked order: %+v", o.Items)
+	}
+	if o := liveSubOrder(t, w, sub.SubscriptionID, D2); o.Items[0].Qty != 1 {
+		t.Fatalf("an edit after noon must reach the day after tomorrow: %+v", o.Items)
+	}
+
+	// 14:00: pause after noon. Tomorrow still delivers; the day after is
+	// cancelled and its day released.
+	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "pause"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 14, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 14, 0))
+	if o := liveSubOrder(t, w, sub.SubscriptionID, D1); o == nil || o.Status != "placed" {
+		t.Fatalf("a pause after noon must not touch tomorrow: %+v", o)
+	}
+	if liveSubOrder(t, w, sub.SubscriptionID, D2) != nil {
+		t.Fatalf("a pause after noon cancels the day after tomorrow")
+	}
+	// 15:00: resume after noon. Nothing new for tomorrow (already live);
+	// the day after tomorrow comes back, once.
+	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "resume"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 15, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 15, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 15, 15))
+	for _, day := range []string{D1, D2} {
+		n, _ := w.db.Collection(collOrders).CountDocuments(ctx, bson.D{
+			{Key: "subscription_id", Value: sub.SubscriptionID}, {Key: "scheduled_for", Value: day},
+			{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+		})
+		if n != 1 {
+			t.Fatalf("live orders for %s after pause+resume: %d want 1", day, n)
+		}
+	}
+
+	// A pause BEFORE noon does take tomorrow: on D1 at 09:00 pause, D2's
+	// preview goes and its claim is released; resume at 10:00 brings it back;
+	// the D1 morning's own order is untouched throughout.
+	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "pause"); err != nil {
+		t.Fatalf("pause 2: %v", err)
+	}
+	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D1, 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D1, 9, 0))
+	if liveSubOrder(t, w, sub.SubscriptionID, D2) != nil {
+		t.Fatalf("a pause before noon must cancel tomorrow's preview")
+	}
+	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "resume"); err != nil {
+		t.Fatalf("resume 2: %v", err)
+	}
+	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D1, 10, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D1, 10, 0))
+	if o := liveSubOrder(t, w, sub.SubscriptionID, D2); o == nil || o.SubLockedAt != "" {
+		t.Fatalf("a resume before noon re-previews tomorrow: %+v", o)
+	}
+	// 00:15 on D1: the catch-up adds nothing (D1 is claimed and live).
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D1, 0, 15))
+	n, _ := w.db.Collection(collOrders).CountDocuments(ctx, bson.D{
+		{Key: "subscription_id", Value: sub.SubscriptionID}, {Key: "scheduled_for", Value: D1},
+	})
+	if n != 1 {
+		t.Fatalf("orders for %s after the midnight tick: %d want 1", D1, n)
+	}
+	// The wire shape says when the plan next delivers.
+	if list, _ := w.svc.listSubscriptionsFor(ctx, cid); len(list) != 1 {
+		t.Fatalf("list: %d", len(list))
+	} else if nd := subscriptionNextDelivery(&list[0], istDayAt(D1, 13, 0)); nd != D2 {
+		t.Fatalf("next_delivery_date at 13:00 on D1: %s want %s", nd, D2)
+	}
+}
+
+// A plan created after noon for tomorrow does not reach tomorrow: nothing
+// is created for it until the first editable day, even by the next morning's
+// catch-up; a plan that predates the cut-off is caught up (locked at once)
+// when its preview never ran.
+func TestNoonLockNewPlanAfterNoonStartsDayAfterTomorrow(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+
+	late := w.customer(t, "9000010101", 5000)
+	sub, err := w.svc.createSubscription(ctx, late, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D1})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	chainBackdateSubscription(t, w, sub, istDayAt(D, 14, 0))
+	if placed := w.svc.sweepOneSubscription(ctx, sub, istDayAt(D, 14, 5)); placed != 0 {
+		t.Fatalf("a plan created after noon was locked for tomorrow")
+	}
+	if liveSubOrder(t, w, sub.SubscriptionID, D1) != nil {
+		t.Fatalf("a plan created after noon must not deliver tomorrow")
+	}
+	if o := liveSubOrder(t, w, sub.SubscriptionID, D2); o == nil || o.SubLockedAt != "" {
+		t.Fatalf("its first day is the day after tomorrow, as a preview: %+v", o)
+	}
+	if nd := subscriptionNextDelivery(sub, istDayAt(D, 14, 5)); nd != D2 {
+		t.Fatalf("next_delivery_date: %s want %s", nd, D2)
+	}
+	// The next morning's catch-up still leaves D1 alone.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D1, 0, 15))
+	if liveSubOrder(t, w, sub.SubscriptionID, D1) != nil {
+		t.Fatalf("the catch-up served a plan created after the cut-off")
+	}
+
+	// A plan from long before, whose preview never ran (server down over
+	// the cut-off), is caught up as a locked order with its task.
+	early := w.customer(t, "9000010102", 5000)
+	sub2, err := w.svc.createSubscription(ctx, early, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+	if err != nil {
+		t.Fatalf("create 2: %v", err)
+	}
+	chainBackdateSubscription(t, w, sub2, istDayAt(D, 8, 0))
+	if placed := w.svc.sweepOneSubscription(ctx, sub2, istDayAt(D, 14, 5)); placed != 1 {
+		t.Fatalf("catch-up placed %d, want 1 (tomorrow, locked)", placed)
+	}
+	o := liveSubOrder(t, w, sub2.SubscriptionID, D1)
+	if o == nil || o.SubLockedAt == "" {
+		t.Fatalf("catch-up order: %+v", o)
+	}
+	if d, _ := w.svc.repo.findDeliveryByOrder(ctx, o.OrderID); d == nil {
+		t.Fatalf("the catch-up must create the task")
+	}
+	// Racing sweeps for the same plan still yield one order per day.
+	for i := 0; i < 4; i++ {
+		w.svc.sweepOneSubscription(ctx, sub2, istDayAt(D, 14, 10))
+	}
+	for _, day := range []string{D1, D2} {
+		n, _ := w.db.Collection(collOrders).CountDocuments(ctx, bson.D{
+			{Key: "subscription_id", Value: sub2.SubscriptionID}, {Key: "scheduled_for", Value: day}})
+		if n != 1 {
+			t.Fatalf("orders for %s: %d want 1", day, n)
+		}
+	}
+}
+
+// createSubscription refuses a second live plan on the same product line
+// with DUPLICATE_SUBSCRIPTION naming the plan; a cancelled one frees it, a
+// different variant is its own line.
+func TestDuplicateSubscriptionRefused(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000010201", 500)
+	first, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 1, Frequency: "daily"})
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	_, err = w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: " 500ML ", Qty: 2, Frequency: "weekly"})
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.status != 409 || ae.Code != "DUPLICATE_SUBSCRIPTION" {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if !strings.Contains(ae.Message, "daily plan for Milk gold-500ml 500ml") {
+		t.Fatalf("the message must name the plan: %q", ae.Message)
+	}
+	// Paused still counts as live.
+	if _, err := w.svc.setSubscriptionStatus(ctx, cid, first.SubscriptionID, "pause"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if _, err = w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 1, Frequency: "daily"}); !errors.As(err, &ae) || ae.Code != "DUPLICATE_SUBSCRIPTION" {
+		t.Fatalf("paused duplicate: %v", err)
+	}
+	// Another variant of the same product is its own line; another customer too.
+	if _, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: "1L", Qty: 1, Frequency: "daily"}); err != nil {
+		t.Fatalf("other variant: %v", err)
+	}
+	other := w.customer(t, "9000010202", 500)
+	if _, err := w.svc.createSubscription(ctx, other, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 1, Frequency: "daily"}); err != nil {
+		t.Fatalf("other customer: %v", err)
+	}
+	// Cancelled frees the line.
+	if _, err := w.svc.setSubscriptionStatus(ctx, cid, first.SubscriptionID, "cancel"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if _, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 1, Frequency: "daily"}); err != nil {
+		t.Fatalf("after cancel: %v", err)
+	}
+}
+
+// A locked morning order whose delivery day passed with no delivery is
+// closed by the sweep: cancelled (the terminal status the app draws), the
+// task failed with reason missed, order.failed emitted with reason missed,
+// no money moved; a delivered one and a still-current one are untouched.
+func TestMissedLockedOrdersAreClosedBySweep(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000010301", 5000)
+	addrs, _ := w.svc.repo.listAddresses(ctx, cid)
+	const D = "2026-10-06"
+	Dm1, Dm2 := addDaysIST(D, -1), addDaysIST(D, -2)
+	mk := func(id, day string) *subscription {
+		return &subscription{SubscriptionID: id, ConsumerID: cid, ProductID: "taaza-500ml", Name: "Milk taaza-500ml",
+			Variant: "500ml", Qty: 1, UnitPrice: 29, Frequency: "daily", Status: "active", StartDate: day}
+	}
+	// (a) two days old, task never completed; (b) yesterday, no task at all;
+	// (c) yesterday, delivered; (d) today's, locked, still current.
+	a, err := w.svc.insertSubscriptionOrder(ctx, mk("sub_missed_a", Dm2), &addrs[0], Dm2, true, istDayAt(Dm2, 0, 0))
+	if err != nil {
+		t.Fatalf("a: %v", err)
+	}
+	b, err := w.svc.insertSubscriptionOrder(ctx, mk("sub_missed_b", Dm1), &addrs[0], Dm1, true, istDayAt(Dm1, 0, 0))
+	if err != nil {
+		t.Fatalf("b: %v", err)
+	}
+	if _, err := w.db.Collection(collDeliveries).DeleteOne(ctx, bson.D{{Key: "order_id", Value: b.OrderID}}); err != nil {
+		t.Fatalf("drop b task: %v", err)
+	}
+	c, err := w.svc.insertSubscriptionOrder(ctx, mk("sub_missed_c", Dm1), &addrs[0], Dm1, true, istDayAt(Dm1, 0, 0))
+	if err != nil {
+		t.Fatalf("c: %v", err)
+	}
+	ctask := chainTaskFor(t, w, c.OrderID)
+	chainOutForDelivery(t, w, ctask.ID)
+	if _, err := w.svc.deliverDelivery(ctx, w.rider, ctask.ID, deliverInput{ProofPhoto: "p.jpg", Geo: &geoPt{Lat: ctask.Geo.Lat, Lng: ctask.Geo.Lng}, GeofenceOK: true}); err != nil {
+		t.Fatalf("deliver c: %v", err)
+	}
+	d, err := w.svc.insertSubscriptionOrder(ctx, mk("sub_missed_d", D), &addrs[0], D, true, istDayAt(Dm1, 12, 0))
+	if err != nil {
+		t.Fatalf("d: %v", err)
+	}
+	cashBefore, _ := w.svc.wallet(ctx, cid)
+
+	// Before noon on D: only orders older than yesterday close.
+	if n := w.svc.closeMissedSubscriptionOrders(ctx, istDayAt(D, 9, 0)); n != 1 {
+		t.Fatalf("closed before noon: %d want 1", n)
+	}
+	if o := w.orderByID(t, a.OrderID); o.Status != "cancelled" || o.CancelledBy != orderCancelledByMissed {
+		t.Fatalf("a after the sweep: %s by %q", o.Status, o.CancelledBy)
+	}
+	if o := w.orderByID(t, b.OrderID); o.Status != "placed" {
+		t.Fatalf("yesterday's order closed before noon: %s", o.Status)
+	}
+	// From noon, yesterday's close too; delivered and current stay.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 30))
+	if o := w.orderByID(t, b.OrderID); o.Status != "cancelled" || o.CancelledBy != orderCancelledByMissed {
+		t.Fatalf("b after the noon sweep: %s by %q", o.Status, o.CancelledBy)
+	}
+	if o := w.orderByID(t, c.OrderID); o.Status != "delivered" {
+		t.Fatalf("a delivered order was touched: %s", o.Status)
+	}
+	if o := w.orderByID(t, d.OrderID); o.Status != "placed" {
+		t.Fatalf("today's order was touched: %s", o.Status)
+	}
+	if task := chainTaskFor(t, w, a.OrderID); task.Status != "FAILED" || task.FailureReason != "missed" {
+		t.Fatalf("task a: %s %q", task.Status, task.FailureReason)
+	}
+	for _, id := range []string{a.OrderID, b.OrderID} {
+		evs := failedEventsFor(t, w, id)
+		if len(evs) != 1 {
+			t.Fatalf("order.failed for %s: %d want 1", id, len(evs))
+		}
+		if p, _ := evs[0]["payload"].(bson.M); p["reason"] != "missed" {
+			t.Fatalf("reason: %v", p)
+		}
+	}
+	// Idempotent, and no money moved for the missed ones.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 13, 0))
+	if evs := failedEventsFor(t, w, a.OrderID); len(evs) != 1 {
+		t.Fatalf("re-emitted: %d", len(evs))
+	}
+	cashAfter, _ := w.svc.wallet(ctx, cid)
+	if cashAfter.Available != cashBefore.Available {
+		t.Fatalf("closing missed orders moved money: %v -> %v", cashBefore.Available, cashAfter.Available)
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "ref_id", Value: bson.D{{Key: "$in", Value: bson.A{"delivery:" + a.OrderID, "delivery:" + b.OrderID}}}}}); n != 0 {
+		t.Fatalf("ledger rows for missed orders: %d", n)
+	}
+	// The closed day no longer blocks the day index, and the app reads the
+	// order as terminal (cancelled).
+	if o := liveSubOrder(t, w, "sub_missed_a", Dm2); o != nil {
+		t.Fatalf("a missed order still reads as live: %+v", o)
+	}
+}

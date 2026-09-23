@@ -1,0 +1,528 @@
+package consumer
+
+// Founding Family (founding.go): the view and its 404, joining (Rs 99 exactly
+// once, WALLET_SHORT with the shortfall, FARM_UNLOCKED, ALREADY_MEMBER), the
+// unlock that turns every waiting member active with the three notifications,
+// stop with perks to the end of the paid month, member pricing on orders and
+// subscriptions, and the monthly billing with its rollover and retry-then-stop.
+//
+//	CONSUMER_MONGO_TEST_URI=mongodb://localhost:27017 \
+//	  go test ./internal/modules/consumer/ -run Founding -v
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/pyaas/saathi-backend/internal/platform/auth"
+)
+
+// The bill date rolls on the anchor day-of-month, clamped to the month's
+// last day, never overflowing into the month after.
+func TestFoundingNextBillDateRollover(t *testing.T) {
+	cases := []struct {
+		prev   string
+		anchor int
+		want   string
+	}{
+		{"2026-01-31", 31, "2026-02-28"},
+		{"2026-02-28", 31, "2026-03-31"}, // the anchor survives the short month
+		{"2026-08-31", 31, "2026-09-30"},
+		{"2026-12-15", 15, "2027-01-15"}, // year roll
+		{"2028-01-31", 31, "2028-02-29"}, // leap day
+		{"2026-10-05", 0, "2026-11-05"},  // no anchor: the day of prev
+		{"garbage", 3, "garbage"},
+	}
+	for _, c := range cases {
+		if got := nextBillDate(c.prev, c.anchor); got != c.want {
+			t.Errorf("nextBillDate(%s, %d) = %s want %s", c.prev, c.anchor, got, c.want)
+		}
+	}
+}
+
+// Member pricing on the catalog index: level 3 is the ERP's explicit price
+// when present, else level 1 minus Rs 2 per litre on PYAAS milk only;
+// Parag, ghee and 200 ml trial packs are never discounted.
+func TestFoundingMemberPriceResolution(t *testing.T) {
+	docs := []catalogDoc{
+		{Kind: catalogKindProduct, SkuID: "pyaas-toned-1l", Name: "Toned Milk - PYAAS", Category: "milk", Variant: "1L Carton", Unit: "1 L", Price: fp(85)},
+		{Kind: catalogKindProduct, SkuID: "pyaas-toned-pouch", Name: "Toned Milk - PYAAS", Category: "milk", Variant: "500ml Pouch", Unit: "500 ml", Price: fp(51)},
+		{Kind: catalogKindProduct, SkuID: "pyaas-a2-1l", Name: "A2 Cow Milk - PYAAS", Category: "milk", Variant: "1L Carton", Unit: "1 L", Price: fp(139), MemberPrice: fp(137)},
+		{Kind: catalogKindAddition, SkuID: "dol-pys-toned-450ml", BaseID: "PYS-TONED-450ML", Name: "Toned Milk", Category: "milk", Variant: "450 ML", Price: fp(48)},
+		{Kind: catalogKindAddition, SkuID: "dol-pys-trial-200ml", BaseID: "PYS-TRIAL-200ML", Name: "Trial Pack", Category: "milk", Variant: "200 ML", Price: fp(20)},
+		{Kind: catalogKindAddition, SkuID: "dol-pys-ghee-500ml", BaseID: "PYS-GHEE-500ML", Name: "Bilona Ghee", Category: "ghee", Variant: "500 ML", Price: fp(1499)},
+		{Kind: catalogKindProduct, SkuID: "gold-1l", Name: "Full Cream - Parag Gold", Category: "milk", Variant: "1L", Price: fp(71)},
+		{Kind: catalogKindAddition, SkuID: "dol-pys-wfm", BaseID: "PYS-WFM", Name: "Whole Farm Milk", Category: "milk", Price: fp(86), Variants: []variantDoc{
+			{VariantID: "b1", Label: "1 L Bottle", Price: 85, VolumeMl: 1000},
+			{VariantID: "p1", Label: "1 L Pouch", Price: 85, VolumeMl: 1000, MemberPrice: fp(82)},
+		}},
+	}
+	ix := buildPriceIndex(docs)
+	cases := []struct {
+		sku, variant string
+		member       bool
+		want         float64
+	}{
+		{"pyaas-toned-1l", "", true, 83},        // 1 L: Rs 2 off
+		{"pyaas-toned-1l", "", false, 85},       // non-member: level 1
+		{"pyaas-toned-pouch", "", true, 50},     // 500 ml: Rs 1 off
+		{"pyaas-a2-1l", "", true, 137},          // explicit ERP level 3 wins
+		{"dol-pys-toned-450ml", "", true, 47},   // 450 ml: 0.9 rounds to Rs 1
+		{"dol-pys-trial-200ml", "", true, 20},   // 200 ml: 0.4 rounds to 0
+		{"dol-pys-ghee-500ml", "", true, 1499},  // ghee: never
+		{"gold-1l", "", true, 71},               // Parag: never
+		{"dol-pys-wfm", "1 L Bottle", true, 83}, // variant litres from volume
+		{"dol-pys-wfm", "1 L Pouch", true, 82},  // variant explicit level 3
+	}
+	for _, c := range cases {
+		got, ok := ix.priceForMember(c.sku, c.variant, c.member)
+		if !ok || got != c.want {
+			t.Errorf("priceForMember(%s,%q,%v) = (%v,%v) want %v", c.sku, c.variant, c.member, got, ok, c.want)
+		}
+	}
+	if sku, p, ok := ix.cheapestPyaasLitre(); !ok || sku != "pyaas-toned-1l" || p != 85 {
+		t.Fatalf("cheapest 1 L PYAAS line: %s %v %v", sku, p, ok)
+	}
+	if !isPyaasMilkSKU("pyaas-toned-1l", "", "milk") || isPyaasMilkSKU("taaza-1l", "PRG-TONED-1LTR", "milk") || isPyaasMilkSKU("dol-pys-ghee-500ml", "PYS-GHEE-500ML", "ghee") {
+		t.Fatalf("PYAAS milk identification")
+	}
+	if l := litresOf(0, "1L Carton"); l != 1 {
+		t.Fatalf("litresOf(1L Carton) = %v", l)
+	}
+}
+
+func foundingAPI(t *testing.T, w *chainWorld, cid primitive.ObjectID, method, path, body string, fn http.HandlerFunc) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), consumerCtxKey, consumerActor{ID: cid.Hex(), Phone: "+919000000000"}))
+	rec := httptest.NewRecorder()
+	fn(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+func seedTestFarms(t *testing.T, w *chainWorld, unlocksAt int) {
+	t.Helper()
+	_, err := w.svc.upsertFoundingFarms(context.Background(), []foundingFarmInput{
+		{ID: "gonard-dairy", Name: "Gonard Dairy", Farmer: "Harsh Singh", Place: "Paraspur", UnlocksAt: unlocksAt},
+		{ID: "mishra-dairy", Name: "Mishra Dairy", Farmer: "Abhishek Mishra", Place: "Gonda", UnlocksAt: 80},
+	}, "test")
+	if err != nil {
+		t.Fatalf("seed farms: %v", err)
+	}
+}
+
+func crmEventCount(t *testing.T, w *chainWorld, topic string, cid primitive.ObjectID) int64 {
+	t.Helper()
+	filter := bson.D{{Key: "topic", Value: topic}}
+	if !cid.IsZero() {
+		filter = append(filter, bson.E{Key: "consumer_id", Value: cid})
+	}
+	n, err := w.db.Collection(collCRMEvents).CountDocuments(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	return n
+}
+
+func TestFoundingFamilyJoinUnlockStopAndPricing(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	h := &handler{svc: w.svc}
+	// A PYAAS line on the catalog so member pricing has something to bite on.
+	p := 85.0
+	if _, err := w.db.Collection(collCatalog).InsertOne(ctx, catalogDoc{
+		SkuID: "pyaas-toned-1l", Kind: catalogKindProduct, Price: &p, Name: "Toned Milk - PYAAS", Category: "milk", Unit: "1 L", Variant: "1L Carton",
+	}); err != nil {
+		t.Fatalf("seed pyaas: %v", err)
+	}
+
+	// No farms yet: the programme is closed and the app says opening soon.
+	a := w.customer(t, "9000009001", 500)
+	code, body := foundingAPI(t, w, a, http.MethodGet, "/founding-family", "", h.foundingView)
+	if code != 404 || !strings.Contains(body, "NOT_AVAILABLE") {
+		t.Fatalf("closed programme: %d %s", code, body)
+	}
+	seedTestFarms(t, w, 2)
+
+	// The view in the app's shape, savings from the 1 L PYAAS line.
+	code, body = foundingAPI(t, w, a, http.MethodGet, "/founding-family", "", h.foundingView)
+	if code != 200 {
+		t.Fatalf("view: %d %s", code, body)
+	}
+	var view map[string]any
+	if err := json.Unmarshal([]byte(body), &view); err != nil {
+		t.Fatalf("view body: %v %s", err, body)
+	}
+	if view["price_month"] != 99.0 || view["member"] != nil {
+		t.Fatalf("view: %v", view)
+	}
+	farms, _ := view["farms"].([]any)
+	if len(farms) != 2 {
+		t.Fatalf("farms: %v", view["farms"])
+	}
+	f0, _ := farms[0].(map[string]any)
+	for _, k := range []string{"id", "name", "farmer", "place", "note", "photo_url", "unlocks_at", "claimed", "status", "unlocked_packs"} {
+		if _, ok := f0[k]; !ok {
+			t.Fatalf("farm key %q missing: %v", k, f0)
+		}
+	}
+	if f0["id"] != "gonard-dairy" || f0["status"] != farmFilling || f0["claimed"] != 0.0 || f0["unlocks_at"] != 2.0 || f0["note"] != nil {
+		t.Fatalf("farm row: %v", f0)
+	}
+	sav, _ := view["savings"].(map[string]any)
+	if sav["level1_per_litre"] != 85.0 || sav["level3_per_litre"] != 83.0 || sav["delivery_fee"] != 5.0 {
+		t.Fatalf("savings: %v", sav)
+	}
+
+	// A short wallet: WALLET_SHORT names the shortfall and carries it as a field.
+	poor := w.customer(t, "9000009002", 60)
+	code, body = foundingAPI(t, w, poor, http.MethodPost, "/founding-family/join", `{"farm_id":"gonard-dairy"}`, h.foundingJoin)
+	var short struct {
+		Code      string  `json:"code"`
+		Message   string  `json:"message"`
+		Shortfall float64 `json:"shortfall"`
+	}
+	_ = json.Unmarshal([]byte(body), &short)
+	if code != 422 || short.Code != "WALLET_SHORT" || short.Shortfall != 39 || !strings.Contains(short.Message, "short by 39") {
+		t.Fatalf("wallet short: %d %s", code, body)
+	}
+	if f, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy"); f.Claimed != 0 {
+		t.Fatalf("a refused join took a seat: %d", f.Claimed)
+	}
+	if n, _ := w.db.Collection(collFoundingMembers).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: poor}}); n != 0 {
+		t.Fatalf("a refused join left a member row")
+	}
+
+	// A joins: Rs 99 leaves the wallet once, labelled FOUNDING-99, seat #1, waiting.
+	code, body = foundingAPI(t, w, a, http.MethodPost, "/founding-family/join", `{"farm_id":"gonard-dairy"}`, h.foundingJoin)
+	if code != 200 {
+		t.Fatalf("join: %d %s", code, body)
+	}
+	var joined struct {
+		Member foundingMemberView `json:"member"`
+	}
+	_ = json.Unmarshal([]byte(body), &joined)
+	m := joined.Member
+	if m.Status != memberWaiting || m.FarmID != "gonard-dairy" || m.LineNumber == nil || *m.LineNumber != 1 || m.ReferralCode == nil || m.JoinedAt == nil || m.NextBillDate != nil {
+		t.Fatalf("member after join: %+v", m)
+	}
+	wv, _ := w.svc.wallet(ctx, a)
+	if wv.Available != 401 {
+		t.Fatalf("wallet after join: %v want 401", wv.Available)
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}, {Key: "remark", Value: foundingLedgerLabel}, {Key: "ref_type", Value: "founding"}}); n != 1 {
+		t.Fatalf("FOUNDING-99 ledger rows: %d want 1", n)
+	}
+	// A second join is refused and takes nothing.
+	if code, body = foundingAPI(t, w, a, http.MethodPost, "/founding-family/join", `{"farm_id":"mishra-dairy"}`, h.foundingJoin); code != 409 || !strings.Contains(body, "ALREADY_MEMBER") {
+		t.Fatalf("second join: %d %s", code, body)
+	}
+	if wv, _ = w.svc.wallet(ctx, a); wv.Available != 401 {
+		t.Fatalf("second join moved money: %v", wv.Available)
+	}
+	if crmEventCount(t, w, "founding.seat_waiting", a) != 1 {
+		t.Fatalf("seat_waiting for A: %d", crmEventCount(t, w, "founding.seat_waiting", a))
+	}
+	// Waiting is not active: PYAAS milk still bills at level 1.
+	if w.svc.foundingActive(ctx, a) {
+		t.Fatalf("a waiting member must not have member pricing")
+	}
+
+	// B takes the last seat: the farm unlocks, both members turn active with
+	// month one starting today, and the unlock + you-are-in messages go out.
+	b := w.customer(t, "9000009003", 500)
+	code, body = foundingAPI(t, w, b, http.MethodPost, "/founding-family/join", `{"farm_id":"gonard-dairy"}`, h.foundingJoin)
+	if code != 200 {
+		t.Fatalf("join B: %d %s", code, body)
+	}
+	_ = json.Unmarshal([]byte(body), &joined)
+	today := istToday(time.Now())
+	if joined.Member.Status != memberActive || joined.Member.NextBillDate == nil || *joined.Member.NextBillDate != nextBillDate(today, 0) || *joined.Member.LineNumber != 2 {
+		t.Fatalf("member B after the unlock: %+v", joined.Member)
+	}
+	farm, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy")
+	if farm.Status != farmUnlocked || farm.Claimed != 2 || farm.UnlockedAt == nil {
+		t.Fatalf("farm after the unlock: %+v", farm)
+	}
+	ma, _ := w.svc.repo.findFoundingMember(ctx, a)
+	if ma.Status != memberActive || ma.NextBillDate != nextBillDate(today, 0) || ma.BillDay == 0 {
+		t.Fatalf("member A after the unlock: %+v", ma)
+	}
+	for _, cid := range []primitive.ObjectID{a, b} {
+		if crmEventCount(t, w, "founding.farm_unlocked", cid) != 1 || crmEventCount(t, w, "founding.member_active", cid) != 1 {
+			t.Fatalf("unlock notifications for %s: unlocked=%d active=%d", cid.Hex(),
+				crmEventCount(t, w, "founding.farm_unlocked", cid), crmEventCount(t, w, "founding.member_active", cid))
+		}
+	}
+	if crmEventCount(t, w, "founding.seat_waiting", b) != 0 {
+		t.Fatalf("the seat that unlocked the farm must not also say waiting")
+	}
+	// Claims are closed: a third home is refused.
+	c := w.customer(t, "9000009004", 500)
+	if code, body = foundingAPI(t, w, c, http.MethodPost, "/founding-family/join", `{"farm_id":"gonard-dairy"}`, h.foundingJoin); code != 409 || !strings.Contains(body, "FARM_UNLOCKED") {
+		t.Fatalf("join an unlocked farm: %d %s", code, body)
+	}
+
+	// Pricing: A's order bills PYAAS at level 3 with no delivery fee; a
+	// non-member pays level 1 and the usual fee; Parag is level 1 for both.
+	ord, err := w.svc.createOrder(ctx, a.Hex(), orderInput{
+		Items: []orderItem{
+			{ProductID: "pyaas-toned-1l", Name: "Toned Milk - PYAAS", Qty: 1, Price: 85},
+			{ProductID: "gold-500ml", Name: "Milk gold-500ml", Qty: 1, Price: 35},
+		},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow", Lane: "morning", ConsumerName: "A", Phone: "9000009001",
+	})
+	if err != nil {
+		t.Fatalf("member order: %v", err)
+	}
+	if ord.Items[0].Price != 83 || ord.Items[1].Price != 35 || ord.DeliveryFee != 0 || ord.Total != 118 {
+		t.Fatalf("member order pricing: %+v fee %v total %v", ord.Items, ord.DeliveryFee, ord.Total)
+	}
+	ord2, err := w.svc.createOrder(ctx, c.Hex(), orderInput{
+		Items:         []orderItem{{ProductID: "pyaas-toned-1l", Name: "Toned Milk - PYAAS", Qty: 1, Price: 85}},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow", Lane: "morning", ConsumerName: "C", Phone: "9000009004",
+	})
+	if err != nil {
+		t.Fatalf("non-member order: %v", err)
+	}
+	if ord2.Items[0].Price != 85 || ord2.DeliveryFee != deliveryFee {
+		t.Fatalf("non-member order pricing: %+v fee %v", ord2.Items, ord2.DeliveryFee)
+	}
+	// The catalog carries both prices on the PYAAS line, none on Parag.
+	cat, err := w.svc.repo.catalogView(ctx, true)
+	if err != nil {
+		t.Fatalf("catalogView: %v", err)
+	}
+	w.svc.decorateMemberPrices(ctx, cat)
+	seen := map[string]*float64{}
+	for _, ad := range cat.Additions {
+		seen[ad.ID] = ad.MemberPrice
+	}
+	if seen["pyaas-toned-1l"] == nil || *seen["pyaas-toned-1l"] != 83 || seen["gold-500ml"] != nil {
+		t.Fatalf("catalog member prices: %v", seen)
+	}
+	// A subscription created by A carries the member price; its morning
+	// order re-reads the standing.
+	sub, err := w.svc.createSubscription(ctx, a, subscriptionInput{ProductID: "pyaas-toned-1l", Qty: 1, Frequency: "daily", StartDate: today})
+	if err != nil {
+		t.Fatalf("member subscription: %v", err)
+	}
+	if sub.UnitPrice != 83 {
+		t.Fatalf("member subscription price: %v", sub.UnitPrice)
+	}
+	if lp := w.svc.subscriptionLinePrice(ctx, sub); lp != 83 {
+		t.Fatalf("line price for an active member: %v", lp)
+	}
+
+	// Stop: perks run to the end of the paid month, then end.
+	code, body = foundingAPI(t, w, a, http.MethodPost, "/founding-family/stop", "", h.foundingStop)
+	if code != 200 {
+		t.Fatalf("stop: %d %s", code, body)
+	}
+	_ = json.Unmarshal([]byte(body), &joined)
+	if joined.Member.Status != memberStopped {
+		t.Fatalf("member after stop: %+v", joined.Member)
+	}
+	ma, _ = w.svc.repo.findFoundingMember(ctx, a)
+	if ma.PerksUntil != addDaysIST(nextBillDate(today, 0), -1) {
+		t.Fatalf("perks_until after stop: %q", ma.PerksUntil)
+	}
+	if !w.svc.foundingActive(ctx, a) {
+		t.Fatalf("perks must run to the end of the paid month")
+	}
+	if _, active := w.svc.foundingStanding(ctx, a, addDaysIST(ma.PerksUntil, 1)); active {
+		t.Fatalf("perks must end after the paid month")
+	}
+	if lp := w.svc.subscriptionLinePrice(ctx, sub); lp != 83 {
+		t.Fatalf("line price while perks still run: %v", lp)
+	}
+	// A stopped member is not billed again (B, still active, is), and can
+	// re-join a filling farm.
+	if billed, stopped := w.svc.billFoundingMembers(ctx, time.Now().AddDate(0, 2, 0)); billed != 1 || stopped != 0 {
+		t.Fatalf("billing two months on: billed=%d stopped=%d want 1 (B) and 0", billed, stopped)
+	}
+	if ma, _ = w.svc.repo.findFoundingMember(ctx, a); ma.Status != memberStopped || ma.LastBillDate != "" {
+		t.Fatalf("billing touched the stopped member: %+v", ma)
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}, {Key: "remark", Value: foundingLedgerLabel}}); n != 1 {
+		t.Fatalf("FOUNDING-99 rows for a stopped member: %d want 1", n)
+	}
+	code, body = foundingAPI(t, w, a, http.MethodPost, "/founding-family/join", `{"farm_id":"mishra-dairy"}`, h.foundingJoin)
+	if code != 200 {
+		t.Fatalf("re-join: %d %s", code, body)
+	}
+	_ = json.Unmarshal([]byte(body), &joined)
+	if joined.Member.Status != memberWaiting || joined.Member.FarmID != "mishra-dairy" || *joined.Member.LineNumber != 1 {
+		t.Fatalf("member after re-join: %+v", joined.Member)
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}, {Key: "remark", Value: foundingLedgerLabel}}); n != 2 {
+		t.Fatalf("FOUNDING-99 rows after a re-join: %d want 2", n)
+	}
+}
+
+// Monthly billing: Rs 99 on the bill day exactly once, the date rolls a month
+// on its anchor, a short wallet is retried for three days and then stops the
+// membership with the perks ending the day before the missed bill.
+func TestFoundingBillingRolloverAndRetryThenStop(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 1)
+	a := w.customer(t, "9000009101", 300)
+	if _, err := w.svc.joinFoundingFamily(ctx, a, "gonard-dairy"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	m, _ := w.svc.repo.findFoundingMember(ctx, a)
+	if m.Status != memberActive {
+		t.Fatalf("a one-seat farm unlocks on the first join: %+v", m)
+	}
+	// Pin the bill date to a 31st so the rollover is exercised.
+	if _, err := w.db.Collection(collFoundingMembers).UpdateByID(ctx, m.ID, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "next_bill_date", Value: "2026-10-31"}, {Key: "bill_day", Value: 31}}}}); err != nil {
+		t.Fatalf("pin bill date: %v", err)
+	}
+	at := func(day string, hour int) time.Time {
+		d, _ := parseDay(day)
+		return d.Add(time.Duration(hour) * time.Hour)
+	}
+	// Before the bill day: nothing.
+	if billed, _ := w.svc.billFoundingMembers(ctx, at("2026-10-30", 9)); billed != 0 {
+		t.Fatalf("billed before the bill day")
+	}
+	// On the bill day: Rs 99 once, however many ticks run; the date rolls to 30 Nov.
+	for i := 0; i < 3; i++ {
+		w.svc.billFoundingMembers(ctx, at("2026-10-31", 9+i))
+	}
+	wv, _ := w.svc.wallet(ctx, a)
+	if wv.Available != 300-99-99 {
+		t.Fatalf("wallet after the first month: %v want 102", wv.Available)
+	}
+	m, _ = w.svc.repo.findFoundingMember(ctx, a)
+	if m.NextBillDate != "2026-11-30" || m.LastBillDate != "2026-10-31" || m.BillAttempts != 0 {
+		t.Fatalf("after the first bill: %+v", m)
+	}
+	// Second month bills 30 Nov and rolls back onto the 31st.
+	w.svc.billFoundingMembers(ctx, at("2026-11-30", 9))
+	m, _ = w.svc.repo.findFoundingMember(ctx, a)
+	if m.NextBillDate != "2026-12-31" {
+		t.Fatalf("anchor day lost: %q", m.NextBillDate)
+	}
+	if wv, _ = w.svc.wallet(ctx, a); wv.Available != 3 {
+		t.Fatalf("wallet after two months: %v", wv.Available)
+	}
+	// Third month: the wallet is short. Three billing days of retries, then stopped.
+	for i, day := range []string{"2026-12-31", "2027-01-01", "2027-01-02"} {
+		billed, stopped := w.svc.billFoundingMembers(ctx, at(day, 9))
+		m, _ = w.svc.repo.findFoundingMember(ctx, a)
+		if billed != 0 {
+			t.Fatalf("day %d billed a short wallet", i)
+		}
+		if i < 2 && (stopped != 0 || m.Status != memberActive || m.BillAttempts != i+1) {
+			t.Fatalf("retry day %d: stopped=%d %+v", i, stopped, m)
+		}
+		if i == 2 && (stopped != 1 || m.Status != memberStopped || m.StopReason != "wallet_short" || m.PerksUntil != "2026-12-30") {
+			t.Fatalf("after three short days: stopped=%d %+v", stopped, m)
+		}
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}, {Key: "remark", Value: foundingLedgerLabel}}); n != 3 {
+		t.Fatalf("FOUNDING-99 rows: %d want 3 (join + two months)", n)
+	}
+	// A wallet top-up after the stop bills nothing: the member must re-join.
+	if _, err := w.svc.creditTopup(ctx, a, 500, "test", "topup-after-stop"); err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+	if billed, _ := w.svc.billFoundingMembers(ctx, at("2027-01-03", 9)); billed != 0 {
+		t.Fatalf("a stopped member was billed")
+	}
+	// The members-only gate, when the founder switches it on, refuses a
+	// PYAAS line for a non-member, and says which farm a waiting member is
+	// waiting on. Off by default: nothing above needed it.
+	w.svc.deps.Cfg.FoundingPyaasMembersOnly = true
+	defer func() { w.svc.deps.Cfg.FoundingPyaasMembersOnly = false }()
+	p := 85.0
+	if _, err := w.db.Collection(collCatalog).InsertOne(ctx, catalogDoc{
+		SkuID: "pyaas-toned-1l", Kind: catalogKindProduct, Price: &p, Name: "Toned Milk - PYAAS", Category: "milk", Unit: "1 L",
+	}); err != nil {
+		t.Fatalf("seed pyaas: %v", err)
+	}
+	nonMember := w.customer(t, "9000009103", 300)
+	_, err := w.svc.createOrder(ctx, nonMember.Hex(), orderInput{
+		Items:         []orderItem{{ProductID: "pyaas-toned-1l", Qty: 1, Price: 85}},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1", Lane: "morning",
+	})
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.Code != "FOUNDING_REQUIRED" || !strings.Contains(ae.Message, "Unlock it with Founding Family") {
+		t.Fatalf("gate for a non-member: %v", err)
+	}
+	if _, err := w.svc.createOrder(ctx, nonMember.Hex(), orderInput{
+		Items:         []orderItem{{ProductID: "gold-500ml", Qty: 1, Price: 35}},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1", Lane: "morning",
+	}); err != nil {
+		t.Fatalf("the gate must never touch Parag: %v", err)
+	}
+	waiting := w.customer(t, "9000009102", 300)
+	if _, err := w.svc.joinFoundingFamily(ctx, waiting, "mishra-dairy"); err != nil {
+		t.Fatalf("join mishra: %v", err)
+	}
+	_, err = w.svc.createSubscription(ctx, waiting, subscriptionInput{ProductID: "pyaas-toned-1l", Qty: 1, Frequency: "daily"})
+	if !errors.As(err, &ae) || ae.Code != "FOUNDING_REQUIRED" || !strings.Contains(ae.Message, "Opens when Mishra Dairy unlocks") {
+		t.Fatalf("gate for a waiting member: %v", err)
+	}
+}
+
+// The admin farm endpoint: SUPER_ADMIN upserts the founder's records without
+// touching seats; a farm set to unlocked by hand activates its members.
+func TestFoundingAdminFarmsUpsert(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	h := &handler{svc: w.svc}
+	put := func(body string) (int, string) {
+		req := httptest.NewRequest(http.MethodPut, "/admin/founding/farms", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(auth.WithActor(req.Context(), auth.Actor{PartyID: adminKeyActorID, Kind: "service", RoleCode: "SUPER_ADMIN"}))
+		rec := httptest.NewRecorder()
+		h.adminPutFoundingFarms(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	code, body := put(`{"farms":[{"name":"Gonard Dairy","farmer":"Harsh Singh","place":"Paraspur","unlocks_at":65,"photo_url":"https://x/g.jpg"}]}`)
+	if code != 200 || !strings.Contains(body, `"id":"gonard-dairy"`) || !strings.Contains(body, `"claimed":0`) {
+		t.Fatalf("put: %d %s", code, body)
+	}
+	if code, body = put(`{"farms":[{"name":"Nameless","farmer":"","unlocks_at":10}]}`); code != 400 {
+		t.Fatalf("invalid farm accepted: %d %s", code, body)
+	}
+	a := w.customer(t, "9000009201", 300)
+	if _, err := w.svc.joinFoundingFamily(ctx, a, "gonard-dairy"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	// An edit keeps the seat; a hand unlock activates the waiting member.
+	code, body = put(`{"farms":[{"id":"gonard-dairy","name":"Gonard Dairy","farmer":"Harsh Singh","unlocks_at":65,"unlocked_packs":"Whole Farm Milk 1 L bottle and pouch","status":"unlocked"}]}`)
+	if code != 200 || !strings.Contains(body, `"claimed":1`) || !strings.Contains(body, `"status":"unlocked"`) {
+		t.Fatalf("hand unlock: %d %s", code, body)
+	}
+	if m, _ := w.svc.repo.findFoundingMember(ctx, a); m.Status != memberActive {
+		t.Fatalf("member after a hand unlock: %+v", m)
+	}
+	if crmEventCount(t, w, "founding.farm_unlocked", a) != 1 {
+		t.Fatalf("unlock notification after a hand unlock")
+	}
+	// The seed path never touches an existing farm.
+	added, err := SeedFoundingFarms(ctx, w.db, []byte(`{"farms":[{"id":"gonard-dairy","name":"Other","farmer":"X","unlocks_at":1},{"id":"new-farm","name":"New Farm","farmer":"Y","unlocks_at":10}]}`))
+	if err != nil || added != 1 {
+		t.Fatalf("seed: added=%d err=%v", added, err)
+	}
+	if f, _ := w.svc.repo.findFoundingFarm(ctx, "gonard-dairy"); f.Name != "Gonard Dairy" || f.Claimed != 1 || f.Status != farmUnlocked {
+		t.Fatalf("seed overwrote a live farm: %+v", f)
+	}
+}

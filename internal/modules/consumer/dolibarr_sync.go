@@ -157,6 +157,35 @@ func dolibarrEffectiveMin(p dolibarr.Product) float64 {
 	return dolibarrWithGST(p, p.PriceMin.Float())
 }
 
+// dolibarrMemberPrice is the ERP's Founding Family price (multiprice level
+// 3) under the same GST rule, for PYS-* milk refs only. nil when the ERP
+// carries no level 3, or one that is not below the shelf price (the spec
+// says levels 3-5 equal level 1 until the founder sets them) - the catalog
+// then derives level 1 minus Rs 2 per litre (catalog_price.go).
+func dolibarrMemberPrice(ref string, p dolibarr.Product, shelf float64) *float64 {
+	if !strings.HasPrefix(ref, "PYS-") || strings.Contains(ref, "GHEE") {
+		return nil
+	}
+	lvl := dolibarrWithGST(p, p.LevelPriceTTC(3))
+	if lvl <= 0 || lvl >= shelf {
+		return nil
+	}
+	return &lvl
+}
+
+// dolibarrFoundingServiceField maps the two Founding Family services the
+// spec asks the ERP to carry onto the price record the backend reads
+// (founding.go foundingERPPrices). "" for any other ref.
+func dolibarrFoundingServiceField(ref string) string {
+	switch ref {
+	case "FOUNDING-99":
+		return "price_month"
+	case "DELIVERY-FEE":
+		return "delivery_fee"
+	}
+	return ""
+}
+
 func dolibarrWithGST(p dolibarr.Product, base float64) float64 {
 	if base <= 0 {
 		return 0
@@ -227,7 +256,8 @@ type dolibarrSyncState struct {
 	SkuID        string    `bson:"sku_id"`
 	Mode         string    `bson:"mode"` // baseline | addition
 	Price        float64   `bson:"price"`
-	MRP          float64   `bson:"mrp,omitempty"` // ERP price_min mirrored to the override (baselines)
+	MRP          float64   `bson:"mrp,omitempty"`          // ERP price_min mirrored to the override (baselines)
+	MemberPrice  float64   `bson:"member_price,omitempty"` // ERP level 3 mirrored to member_price (PYS-* milk)
 	Name         string    `bson:"name"`
 	PhotoURL     string    `bson:"photo_url,omitempty"`
 	HiddenBySync bool      `bson:"hidden_by_sync,omitempty"`
@@ -306,6 +336,14 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 	var synced, skipped int
 	for _, p := range products {
 		ref := strings.ToUpper(strings.TrimSpace(p.Ref))
+		// The Founding Family services (spec section 9): their ERP price is
+		// what GET /founding-family serves, in place of the config fallback.
+		if field := dolibarrFoundingServiceField(ref); field != "" {
+			if price := dolibarrEffectivePrice(p); price > 0 {
+				s.repo.saveFoundingERPPrice(ctx, field, price)
+			}
+			continue
+		}
 		if !dolibarrRefPattern.MatchString(ref) {
 			skipped++ // legacy/test rows never sync
 			continue
@@ -381,8 +419,9 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 	if mrp < price {
 		mrp = 0
 	}
+	member := dolibarrMemberPrice(ref, p, price)
 	if st.Mode == "baseline" && st.Price == price && st.MRP == mrp && !st.HiddenBySync &&
-		st.Stock == stock && st.SchemaV >= dolibarrSyncSchemaV {
+		st.Stock == stock && st.SchemaV >= dolibarrSyncSchemaV && st.MemberPrice == valOrZero(member) {
 		return // unchanged
 	}
 	// REAL inventory: the ERP's on-hand (GRN-in via the Dolibarr UI, minus our
@@ -390,7 +429,7 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 	// seeded row so the store console and low-stock alerts run on ERP truth.
 	// The manager keeps the in/out-of-stock SWITCH; the COUNT is the ledger's.
 	s.setSeededStockCount(ctx, seedSku, stock)
-	set := bson.D{{Key: "price", Value: &price}, {Key: "mrp", Value: &mrp}}
+	set := bson.D{{Key: "price", Value: &price}, {Key: "mrp", Value: &mrp}, {Key: "member_price", Value: member}}
 	if st.HiddenBySync { // ERP put it back ON sale → restore availability
 		on := true
 		set = append(set, bson.E{Key: "in_stock", Value: &on})
@@ -402,7 +441,7 @@ func (s *service) syncBaselinePrice(ctx context.Context, cli *dolibarr.Client, r
 	}
 	s.saveDolibarrState(ctx, dolibarrSyncState{
 		Ref: ref, DolibarrID: p.ID.Int(), SkuID: seedSku, Mode: "baseline",
-		Price: price, MRP: mrp, Name: p.Label, Stock: stock,
+		Price: price, MRP: mrp, Name: p.Label, Stock: stock, MemberPrice: valOrZero(member),
 	})
 	s.log.Info("dolibarr → baseline", "ref", ref, "sku", seedSku, "price", price, "mrp", mrp, "stock", stock)
 }
@@ -459,6 +498,7 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 		if mrp := dolibarrEffectiveMin(p); mrp > 0 && mrp >= price {
 			doc.MRP = &mrp
 		}
+		doc.MemberPrice = dolibarrMemberPrice(ref, p, price)
 		if ml := p.VolumeMl(); ml > 0 {
 			doc.Physical = &physicalDoc{VolumeMl: ml}
 		}
@@ -477,9 +517,10 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 		}
 	}
 
+	member := dolibarrMemberPrice(ref, p, price)
 	if st.Mode == "addition" && st.Price == price && st.Name == p.Label &&
 		(erpFront == "" || erpFront == st.PhotoURL) && !st.HiddenBySync &&
-		st.Stock == stock && st.SchemaV >= dolibarrSyncSchemaV {
+		st.Stock == stock && st.SchemaV >= dolibarrSyncSchemaV && st.MemberPrice == valOrZero(member) {
 		return // unchanged (and already written in the current schema shape)
 	}
 	sc := int(stock)
@@ -489,7 +530,8 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 		{Key: "unit", Value: variant},
 		{Key: "description", Value: p.Description},
 		{Key: "price", Value: &price},
-		{Key: "stock_count", Value: &sc}, // ERP on-hand = inventory truth
+		{Key: "member_price", Value: member}, // ERP level 3 (nil -> derived)
+		{Key: "stock_count", Value: &sc},     // ERP on-hand = inventory truth
 	}
 	if mrp := dolibarrEffectiveMin(p); mrp > 0 && mrp >= price {
 		set = append(set, bson.E{Key: "mrp", Value: &mrp})
@@ -510,7 +552,7 @@ func (s *service) syncAddition(ctx context.Context, cli *dolibarr.Client, ref st
 	}
 	s.saveDolibarrState(ctx, dolibarrSyncState{
 		Ref: ref, DolibarrID: p.ID.Int(), SkuID: sku, Mode: "addition",
-		Price: price, Name: p.Label, PhotoURL: erpFront, Stock: stock,
+		Price: price, Name: p.Label, PhotoURL: erpFront, Stock: stock, MemberPrice: valOrZero(member),
 	})
 	s.log.Info("dolibarr product updated", "ref", ref, "sku", sku, "price", price, "stock", stock)
 }
