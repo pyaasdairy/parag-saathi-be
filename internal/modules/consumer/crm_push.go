@@ -47,11 +47,11 @@ var _ crmTransport = (*pushChannel)(nil)
 // newPushChannel builds the push transport from env. EXPO_PUSH_ENABLED not
 // exactly "true" -> disabled, and the dispatcher never resolves it.
 func newPushChannel(log *slog.Logger, repo *repository) *pushChannel {
-	return &pushChannel{
-		expo: push.New(os.Getenv("EXPO_PUSH_ENABLED") == "true", os.Getenv("EXPO_ACCESS_TOKEN")),
-		repo: repo,
-		log:  log,
-	}
+	expo := push.New(os.Getenv("EXPO_PUSH_ENABLED") == "true", os.Getenv("EXPO_ACCESS_TOKEN"))
+	// Dry-run seam: EXPO_PUSH_BASE_URL replaces Expo's origin, the path stays;
+	// unset, the client is untouched (see .env.example, dry-run / local stubs).
+	expo.SetBaseURL(os.Getenv("EXPO_PUSH_BASE_URL"))
+	return &pushChannel{expo: expo, repo: repo, log: log}
 }
 
 func (c *pushChannel) Name() string { return "push" }

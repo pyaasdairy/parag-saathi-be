@@ -11,8 +11,8 @@ import (
 )
 
 // Test transports NEVER touch the real providers — every channel points its
-// baseURL at httptest (the field exists precisely so tests can, unlike the
-// const-endpoint legacy msg91 client).
+// baseURL at httptest (the field exists precisely so tests can; the legacy
+// msg91 OTP client is redirected through CRM_MSG91_BASE_URL instead).
 
 func testSMSChannel(t *testing.T, dlt map[string]string, h http.HandlerFunc) (*smsChannel, *int) {
 	t.Helper()

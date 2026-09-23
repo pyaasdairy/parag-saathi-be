@@ -23,7 +23,14 @@ import (
 	"time"
 )
 
-const expoPushEndpoint = "https://exp.host/--/api/v2/push/send"
+const (
+	// expoPushOrigin is Expo's push host. EXPO_PUSH_BASE_URL (read by the
+	// caller, applied through SetBaseURL) replaces it for a dry run; the path
+	// stays, so a local stub sees exactly the request production sends.
+	expoPushOrigin   = "https://exp.host"
+	expoPushPath     = "/--/api/v2/push/send"
+	expoPushEndpoint = expoPushOrigin + expoPushPath
+)
 
 // ErrUnavailable marks a send whose outcome is UNKNOWN: a transport error or
 // a 5xx from the push service. Callers treat it as transient (retry later,
@@ -77,9 +84,19 @@ func New(enabled bool, accessToken string) *Expo {
 // Enabled reports whether real push delivery is configured.
 func (e *Expo) Enabled() bool { return e != nil && e.enabled }
 
-// SetEndpoint points the client at another push service. A test seam only:
-// production always talks to exp.host.
+// SetEndpoint points the client at another push service URL, taken as-is. A
+// test seam; production talks to exp.host unless EXPO_PUSH_BASE_URL redirects
+// it through SetBaseURL.
 func (e *Expo) SetEndpoint(u string) { e.endpoint = u }
+
+// SetBaseURL points the client at another origin and keeps Expo's push path:
+// the dry-run seam behind EXPO_PUSH_BASE_URL, so a local stub captures the
+// exact request production would send. An empty origin changes nothing.
+func (e *Expo) SetBaseURL(origin string) {
+	if o := strings.TrimRight(strings.TrimSpace(origin), "/"); o != "" {
+		e.endpoint = o + expoPushPath
+	}
+}
 
 // Send posts msgs as one JSON array and returns one Ticket per message, in
 // order. A nil error means the service ACCEPTED the batch; individual

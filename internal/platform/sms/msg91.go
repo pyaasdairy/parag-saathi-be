@@ -13,12 +13,20 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 )
 
-const msg91OTPEndpoint = "https://control.msg91.com/api/v5/otp"
+const (
+	// msg91Origin is the provider host. For a dry run CRM_MSG91_BASE_URL
+	// replaces it (the same key the CRM flow channel honours) and the OTP path
+	// stays, so a local stub captures exactly the request production sends.
+	msg91Origin      = "https://control.msg91.com"
+	msg91OTPPath     = "/api/v5/otp"
+	msg91OTPEndpoint = msg91Origin + msg91OTPPath
+)
 
 var nonDigits = regexp.MustCompile(`\D`)
 
@@ -26,6 +34,7 @@ var nonDigits = regexp.MustCompile(`\D`)
 type MSG91 struct {
 	authKey    string
 	templateID string
+	endpoint   string // msg91OTPEndpoint, or the CRM_MSG91_BASE_URL origin + the OTP path
 	client     *http.Client
 }
 
@@ -36,8 +45,19 @@ func NewMSG91(authKey, templateID string) *MSG91 {
 	return &MSG91{
 		authKey:    strings.TrimSpace(authKey),
 		templateID: strings.TrimSpace(templateID),
+		endpoint:   msg91OTPEndpointFromEnv(),
 		client:     &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// msg91OTPEndpointFromEnv is the dry-run seam: with CRM_MSG91_BASE_URL set,
+// its value replaces the scheme://host and the OTP path is kept. Unset (the
+// production case): the real endpoint.
+func msg91OTPEndpointFromEnv() string {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("CRM_MSG91_BASE_URL")), "/"); v != "" {
+		return v + msg91OTPPath
+	}
+	return msg91OTPEndpoint
 }
 
 // Enabled reports whether real SMS delivery is configured.
@@ -65,7 +85,7 @@ func (m *MSG91) SendOTP(ctx context.Context, phone, code string) error {
 	q.Set("mobile", mobile)
 	q.Set("otp", code)
 	q.Set("otp_length", "6")
-	endpoint := msg91OTPEndpoint + "?" + q.Encode()
+	endpoint := m.endpoint + "?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {

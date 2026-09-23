@@ -63,9 +63,16 @@ import (
 const (
 	// MSG91 Flow API — templated (DLT) SMS with named variables. NOT the /otp
 	// endpoint the login path uses: flow renders a registered campaign template.
-	crmMSG91FlowEndpoint = "https://control.msg91.com/api/v5/flow/"
+	// Origin and path are separate so a dry run can point the origin at a
+	// local stub (CRM_MSG91_BASE_URL) and the stub still sees the real path.
+	crmMSG91Origin       = "https://control.msg91.com"
+	crmMSG91FlowPath     = "/api/v5/flow/"
+	crmMSG91FlowEndpoint = crmMSG91Origin + crmMSG91FlowPath
 	// Meta Graph API base for the WhatsApp Cloud API (POST {phone_id}/messages).
-	crmWAGraphBase = "https://graph.facebook.com/v19.0"
+	// CRM_WA_BASE_URL replaces the origin; the version path stays.
+	crmWAGraphOrigin  = "https://graph.facebook.com"
+	crmWAGraphVersion = "/v19.0"
+	crmWAGraphBase    = crmWAGraphOrigin + crmWAGraphVersion
 	// crmDLTDeliveryBy fills the registered ##time## slot ("your free pack
 	// arrives tomorrow morning by ##time##"). It is the campaign's published
 	// delivery promise — crm_triggers.json config.delivery_by = "07:00" — in the
@@ -254,6 +261,18 @@ func (s *service) crmDeliveryPhone(ctx context.Context, consumerID primitive.Obj
 	return "91" + digits, nil
 }
 
+// crmProviderOrigin is the dry-run seam every outbound transport shares:
+// when the named env var is set, its value replaces the provider's
+// scheme://host and every path stays exactly what production sends, so a
+// local stub server captures the real request. Unset: the real origin, and
+// the binary behaves byte-identically to before the seam existed.
+func crmProviderOrigin(envKey, real string) string {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv(envKey)), "/"); v != "" {
+		return v
+	}
+	return real
+}
+
 // crmTransports resolves the ENABLED Phase B transports. With no keys set it
 // returns nil, the dispatcher's external block short-circuits, and the binary
 // behaves byte-identically to Phase A — the hard no-op invariant.
@@ -342,7 +361,7 @@ func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t c
 type smsChannel struct {
 	authKey string
 	sender  string // 6-char DLT header (CRM_MSG91_SENDER, e.g. PYAASD)
-	baseURL string // crmMSG91FlowEndpoint; a struct field so tests point it at httptest
+	baseURL string // crmMSG91FlowEndpoint, or the CRM_MSG91_BASE_URL origin + flow path; a struct field so tests point it at httptest
 	client  *http.Client
 	dlt     map[string]crmDLTTemplateID // trigger id → DLT flow/template id(s) (CRM_DLT_TEMPLATE_IDS)
 	log     *slog.Logger
@@ -357,7 +376,7 @@ func newSMSChannel(log *slog.Logger) *smsChannel {
 	return &smsChannel{
 		authKey: strings.TrimSpace(os.Getenv("CRM_MSG91_AUTHKEY")),
 		sender:  strings.TrimSpace(os.Getenv("CRM_MSG91_SENDER")),
-		baseURL: crmMSG91FlowEndpoint,
+		baseURL: crmProviderOrigin("CRM_MSG91_BASE_URL", crmMSG91Origin) + crmMSG91FlowPath,
 		client:  &http.Client{Timeout: 10 * time.Second},
 		dlt:     crmParseDLTMap(log, "CRM_DLT_TEMPLATE_IDS"),
 		log:     log,
@@ -495,7 +514,7 @@ func (c *smsChannel) Send(ctx context.Context, s *service, consumerID primitive.
 type whatsappChannel struct {
 	token   string
 	phoneID string
-	baseURL string // crmWAGraphBase; a struct field so tests point it at httptest
+	baseURL string // crmWAGraphBase, or the CRM_WA_BASE_URL origin + version; a struct field so tests point it at httptest
 	client  *http.Client
 	names   map[string]string // trigger id → approved template name (CRM_WA_TEMPLATE_NAMES)
 	log     *slog.Logger
@@ -510,7 +529,7 @@ func newWhatsAppChannel(log *slog.Logger) *whatsappChannel {
 	c := &whatsappChannel{
 		token:   strings.TrimSpace(os.Getenv("CRM_WA_TOKEN")),
 		phoneID: strings.TrimSpace(os.Getenv("CRM_WA_PHONE_ID")),
-		baseURL: crmWAGraphBase,
+		baseURL: crmProviderOrigin("CRM_WA_BASE_URL", crmWAGraphOrigin) + crmWAGraphVersion,
 		client:  &http.Client{Timeout: 10 * time.Second},
 		names:   crmParseTemplateMap(log, "CRM_WA_TEMPLATE_NAMES"),
 		log:     log,
