@@ -103,6 +103,7 @@ type order struct {
 	PaymentMethod  string             `bson:"payment_method"          json:"payment_method"`
 	AddressLabel   string             `bson:"address_label"           json:"address_label"`
 	AddressText    string             `bson:"address_text"            json:"address_text"`
+	AddressID      string             `bson:"address_id,omitempty"    json:"address_id,omitempty"`
 	RiderID        *string            `bson:"rider_id"                json:"rider_id"`
 	PlacedAt       time.Time          `bson:"placed_at"               json:"placed_at"`
 	Priority       string             `bson:"priority,omitempty"      json:"priority,omitempty"`
@@ -254,6 +255,7 @@ type orderInput struct {
 	PaymentMethod  string      `json:"payment_method"`
 	AddressLabel   string      `json:"address_label"`
 	AddressText    string      `json:"address_text"`
+	AddressID      string      `json:"address_id"` // saved address id; see addressFor
 	Priority       string      `json:"priority"`
 	DeliveryWindow string      `json:"delivery_window"`
 	Total          float64     `json:"total"` // client total (may carry a coupon discount)
@@ -373,7 +375,7 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: userID, Status: "placed",
 		Subtotal: subtotal, DeliveryFee: fee, MonsoonFee: monsoonFee, Total: total, PaymentMethod: pm,
-		AddressLabel: in.AddressLabel, AddressText: in.AddressText, RiderID: nil,
+		AddressLabel: in.AddressLabel, AddressText: in.AddressText, AddressID: strings.TrimSpace(in.AddressID), RiderID: nil,
 		PlacedAt: now, Priority: priority, DeliveryWindow: in.DeliveryWindow, Lane: lane,
 		DeliveryDate: deliveryDate, BuyerGSTIN: strings.TrimSpace(in.BuyerGSTIN),
 		Items: items, Rider: nil, CanReview: false, Review: nil,

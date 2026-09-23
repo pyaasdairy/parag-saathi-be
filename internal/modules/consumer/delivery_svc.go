@@ -81,7 +81,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	var society, societyID, tower, unit string
 	var floor *int
 	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
-		if a := s.addressFor(ctx, cid, o.AddressLabel); a != nil {
+		if a := s.addressFor(ctx, cid, o.AddressID, o.AddressLabel); a != nil {
 			society, societyID, tower, unit, floor = a.Society, a.SocietyID, a.Tower, a.Unit, a.Floor
 		}
 	}
@@ -144,7 +144,7 @@ func (s *service) resolveDeliveryPrefs(ctx context.Context, o *order) *deliveryP
 		if acct, aerr := s.repo.findAccountByID(ctx, cid); aerr == nil && acct != nil {
 			overlay(bellSaid(acct.DeliveryPrefs))
 		}
-		overlay(s.addressPrefs(ctx, cid, o.AddressLabel))
+		overlay(s.addressPrefs(ctx, cid, o.AddressID, o.AddressLabel))
 	}
 	overlay(o.DeliveryPrefs)
 	if !any {
@@ -175,7 +175,17 @@ func bellSaid(p *deliveryPrefsDoc) *deliveryPrefsDoc {
 // addressFor picks the saved address an order ships to: the one whose label
 // matches, else the default. Shared by the doorstep prefs and the structured
 // door copied onto the task.
-func (s *service) addressFor(ctx context.Context, consumerID primitive.ObjectID, label string) *address {
+func (s *service) addressFor(ctx context.Context, consumerID primitive.ObjectID, addressID, label string) *address {
+	// The saved address's id wins when the order carries one: two rows can
+	// both be called "Home", and the label alone stamped the wrong flat on
+	// the task. Scoped to this consumer, so someone else's id is ignored.
+	if id := strings.TrimSpace(addressID); id != "" {
+		if oid, perr := primitive.ObjectIDFromHex(id); perr == nil {
+			if a, ferr := s.repo.findAddress(ctx, oid, consumerID); ferr == nil && a != nil {
+				return a
+			}
+		}
+	}
 	addrs, err := s.repo.listAddresses(ctx, consumerID)
 	if err != nil || len(addrs) == 0 {
 		return nil
@@ -193,8 +203,8 @@ func (s *service) addressFor(ctx context.Context, consumerID primitive.ObjectID,
 	return pick
 }
 
-func (s *service) addressPrefs(ctx context.Context, consumerID primitive.ObjectID, label string) *deliveryPrefsDoc {
-	pick := s.addressFor(ctx, consumerID, label)
+func (s *service) addressPrefs(ctx context.Context, consumerID primitive.ObjectID, addressID, label string) *deliveryPrefsDoc {
+	pick := s.addressFor(ctx, consumerID, addressID, label)
 	if pick == nil || len(pick.Preferences) == 0 {
 		return nil
 	}

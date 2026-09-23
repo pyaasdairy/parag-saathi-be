@@ -101,7 +101,7 @@ func (s *service) upcomingRowFor(ctx context.Context, o *order, day, source stri
 		row.Lane = "morning"
 	}
 	if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
-		if a := s.addressFor(ctx, cid, o.AddressLabel); a != nil {
+		if a := s.addressFor(ctx, cid, o.AddressID, o.AddressLabel); a != nil {
 			row.Society, row.SocietyID, row.Tower, row.Floor, row.Unit = a.Society, a.SocietyID, a.Tower, a.Floor, a.Unit
 		}
 	}

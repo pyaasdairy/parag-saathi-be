@@ -588,7 +588,7 @@ func (s *service) insertSubscriptionOrder(ctx context.Context, sub *subscription
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: sub.ConsumerID.Hex(), Status: "placed",
 		Subtotal: subtotal, DeliveryFee: fee, Total: round2(subtotal + fee), PaymentMethod: "wallet",
-		AddressLabel: addr.Label, AddressText: joinAddress(addr), RiderID: nil,
+		AddressLabel: addr.Label, AddressText: joinAddress(addr), AddressID: addr.ID.Hex(), RiderID: nil,
 		PlacedAt: now, Priority: "normal",
 		// The 05:00–07:30 morning route — same window the FE sweep prints.
 		DeliveryWindow: "05:00 - 07:30 AM", Lane: "morning",
