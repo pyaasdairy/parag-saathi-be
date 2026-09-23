@@ -81,6 +81,9 @@ type orderReview struct {
 	CreatedAt time.Time `bson:"created_at" json:"created_at"`
 }
 
+// orderCancelledByDelivery is the CancelledBy marker for a task-driven cancel.
+const orderCancelledByDelivery = "delivery"
+
 type geoPoint struct {
 	Lat float64 `bson:"lat" json:"lat"`
 	Lng float64 `bson:"lng" json:"lng"`
@@ -144,6 +147,10 @@ type order struct {
 	SubscriptionID string `bson:"subscription_id,omitempty" json:"-"`
 	ScheduledFor   string `bson:"scheduled_for,omitempty"   json:"scheduled_for,omitempty"`
 	SubLockedAt    string `bson:"sub_locked_at,omitempty"   json:"-"`
+	// CancelledBy is set when the DELIVERY TASK cancelled this order (a FAILED
+	// marking or a store cancel), so a rider's undo can walk it back; a
+	// customer's own cancel leaves it empty. Never sent to the shopper.
+	CancelledBy string `bson:"cancelled_by,omitempty" json:"-"`
 }
 
 func newOrderID() string {
@@ -403,12 +410,13 @@ func (s *service) cancelOrder(ctx context.Context, userID, orderID string) (*ord
 	// A cancelled order must not leave a LIVE delivery task behind — otherwise a
 	// rider could still deliver it, debit the wallet, and flip the order back to
 	// delivered. Fail the task (guarded: never touch one already terminal).
+	// (updateDelivery stamps updated_at itself; naming it here as well made
+	// Mongo reject the $set as a path conflict, so the task silently stayed live.)
 	if d, _ := s.repo.findDeliveryByOrder(ctx, orderID); d != nil && d.Status != "DELIVERED" && d.Status != "FAILED" {
 		_, _ = s.repo.updateDelivery(ctx, d.ID,
 			bson.D{
 				{Key: "status", Value: "FAILED"},
 				{Key: "failure_reason", Value: "Order cancelled by the customer"},
-				{Key: "updated_at", Value: time.Now().UTC()},
 			},
 			bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
 		)

@@ -629,6 +629,11 @@ func (h *handler) riderTaskUndo(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, httpx.Conflict("ALREADY_UNDONE", "this delivery was already undone"))
 		return
 	}
+	if prev == "FAILED" {
+		// The failed marking cancelled the customer's order; walk that back too,
+		// or the redelivery is refused as ORDER_CANCELLED at the door.
+		h.svc.syncOrderFailedUndone(ctx, d)
+	}
 	if prev == "DELIVERED" {
 		// Put the customer's order back where the task now is, so their app does
 		// not keep showing a delivered order with a live rider on it.

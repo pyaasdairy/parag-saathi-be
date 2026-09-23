@@ -403,11 +403,12 @@ func (s *service) storeCancelDelivery(ctx context.Context, actor auth.Actor, sto
 	if reason == "" {
 		reason = "Cancelled by the store"
 	}
+	// updateDelivery stamps updated_at itself; naming it here too made Mongo
+	// reject the whole $set as a path conflict, so this cancel always 500ed.
 	upd, err := s.repo.updateDelivery(ctx, deliveryID,
 		bson.D{
 			{Key: "status", Value: "FAILED"},
 			{Key: "failure_reason", Value: reason},
-			{Key: "updated_at", Value: time.Now().UTC()},
 		},
 		bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED"}}}}},
 	)
@@ -415,9 +416,7 @@ func (s *service) storeCancelDelivery(ctx context.Context, actor auth.Actor, sto
 		return nil, err
 	}
 	// The consumer sees the cancellation immediately (their Orders screen).
-	_, _ = s.repo.orders.UpdateOne(ctx,
-		bson.D{{Key: "order_id", Value: d.OrderID}, {Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"delivered", "cancelled"}}}}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "cancelled"}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+	s.syncOrderFailed(ctx, d, reason)
 	return upd, nil
 }
 
@@ -707,8 +706,13 @@ func (s *service) failDelivery(ctx context.Context, actor auth.Actor, id, reason
 	if reason == "" {
 		reason = "Could not deliver"
 	}
-	return s.riderTransition(ctx, actor, id, "", // any non-delivered state
+	d, err := s.riderTransition(ctx, actor, id, "", // any non-delivered state
 		bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: reason}}, "DELIVERED")
+	if err != nil {
+		return nil, err
+	}
+	s.syncOrderFailed(ctx, d, reason) // the customer's order must not sit out_for_delivery forever
+	return d, nil
 }
 
 // deliverInput carries the proof-of-delivery from the rider app.
@@ -753,7 +757,7 @@ func (s *service) deliverDelivery(ctx context.Context, actor auth.Actor, id stri
 	}
 	if parent != nil && parent.Status == "cancelled" {
 		_, _ = s.repo.updateDelivery(ctx, d.ID,
-			bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: "Order cancelled by the customer"}, {Key: "updated_at", Value: time.Now().UTC()}},
+			bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: "Order cancelled by the customer"}},
 			bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}},
 		)
 		return nil, errConflict("ORDER_CANCELLED", "this order was cancelled by the customer")
@@ -923,6 +927,44 @@ func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 			}
 		}
 	}
+}
+
+// syncOrderFailed leaves the consumer order in a state the shipped app can
+// render when the task FAILS (the rider could not deliver) or the store cancels
+// it. The app's status union ends at "cancelled" and treats it as terminal, so
+// that is what the order becomes; no status the deployed app cannot draw is
+// invented. Guarded: a delivered or already-cancelled order is never touched,
+// and only an order this call actually flipped emits order.failed (contract
+// C6; the emit is inert unless CRM_ENABLED). A later re-assign of the FAILED
+// task walks the order forward again through the normal pickup sync.
+func (s *service) syncOrderFailed(ctx context.Context, d *delivery, reason string) {
+	// cancelled_by marks that the TASK cancelled this order, so a rider's undo
+	// of the FAILED marking can walk it back; a customer's own cancel never
+	// carries it and is never resurrected.
+	res, err := s.repo.orders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: d.OrderID}, {Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"delivered", "cancelled"}}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "cancelled"}, {Key: "cancelled_by", Value: orderCancelledByDelivery}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+	if err != nil || res.ModifiedCount == 0 || !crmEnabled() {
+		return
+	}
+	if cid, cerr := primitive.ObjectIDFromHex(d.ConsumerID); cerr == nil {
+		s.emitCRMEvent(ctx, "order.failed", cid, map[string]any{
+			"order_id": d.OrderID, "labelled_product": s.crmLabelledProduct(ctx, d.OrderID), "reason": reason,
+		})
+	}
+}
+
+// syncOrderFailedUndone is the undo of syncOrderFailed: when the rider undoes
+// a FAILED marking inside the undo window, an order the task itself cancelled
+// goes back to out_for_delivery. Keyed on cancelled_by so a customer's cancel
+// is never undone from the rider's phone.
+func (s *service) syncOrderFailedUndone(ctx context.Context, d *delivery) {
+	_, _ = s.repo.orders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: d.OrderID}, {Key: "status", Value: "cancelled"}, {Key: "cancelled_by", Value: orderCancelledByDelivery}},
+		bson.D{
+			{Key: "$set", Value: bson.D{{Key: "status", Value: "out_for_delivery"}, {Key: "updated_at", Value: time.Now().UTC()}}},
+			{Key: "$unset", Value: bson.D{{Key: "cancelled_by", Value: ""}}},
+		})
 }
 
 // syncOrderAssigned surfaces the winning rider to the consumer the moment a rider
