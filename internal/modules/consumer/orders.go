@@ -431,13 +431,23 @@ func (s *service) reviewOrder(ctx context.Context, userID, orderID string, ratin
 		return nil, errBadRequest("rating must be 1–5")
 	}
 	// Only a DELIVERED order can be reviewed.
-	return s.repo.updateOrder(ctx, orderID, userID,
+	o, err := s.repo.updateOrder(ctx, orderID, userID,
 		bson.D{
 			{Key: "review", Value: orderReview{Rating: rating, Comment: comment, CreatedAt: time.Now().UTC()}},
 			{Key: "can_review", Value: false},
 		},
 		bson.D{{Key: "status", Value: "delivered"}},
 	)
+	if err != nil {
+		return nil, err
+	}
+	// CRM (contract C6, inert unless CRM_ENABLED): rating.submitted. Best-effort.
+	if crmEnabled() {
+		if cid, cerr := primitive.ObjectIDFromHex(userID); cerr == nil {
+			s.emitCRMEvent(ctx, "rating.submitted", cid, map[string]any{"order_id": orderID, "rating": rating})
+		}
+	}
+	return o, nil
 }
 
 // advanceOrder is a DEV-only status transition (rider/store surfaces own the real

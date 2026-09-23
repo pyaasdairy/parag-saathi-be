@@ -148,6 +148,13 @@ func (s *service) fileComplaint(ctx context.Context, consumerID primitive.Object
 		return nil, errInternal("complaint could not be filed")
 	}
 	s.log.InfoContext(ctx, "consumer complaint filed", "ref", ref, "category", category, "order", c.OrderID)
+	// CRM (contract C6, inert unless CRM_ENABLED): only a NEW row emits; the
+	// duplicate return above is the app's retry of a filing already made.
+	if crmEnabled() {
+		s.emitCRMEvent(ctx, "complaint.created", consumerID, map[string]any{
+			"complaint_id": c.ID, "ref": c.Ref, "category": c.Category, "order_id": c.OrderID,
+		})
+	}
 	return c, nil
 }
 
@@ -270,6 +277,12 @@ func (h *handler) crmUpdateComplaint(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(errNotFound("complaint not found")))
 		return
+	}
+	// CRM (contract C6, inert unless CRM_ENABLED): the member hears back.
+	if st == complaintResolved && crmEnabled() {
+		h.svc.emitCRMEvent(ctx, "complaint.resolved", updated.ConsumerID, map[string]any{
+			"complaint_id": updated.ID, "ref": updated.Ref, "resolution": updated.Resolution,
+		})
 	}
 	httpx.JSON(w, http.StatusOK, updated)
 }

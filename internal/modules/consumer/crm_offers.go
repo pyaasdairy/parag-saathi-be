@@ -925,13 +925,17 @@ func (s *service) crmOnPackDelivered(ctx context.Context, consumerID primitive.O
 	return nil
 }
 
-// crmLabelledProduct renders the C-01 supply-source label from the order line.
+// crmLabelledSuffix is the C-01 rendering for the parag supply source.
+const crmLabelledSuffix = " — delivered by PYAAS"
+
+// crmLabelledProduct renders the C-01 supply-source label from the order line
+// (crmLabelledProductOf, crm_lifecycle.go), looked up by order id.
 func (s *service) crmLabelledProduct(ctx context.Context, orderID string) string {
-	name := "500 ml Parag Full Cream"
-	if o, err := s.repo.findOrderAnyUser(ctx, orderID); err == nil && o != nil && len(o.Items) > 0 && o.Items[0].Name != "" {
-		name = o.Items[0].Name
+	o, err := s.repo.findOrderAnyUser(ctx, orderID)
+	if err != nil {
+		o = nil
 	}
-	return name + " — delivered by PYAAS"
+	return crmLabelledProductOf(o)
 }
 
 // crmOnRechargeSettled is the W-04 release: SETTLED funds only (the caller sits

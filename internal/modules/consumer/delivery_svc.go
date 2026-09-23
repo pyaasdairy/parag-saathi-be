@@ -95,7 +95,20 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 		DeliveryPrefs: prefs, DeliveryDate: orderDeliveryDate(o),
 		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
-	_ = s.repo.insertDelivery(ctx, del)
+	if err := s.repo.insertDelivery(ctx, del); err != nil {
+		return
+	}
+	// CRM (contract C6, inert unless CRM_ENABLED): order.confirmed once the
+	// task exists. Instant and subscription orders both pass through here, so
+	// this is the one place the confirmation is emitted. Best-effort.
+	if crmEnabled() {
+		if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
+			s.emitCRMEvent(ctx, "order.confirmed", cid, map[string]any{
+				"order_id": o.OrderID, "labelled_product": crmLabelledProductOf(o),
+				"promotional_only": o.OfferPack > 0, "eta": crmOrderETA(o, eta, now),
+			})
+		}
+	}
 }
 
 // resolveDeliveryPrefs collects the doorstep instructions the RIDER and the
@@ -913,6 +926,15 @@ func (s *service) syncOrderOutForDelivery(ctx context.Context, d *delivery) {
 	}
 	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "out_for_delivery"}, {Key: "rider_id", Value: d.RiderPartyID}, {Key: "riders", Value: rd}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+	// CRM (contract C6, inert unless CRM_ENABLED): order.dispatched. Best-effort.
+	if crmEnabled() {
+		if cid, cerr := primitive.ObjectIDFromHex(d.ConsumerID); cerr == nil {
+			s.emitCRMEvent(ctx, "order.dispatched", cid, map[string]any{
+				"order_id": d.OrderID, "labelled_product": s.crmLabelledProduct(ctx, d.OrderID),
+				"partner": crmPartnerName(name, d.RiderPartyID), "eta_min": crmDeliveryETAMinutes(d, time.Now()),
+			})
+		}
+	}
 }
 
 func (s *service) syncOrderRiderLocation(ctx context.Context, d *delivery, lat, lng float64) {
@@ -925,14 +947,16 @@ func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "delivered"}, {Key: "can_review", Value: true},
 			{Key: "proof_photo_url", Value: d.ProofPhotoURI}, {Key: "delivered_at", Value: d.DeliveredAt},
 			{Key: "updated_at", Value: time.Now().UTC()}}}})
-	// CRM (inert unless CRM_ENABLED): a delivered Welcome Litre pack advances
-	// the offer state machine via the event outbox — best-effort by contract.
+	// CRM (inert unless CRM_ENABLED): order.delivered for EVERY order
+	// (contract C6). offer_pack still rides along so a delivered Welcome Litre
+	// pack advances the offer state machine (crmOnPackDelivered); the generic
+	// router fires D-06 for ordinary orders only. Best-effort by contract.
 	if crmEnabled() {
-		if o, err := s.repo.findOrderAnyUser(ctx, d.OrderID); err == nil && o != nil && o.OfferPack > 0 {
+		if o, err := s.repo.findOrderAnyUser(ctx, d.OrderID); err == nil && o != nil {
 			if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
 				s.emitCRMEvent(ctx, "order.delivered", cid, map[string]any{
 					"order_id": o.OrderID, "offer_pack": o.OfferPack,
-					"promotional_only": o.OfferPack > 0,
+					"promotional_only": o.OfferPack > 0, "labelled_product": crmLabelledProductOf(o),
 				})
 			}
 		}
