@@ -387,6 +387,141 @@ func TestWalletLockAFreeTrialDayNeedsNoFunds(t *testing.T) {
 	}
 }
 
+// trialDayAt is one delivered trial day as the ledger records it: the phase
+// it fell in and the moment it was charged at the door.
+type trialDayAt struct {
+	phase string
+	at    time.Time
+}
+
+// setTrialDays writes a member's 2+2 trial ledger as the delivered days it
+// records, each charge stamped with its time (the counts follow the days).
+func setTrialDays(t *testing.T, w *chainWorld, cid primitive.ObjectID, days ...trialDayAt) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := w.svc.repo.getOrCreateTrial(ctx, cid); err != nil {
+		t.Fatalf("trial: %v", err)
+	}
+	paid, free := 0, 0
+	charges := bson.A{}
+	for _, d := range days {
+		switch d.phase {
+		case trialPhasePaid:
+			paid++
+		case trialPhaseFree:
+			free++
+		}
+		charges = append(charges, bson.D{
+			{Key: "key", Value: trialDeliveryKey(cid, trialDay(d.at))},
+			{Key: "effective", Value: 70.0}, {Key: "phase", Value: d.phase}, {Key: "at", Value: d.at.UTC()},
+		})
+	}
+	if _, err := w.db.Collection(collConsumerTrials).UpdateOne(ctx, bson.D{{Key: "consumer_id", Value: cid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "delivered_paid", Value: paid}, {Key: "delivered_free", Value: free},
+			{Key: "phase", Value: trialPhaseFor(paid, free)}, {Key: "charges", Value: charges}}}}); err != nil {
+		t.Fatalf("set trial: %v", err)
+	}
+}
+
+// nr-7: the lock prices a trial day by the trial as it stood at 12:00, as
+// it reads the wallet. A trial delivery that lands after noon (a late stop
+// marked at 12:07) belongs to the next lock, so a tick at 12:15 decides
+// tomorrow as the 12:00:05 wake did, not as a free day.
+func TestWalletLockReadsTheTrialAsOfNoon(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, Dm1 := addDaysIST(D, 1), addDaysIST(D, -1)
+	long := istDayAt(addDaysIST(D, -3), 9, 0)
+	wakeAt := istDayAt(D, 12, 0).Add(5 * time.Second)
+
+	early := w.customer(t, "9000012901", 0) // 2nd paid day at 06:10: tomorrow is free
+	wake := w.customer(t, "9000012902", 0)  // decided by the wake, before its 12:07 delivery
+	late := w.customer(t, "9000012903", 0)  // the same history, decided at 12:15
+	earlySub := walletLockPlan(t, w, early, "gold-500ml", 2, D1, long)
+	wakeSub := walletLockPlan(t, w, wake, "gold-500ml", 2, D1, long)
+	lateSub := walletLockPlan(t, w, late, "gold-500ml", 2, D1, long)
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+
+	first := trialDayAt{trialPhasePaid, istDayAt(Dm1, 6, 10)}
+	setTrialDays(t, w, early, first, trialDayAt{trialPhasePaid, istDayAt(D, 6, 10)})
+	setTrialDays(t, w, wake, first)
+	setTrialDays(t, w, late, first, trialDayAt{trialPhasePaid, istDayAt(D, 12, 7)})
+
+	w.svc.lockConsumerDay(ctx, early.Hex(), D1, wakeAt)
+	w.svc.lockConsumerDay(ctx, wake.Hex(), D1, wakeAt)
+	setTrialDays(t, w, wake, first, trialDayAt{trialPhasePaid, istDayAt(D, 12, 7)}) // its stop lands at 12:07
+	w.svc.lockConsumerDay(ctx, late.Hex(), D1, istDayAt(D, 12, 15))
+
+	if o := assertLocked(t, w, earlySub, D1); !o.TrialFree {
+		t.Fatalf("a free day as of noon must lock as free: %+v", o)
+	}
+	assertSkipped(t, w, wakeSub, D1)
+	assertSkipped(t, w, lateSub, D1) // as the wake decided: at 12:00 tomorrow was a paid day
+}
+
+// The door stamps each delivered trial day with when it was charged, which
+// phaseAsOf reads; a replay of the same day keeps the first stamp.
+func TestTrialChargeStampsTheDeliveredDay(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000012904", 0)
+	key := trialDeliveryKey(cid, "2026-10-06")
+	if _, _, err := w.svc.trialChargeFor(ctx, cid, key, 70); err != nil {
+		t.Fatalf("charge: %v", err)
+	}
+	tr, err := w.svc.repo.getOrCreateTrial(ctx, cid)
+	if err != nil || len(tr.Charges) != 1 || tr.Charges[0].At.IsZero() {
+		t.Fatalf("the delivered day carries no charge time: %+v (%v)", tr, err)
+	}
+	first := tr.Charges[0].At
+	if _, _, err := w.svc.trialChargeFor(ctx, cid, key, 70); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if tr, _ = w.svc.repo.getOrCreateTrial(ctx, cid); len(tr.Charges) != 1 || !tr.Charges[0].At.Equal(first) {
+		t.Fatalf("a replay moved the stamp: %+v, want %v", tr.Charges, first)
+	}
+}
+
+// phaseAsOf replays the trial ledger: a day charged after T comes off the
+// counts, one charged at T or before stays, and a charge with no time
+// (recorded before the stamp) or a ledger with counts and no charges (a
+// trial the per-phone gate exhausted) reads as it stands.
+func TestTrialPhaseAsOfReplaysTheLedger(t *testing.T) {
+	T := istDayAt("2026-10-06", 12, 0)
+	paidDays := func(second time.Time) *consumerTrial {
+		return &consumerTrial{DeliveredPaid: 2, Charges: []trialCharge{
+			{Key: "d1", Phase: trialPhasePaid}, // no time: before the stamp
+			{Key: "d2", Phase: trialPhasePaid, At: second},
+		}}
+	}
+	freeDays := &consumerTrial{DeliveredPaid: 2, DeliveredFree: 2, Charges: []trialCharge{
+		{Key: "d1", Phase: trialPhasePaid, At: T.Add(-48 * time.Hour)},
+		{Key: "d2", Phase: trialPhasePaid, At: T.Add(-24 * time.Hour)},
+		{Key: "d3", Phase: trialPhaseFree, At: T.Add(-6 * time.Hour)},
+		{Key: "d4", Phase: trialPhaseFree, At: T.Add(time.Minute)},
+	}}
+	for _, c := range []struct {
+		name string
+		tr   *consumerTrial
+		at   time.Time
+		want string
+	}{
+		{"2nd paid day before the lock", paidDays(T.Add(-6 * time.Hour)), T, trialPhaseFree},
+		{"2nd paid day at the lock moment", paidDays(T), T, trialPhaseFree},
+		{"2nd paid day after the lock", paidDays(T.Add(7 * time.Minute)), T, trialPhasePaid},
+		{"2nd free day after the lock", freeDays, T, trialPhaseFree},
+		{"2nd free day before a later lock", freeDays, T.Add(2 * time.Minute), trialPhaseDone},
+		{"exhausted with no charges", &consumerTrial{DeliveredPaid: 2, DeliveredFree: 2}, T, trialPhaseDone},
+	} {
+		if got := c.tr.phaseAsOf(c.at); got != c.want {
+			t.Errorf("%s: phase %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // Server down over the lock: the catch-up of a day that was never previewed
 // decides on the same noon wallet.
 func TestCatchUpUsesTheNoonWallet(t *testing.T) {

@@ -1347,7 +1347,8 @@ func subMemberDays(previews []order) []subMemberDay {
 //     (walletAsOf: identical at 12:00:05 and 12:14:59), less what the member
 //     already owes that day (orders already locked, one-off morning orders),
 //     each at what the door will take (lockCharge: a 2+2 free trial day is
-//     Rs 0, so it never needs funds).
+//     Rs 0, so it never needs funds; the trial is read as it stood at
+//     12:00:00 too, trialFreeDayAsOf).
 //  3. Covered: locked, with its store task. Not covered: closed at once as a
 //     skipped day (skipSubPreview), never retried on later ticks, so a
 //     top-up after noon cannot mint a late task; the plan stays active and
@@ -1430,7 +1431,7 @@ func (s *service) decideMemberDay(ctx context.Context, userID, day string, previ
 	freeDay := false // only a trial line reads the trial (and only then creates its row)
 	for _, c := range cands {
 		if orderIsTrialLine(c.o) {
-			freeDay = s.trialFreeDayNow(ctx, cid)
+			freeDay = s.trialFreeDayAsOf(ctx, cid, lockAt)
 			break
 		}
 	}
@@ -1519,12 +1520,15 @@ func orderIsTrialLine(o *order) bool {
 	return false
 }
 
-// trialFreeDayNow reports whether the member's next delivered trial day is a
-// free one, read at the lock (the day before's delivery may have opened the
-// window since the preview was made). Peeking never advances the trial.
-func (s *service) trialFreeDayNow(ctx context.Context, consumerID primitive.ObjectID) bool {
+// trialFreeDayAsOf reports whether the member's next delivered trial day was
+// a free one as the trial stood at the lock moment (lockAt): the morning's
+// delivery may have opened the free window since the preview was made, and a
+// trial delivery that lands after 12:00 belongs to the next lock, so every
+// tick prices the day alike, as walletAsOf funds it (nr-7, 24 Sep). Peeking
+// never advances the trial.
+func (s *service) trialFreeDayAsOf(ctx context.Context, consumerID primitive.ObjectID, lockAt time.Time) bool {
 	t, err := s.repo.getOrCreateTrial(ctx, consumerID)
-	return err == nil && trialPhaseFor(t.DeliveredPaid, t.DeliveredFree) == trialPhaseFree
+	return err == nil && t.phaseAsOf(lockAt) == trialPhaseFree
 }
 
 // lockSubOrder locks one funded preview: the guarded stamp (placed, never

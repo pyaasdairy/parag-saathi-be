@@ -80,6 +80,10 @@ type trialCharge struct {
 	Key       string  `bson:"key"       json:"key"`
 	Effective float64 `bson:"effective" json:"effective"`
 	Phase     string  `bson:"phase"     json:"phase"`
+	// At is when the delivered day was charged at the door (unset on a charge
+	// recorded before 24 Sep). The noon lock reads the trial as it stood at
+	// its lock moment from it (phaseAsOf).
+	At time.Time `bson:"at,omitempty" json:"-"`
 }
 
 // consumerTrial is the per-shopper welcome-trial ledger (one row per consumer;
@@ -193,6 +197,27 @@ func (t *consumerTrial) view() trialView {
 		// Paid-first: the free window opens only once the paid days are complete.
 		FreeActive: t.DeliveredPaid >= trialPaidDays && t.DeliveredFree < trialFreeDays,
 	}
+}
+
+// phaseAsOf is the phase the ledger stood at at T: the counts less the
+// delivered days charged after T (the ledger replayed, as walletAsOf
+// replays the wallet). A charge with no time predates the stamp and counts
+// as before T. The noon lock prices a trial day by it, so a trial delivery
+// that lands after 12:00 belongs to the next lock whatever the tick time.
+func (t *consumerTrial) phaseAsOf(at time.Time) string {
+	paid, free := t.DeliveredPaid, t.DeliveredFree
+	for _, c := range t.Charges {
+		if c.At.IsZero() || !c.At.After(at) {
+			continue
+		}
+		switch c.Phase {
+		case trialPhasePaid:
+			paid--
+		case trialPhaseFree:
+			free--
+		}
+	}
+	return trialPhaseFor(max(0, paid), max(0, free))
 }
 
 // ── Repo ────────────────────────────────────────────────────────────────────
@@ -322,6 +347,9 @@ func (s *service) trialChargeFor(ctx context.Context, consumerID primitive.Objec
 			}
 		}
 		eff, phase := t.charge(deliveryKey, full)
+		if n := len(t.Charges); n > 0 && t.Charges[n-1].Key == deliveryKey {
+			t.Charges[n-1].At = time.Now().UTC() // when the day landed (phaseAsOf)
+		}
 		ok, err := s.repo.saveTrial(ctx, t) // guarded on the loaded seq
 		if err != nil {
 			return 0, "", err
