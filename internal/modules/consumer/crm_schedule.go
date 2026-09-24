@@ -131,9 +131,34 @@ func (s *service) crmFireDueSchedules(ctx context.Context, now time.Time) {
 			return // nothing due (or transient: the next tick retries)
 		}
 		status, reason := s.crmFireSchedule(ctx, row, now)
-		_, _ = col.UpdateOne(ctx, bson.D{{Key: "_id", Value: row.ID}},
-			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: status}, {Key: "reason", Value: reason}}}})
+		set := bson.D{{Key: "status", Value: status}, {Key: "reason", Value: reason}}
+		if status == "NEW" { // a promotional row outside its window waits for the next opening
+			next, _ := crmPromoWindow(now)
+			set = append(set, bson.E{Key: "due_at", Value: next.UTC()})
+		}
+		_, _ = col.UpdateOne(ctx, bson.D{{Key: "_id", Value: row.ID}}, bson.D{{Key: "$set", Value: set}})
 	}
+}
+
+// crmPromoWindow reports whether now is inside the promotional window of G5
+// (guards.G5_quiet_hours.windows.promotional_message, IST) and, when it is
+// not, when the window next opens.
+func crmPromoWindow(now time.Time) (next time.Time, inside bool) {
+	g := crmConfigLoad().Guards
+	ist := now.In(istZone)
+	hm := ist.Format("15:04")
+	if hm >= g.QuietPromoStart && hm < g.QuietPromoEnd {
+		return now, true
+	}
+	open, err := time.ParseInLocation("15:04", g.QuietPromoStart, istZone)
+	if err != nil {
+		return now.Add(time.Hour), false // unreadable config: look again in an hour
+	}
+	next = time.Date(ist.Year(), ist.Month(), ist.Day(), open.Hour(), open.Minute(), 0, 0, istZone)
+	if hm >= g.QuietPromoEnd {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next, false
 }
 
 // crmFireSchedule is the fire-time half of a delayed trigger: the same
@@ -151,6 +176,14 @@ func (s *service) crmFireSchedule(ctx context.Context, row crmSchedule, now time
 			return "SKIPPED", "account erased"
 		}
 		return "SKIPPED", "account lookup failed"
+	}
+	// A promotional message that comes due outside 10:00-21:00 (E-07, 4 h after
+	// an evening rating) would be suppressed by G5 and lost; it waits for the
+	// window instead, and everything below is re-checked when it opens.
+	if t.Category == "promotional" {
+		if _, inside := crmPromoWindow(now); !inside {
+			return "NEW", "waiting for the promotional window"
+		}
 	}
 	ev := crmEvent{ID: row.EventID, Topic: row.Topic, ConsumerID: row.ConsumerID, Payload: row.Payload}
 	e := &crmEventCtx{s: s, ctx: ctx, ev: ev}
