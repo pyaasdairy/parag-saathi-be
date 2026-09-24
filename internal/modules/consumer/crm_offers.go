@@ -520,6 +520,19 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 		return nil, perr
 	}
 
+	// A member whose enrolment already FINISHED is retrying (a timeout, a
+	// double tap, the operator enrolling the household again): answer 409
+	// ALREADY_ENROLLED, which the app routes to the tabs, as the arbitration
+	// below would. It must come before the eligibility reads: enrolment
+	// itself exhausts the 2+2 trial and registers the household claim, so
+	// those reads refused the member's own offer as NOT_ELIGIBLE. Only a
+	// finished offer answers here (an unfinished one is left to the
+	// arbitration, as before), and a failed read falls through to the old
+	// path, so no one else's eligibility changes.
+	if existing, ferr := s.repo.findOffer(ctx, acct.ID); ferr == nil && existing != nil && existing.Pack1OrderID != "" {
+		return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+existing.OfferID)
+	}
+
 	// 2) eligibility — plain reads first; the unique (consumer, offer) index on
 	// the offer INSERT below is the race-proof arbiter (nothing is minted until
 	// this consumer owns the offer doc).
