@@ -26,9 +26,9 @@ func TestCRMB02JudgesTheDayItsCopyNames(t *testing.T) {
 	plan := func(phone string, fund float64, freq, start string) primitive.ObjectID {
 		t.Helper()
 		cid := w.customer(t, phone, fund)
-		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
 			ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: freq, StartDate: start,
-		})
+		}, chainPlanMadeAt)
 		if err != nil {
 			t.Fatalf("createSubscription %s: %v", phone, err)
 		}

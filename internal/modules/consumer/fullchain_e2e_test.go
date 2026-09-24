@@ -334,10 +334,10 @@ func TestFullChainSubscriptionMorningDelivery(t *testing.T) {
 	cid := w.customer(t, "9000001002", 500)
 	// taaza (not gold) so the 2+2 trial pricing never masks the real charge.
 	const D = "2026-10-06"
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
 		ProductID: "taaza-500ml", Name: "Milk taaza-500ml", Qty: 2,
 		Frequency: "daily", StartDate: D,
-	})
+	}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}

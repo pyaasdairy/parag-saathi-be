@@ -112,9 +112,9 @@ func TestNoonLockLifecycle(t *testing.T) {
 	cid := w.customer(t, "9000010001", 5000)
 	const D = "2026-10-06"
 	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
 		ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D,
-	})
+	}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestNoonLockNewPlanAfterNoonStartsDayAfterTomorrow(t *testing.T) {
 	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
 
 	late := w.customer(t, "9000010101", 5000)
-	sub, err := w.svc.createSubscription(ctx, late, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D1})
+	sub, err := w.svc.createSubscriptionAt(ctx, late, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D1}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestNoonLockNewPlanAfterNoonStartsDayAfterTomorrow(t *testing.T) {
 	// A plan from long before, whose preview never ran (server down over
 	// the cut-off), is caught up as a locked order with its task.
 	early := w.customer(t, "9000010102", 5000)
-	sub2, err := w.svc.createSubscription(ctx, early, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+	sub2, err := w.svc.createSubscriptionAt(ctx, early, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("create 2: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestNoonLockStepIgnoresEditsAfterTheCutOff(t *testing.T) {
 	}
 	plan := func(phone string) (*subscription, primitive.ObjectID) {
 		cid := w.customer(t, phone, 5000)
-		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D}, chainPlanMadeAt)
 		if err != nil {
 			t.Fatalf("createSubscription: %v", err)
 		}
@@ -580,7 +580,7 @@ func TestNoonLockKeepsAPreNoonChangeUnderALaterOne(t *testing.T) {
 	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
 	plan := func(phone string) (*subscription, primitive.ObjectID) {
 		cid := w.customer(t, phone, 5000)
-		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D}, chainPlanMadeAt)
 		if err != nil {
 			t.Fatalf("createSubscription: %v", err)
 		}
@@ -641,7 +641,7 @@ func TestNextDeliveryDateFollowsTheLiveOrders(t *testing.T) {
 	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
 	plan := func(phone string) (*subscription, primitive.ObjectID) {
 		cid := w.customer(t, phone, 5000)
-		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D}, chainPlanMadeAt)
 		if err != nil {
 			t.Fatalf("createSubscription: %v", err)
 		}

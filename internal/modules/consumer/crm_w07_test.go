@@ -97,7 +97,7 @@ func TestCRMPack2AttachFollowsTheNoonRule(t *testing.T) {
 	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
 	household := func(phone string, changedAt time.Time) (primitive.ObjectID, *subscription) {
 		cid := w.customer(t, phone, 500)
-		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Qty: 1, Frequency: "daily", StartDate: D}, chainPlanMadeAt)
 		if err != nil {
 			t.Fatalf("createSubscription: %v", err)
 		}

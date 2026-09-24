@@ -25,9 +25,9 @@ import (
 // long before, so every day from start is the plan's.
 func walletLockPlan(t *testing.T, w *chainWorld, cid primitive.ObjectID, product string, qty int, start string, createdAt time.Time) *subscription {
 	t.Helper()
-	sub, err := w.svc.createSubscription(context.Background(), cid, subscriptionInput{
+	sub, err := w.svc.createSubscriptionAt(context.Background(), cid, subscriptionInput{
 		ProductID: product, Qty: qty, Frequency: "daily", StartDate: start,
-	})
+	}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription %s: %v", product, err)
 	}

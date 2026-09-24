@@ -21,6 +21,14 @@ import (
 // before any simulated lock moment, so no test depends on the real date.
 var chainLedgerEpoch = istDayAt("2026-01-01", 9, 0)
 
+// chainPlanMadeAt is when a test makes a plan for one of its fixed October
+// days (tests backdate the member-change moment themselves where it
+// matters): long before any of those days' cut-offs, as the wall clock was
+// when the tests were written, but fixed, so the G4 re-anchor (a start on a
+// locked morning moves to the first open one) never depends on the date or
+// hour the suite runs.
+var chainPlanMadeAt = istDayAt("2026-09-01", 9, 0)
+
 // chainStampLedger moves one ledger row (consumer, ref, type) to `at`, the
 // moment a test says the money moved.
 func chainStampLedger(t *testing.T, w *chainWorld, cid primitive.ObjectID, refID, typ string, at time.Time) {
@@ -59,17 +67,17 @@ func TestWalletAsOfReplaysTheLedger(t *testing.T) {
 		return walletTxn{Type: typ, Status: status, Amount: amount, CreatedAt: at.UTC()}
 	}
 	rows := []walletTxn{
-		row("TOPUP", "SUCCESS", 1000, istDayAt(D, 9, 0)),           // before the lock moment: part of the balance
-		row("TOPUP", "SUCCESS", 7, T),                              // AT 12:00:00: already in the balance the lock sees
-		row("TOPUP", "SUCCESS", 200, istDayAt(D, 12, 7)),           // after: played back out
-		row("BONUS", "SUCCESS", 50, istDayAt(D, 12, 8)),            // after
-		row("REFUND", "SUCCESS", 35, istDayAt(D, 12, 9)),           // after (a rider undo's credit)
-		row("DEBIT", "SUCCESS", 85, istDayAt(D, 12, 5)),            // after: added back
-		row("DEBIT", "REVERSED", 70, istDayAt(D, 12, 10)),          // a debit later undone: the money still left at 12:10
-		row("DEBIT", "SUCCESS", 30, now),                           // exactly at now: inside the window
-		row("TOPUP", "SUCCESS", 900, istDayAt(D, 12, 20)),          // after now: not in the balance now reads
-		row("ADJUST", "SUCCESS", 999, istDayAt(D, 12, 11)),         // unknown type: counted as nothing
-		row("TOPUP", "PENDING", 400, istDayAt(D, 12, 12)),          // never settled: counted as nothing
+		row("TOPUP", "SUCCESS", 1000, istDayAt(D, 9, 0)),   // before the lock moment: part of the balance
+		row("TOPUP", "SUCCESS", 7, T),                      // AT 12:00:00: already in the balance the lock sees
+		row("TOPUP", "SUCCESS", 200, istDayAt(D, 12, 7)),   // after: played back out
+		row("BONUS", "SUCCESS", 50, istDayAt(D, 12, 8)),    // after
+		row("REFUND", "SUCCESS", 35, istDayAt(D, 12, 9)),   // after (a rider undo's credit)
+		row("DEBIT", "SUCCESS", 85, istDayAt(D, 12, 5)),    // after: added back
+		row("DEBIT", "REVERSED", 70, istDayAt(D, 12, 10)),  // a debit later undone: the money still left at 12:10
+		row("DEBIT", "SUCCESS", 30, now),                   // exactly at now: inside the window
+		row("TOPUP", "SUCCESS", 900, istDayAt(D, 12, 20)),  // after now: not in the balance now reads
+		row("ADJUST", "SUCCESS", 999, istDayAt(D, 12, 11)), // unknown type: counted as nothing
+		row("TOPUP", "PENDING", 400, istDayAt(D, 12, 12)),  // never settled: counted as nothing
 	}
 	available := 1500.0
 	got, unknown := walletAsOfFromRows(available, rows, T, now)

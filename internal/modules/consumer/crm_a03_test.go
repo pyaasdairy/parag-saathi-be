@@ -42,10 +42,11 @@ func TestCRMA03OncePerPlanNotOncePerDay(t *testing.T) {
 // R2F-16: A-03's [DATE] named the first cadence day on or after start_date,
 // which the noon lock does not honour: a plan created after noon for
 // tomorrow was announced for "tomorrow" (it first delivers the day after), a
-// weekly one for tomorrow likewise (it first delivers a week later), and a
-// plan created in the morning with start_date today was announced for
-// "today" (today is past its cut-off). [DATE] is now the plan's
-// next_delivery_date, worded against the moment of creation.
+// weekly one for tomorrow likewise (it now starts on the first editable
+// morning, G4, so it delivers the day after tomorrow rather than a week
+// later), and a plan created in the morning with start_date today was
+// announced for "today" (today is past its cut-off). [DATE] is now the
+// plan's next_delivery_date, worded against the moment of creation.
 func TestCRMA03NamesTheFirstMorningTheNoonLockDelivers(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
@@ -62,7 +63,7 @@ func TestCRMA03NamesTheFirstMorningTheNoonLockDelivers(t *testing.T) {
 	}{
 		{"created 10:00 for tomorrow", istDayAt(D, 10, 0), D1, "daily", D1, "tomorrow"},
 		{"created 14:00 for tomorrow", istDayAt(D, 14, 0), D1, "daily", D2, "8 Oct"},
-		{"created 14:00, weekly from tomorrow", istDayAt(D, 14, 0), D1, "weekly", addDaysIST(D1, 7), "14 Oct"},
+		{"created 14:00, weekly from tomorrow (re-anchored, G4)", istDayAt(D, 14, 0), D1, "weekly", D2, "8 Oct"},
 		{"created 10:00 for today", istDayAt(D, 10, 0), D, "daily", D1, "tomorrow"},
 	} {
 		cid := w.customer(t, "90000076"+strconv.Itoa(60+i), 1000)

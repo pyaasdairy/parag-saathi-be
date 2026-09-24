@@ -30,14 +30,16 @@ func TestSimpleDeliverySweepNeverDuplicatesADay(t *testing.T) {
 	defer done()
 	ctx := context.Background()
 	cid := w.customer(t, "9000002004", 5000)
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
-		ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: istToday(time.Now()),
-	})
+	ist := time.Now().In(istZone)
+	base := time.Date(ist.Year(), ist.Month(), ist.Day(), 14, 30, 0, 0, istZone)
+	// Made two days before (a start today is still open then), so the noon
+	// rule's re-anchor never depends on the hour the test runs.
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
+		ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: istToday(base),
+	}, base.Add(-48*time.Hour))
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}
-	ist := time.Now().In(istZone)
-	base := time.Date(ist.Year(), ist.Month(), ist.Day(), 14, 30, 0, 0, istZone)
 	chainBackdateSubscription(t, w, sub, base.Add(-6*time.Hour)) // the plan predates today's noon
 	today := base.Format("2006-01-02")
 	tomorrow := base.AddDate(0, 0, 1).Format("2006-01-02")

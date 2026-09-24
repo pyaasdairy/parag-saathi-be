@@ -684,6 +684,7 @@ func (s *service) createSubscriptionAt(ctx context.Context, consumerID primitive
 	if _, ok := parseDay(start); !ok {
 		return nil, errBadRequest("start_date must be YYYY-MM-DD")
 	}
+	start = reanchorLockedStart(start, now)
 	// HARD BACKSTOP (mirrors the FE's NEEDS_EXACT_LOCATION): a subscription may
 	// never exist without a saved delivery point with coordinates — the morning
 	// order must always route to a real door and its serving store.
@@ -919,6 +920,7 @@ func (s *service) patchSubscriptionAt(ctx context.Context, consumerID primitive.
 		if _, ok := parseDay(*in.StartDate); !ok {
 			return nil, errBadRequest("start_date must be YYYY-MM-DD")
 		}
+		// Written below, once the stored start is known (G4 re-anchor).
 		set = append(set, bson.E{Key: "start_date", Value: *in.StartDate})
 	}
 	if in.Vacations != nil {
@@ -935,6 +937,17 @@ func (s *service) patchSubscriptionAt(ctx context.Context, consumerID primitive.
 	cur, err := s.repo.findSubscription(ctx, subID, consumerID)
 	if err != nil || len(set) == 0 {
 		return cur, err
+	}
+	// G4: a NEW start date on a morning already locked starts on the first
+	// editable one instead. Re-sending the stored start (the shipped app's
+	// resume mirror does, "harmless when unchanged") is not a change and
+	// never moves the plan's cadence.
+	if in.StartDate != nil && *in.StartDate != cur.StartDate {
+		for i := range set {
+			if set[i].Key == "start_date" {
+				set[i].Value = reanchorLockedStart(*in.StartDate, now)
+			}
+		}
 	}
 	// A day already past its cut-off keeps the plan as it stood then.
 	s.lockPreviewsBeforeChange(ctx, cur, now)
@@ -1018,6 +1031,22 @@ func routeStartFor(dayISO string) time.Time {
 
 // firstEditableDay is the first delivery day still open to changes at now.
 func firstEditableDay(now time.Time) string { return addDaysIST(lockedThroughDay(now), 1) }
+
+// reanchorLockedStart is G4 (owner, 24 Sep): a start date on a morning that
+// is already locked at `at` - today, and tomorrow from 12:00 IST, i.e. from
+// today through lockedThroughDay - moves to the first editable morning, and
+// the plan's cadence counts from there. An alternate or weekly plan started
+// "tomorrow" after noon then first delivers the day after tomorrow, instead
+// of losing its first cycle (3 or 8 days away). A past start date is an
+// anchor, not a start request (the shipped app re-sends a plan's original
+// start on resume), and an open future one is what the member chose: both
+// are returned unchanged. YYYY-MM-DD compares chronologically.
+func reanchorLockedStart(start string, at time.Time) string {
+	if start >= istToday(at) && start <= lockedThroughDay(at) {
+		return firstEditableDay(at)
+	}
+	return start
+}
 
 // lockMomentFor is the instant a delivery day's previews lock: noon IST on
 // the day before it.
@@ -1502,12 +1531,12 @@ func (s *service) skipSubPreview(ctx context.Context, o *order, sub *subscriptio
 		s.emitCRMEvent(ctx, "subscription.day_skipped", cid, map[string]any{
 			"subscription_id": o.SubscriptionID, "day": day,
 			"reason": orderCancelledByWalletShort, "shortfall": shortfall,
-			"resume_label":     crmDayLabel(subscriptionResumeDay(sub, day), now),
+			"resume_label": crmDayLabel(subscriptionResumeDay(sub, day), now),
 			// A plan paused or cancelled after the cut-off (the day was decided
 			// as previewed) has no morning to resume: nothing to tell.
 			"tomorrow_blocked": sub != nil && sub.Status == "active" &&
 				day == istDay(now.Add(24*time.Hour)) && !s.freePackDue(ctx, o.UserID, day),
-			"scope_key":        "day_skipped:" + day,
+			"scope_key": "day_skipped:" + day,
 		})
 	}
 	return true

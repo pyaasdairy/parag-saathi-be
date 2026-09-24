@@ -210,7 +210,7 @@ func TestStoreUpcomingFlagsPreviewsAwaitingFunds(t *testing.T) {
 	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
 	plan := func(phone string, fund float64) *subscription {
 		cid := w.customer(t, phone, fund)
-		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D}, chainPlanMadeAt)
 		if err != nil {
 			t.Fatalf("createSubscription: %v", err)
 		}

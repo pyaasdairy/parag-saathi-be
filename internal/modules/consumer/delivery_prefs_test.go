@@ -69,9 +69,9 @@ func TestDoorstepPrefsReachTheDeliveryTask(t *testing.T) {
 	// placed two orders and this test failed every afternoon. 03:00 is before
 	// D's route leaves (05:00), after which D itself is no longer caught up.
 	const D = "2026-10-06"
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
 		ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D,
-	})
+	}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}

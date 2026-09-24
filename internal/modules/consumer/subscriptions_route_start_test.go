@@ -23,9 +23,9 @@ import (
 func routeStartMember(t *testing.T, w *chainWorld, phone string, fund float64, D string) (primitive.ObjectID, *subscription) {
 	t.Helper()
 	cid := w.customer(t, phone, fund)
-	sub, err := w.svc.createSubscription(context.Background(), cid, subscriptionInput{
+	sub, err := w.svc.createSubscriptionAt(context.Background(), cid, subscriptionInput{
 		ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: addDaysIST(D, 1),
-	})
+	}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}

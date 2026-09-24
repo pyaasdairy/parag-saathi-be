@@ -60,17 +60,17 @@ func TestCRMNoonCopyD07ReplacesB02ForASkippedDay(t *testing.T) {
 	plan := func(phone string, fund float64, freq string) (primitive.ObjectID, *subscription) {
 		t.Helper()
 		cid := w.customer(t, phone, fund)
-		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 2, Frequency: freq, StartDate: D1})
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 2, Frequency: freq, StartDate: D1}, chainPlanMadeAt)
 		if err != nil {
 			t.Fatalf("createSubscription: %v", err)
 		}
 		chainBackdateSubscription(t, w, sub, long)
 		return cid, sub
 	}
-	short, _ := plan("9000013101", 0, "daily")         // D+1 skipped, short for D+2 too
-	shortAlt, _ := plan("9000013102", 0, "alternate")  // D+1 skipped; the plan's next morning is D+3
-	covered, _ := plan("9000013103", 100, "daily")     // D+1 locked (100 >= 58); D+2 short once D+1 is paid
-	freePack, _ := plan("9000013104", 0, "daily")      // D+1 skipped, but a free Welcome Litre pack arrives D+1
+	short, _ := plan("9000013101", 0, "daily")        // D+1 skipped, short for D+2 too
+	shortAlt, _ := plan("9000013102", 0, "alternate") // D+1 skipped; the plan's next morning is D+3
+	covered, _ := plan("9000013103", 100, "daily")    // D+1 locked (100 >= 58); D+2 short once D+1 is paid
+	freePack, _ := plan("9000013104", 0, "daily")     // D+1 skipped, but a free Welcome Litre pack arrives D+1
 	if err := w.svc.repo.insertOrder(ctx, &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: freePack.Hex(), Status: "placed",
 		PaymentMethod: "wallet", Lane: "morning", DeliveryDate: D1, ScheduledFor: D1, OfferID: offerWelcomeLitre, OfferPack: 1,
@@ -128,7 +128,7 @@ func TestCRMNoonCopyNoD07ForADayThatIsNotTomorrow(t *testing.T) {
 	ctx := context.Background()
 	const D = "2026-10-06"
 	cid := w.customer(t, "9000013201", 0)
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 2, Frequency: "daily", StartDate: D})
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 2, Frequency: "daily", StartDate: D}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestCRMNoonCopyA05NamesTheDayTheMilkStarts(t *testing.T) {
 		}
 		return cid, sub
 	}
-	morning, _ := mk("9000013301", istDayAt(D, 9, 0))  // A-05 at 11:00: tomorrow is still open
+	morning, _ := mk("9000013301", istDayAt(D, 9, 0))       // A-05 at 11:00: tomorrow is still open
 	lateMorning, _ := mk("9000013302", istDayAt(D, 10, 30)) // A-05 at 12:30: tomorrow was skipped at noon
 	w.svc.crmProcessEventsAt(ctx, istDayAt(D, 10, 31))
 

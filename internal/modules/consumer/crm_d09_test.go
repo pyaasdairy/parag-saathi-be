@@ -138,7 +138,7 @@ func TestCRMD09MissedClosureSaysWhatHappened(t *testing.T) {
 	const D = "2026-10-06"
 	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
 	cid := w.customer(t, "9000007603", 500)
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: D1})
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: D1}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}
