@@ -610,7 +610,7 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 	if err := s.repo.insertSubscription(ctx, sub); err != nil {
 		return nil, err
 	}
-	sub.NextDeliveryDate = subscriptionNextDelivery(sub, now)
+	sub.NextDeliveryDate = s.nextDeliveryFor(ctx, sub, now)
 	return sub, nil
 }
 
@@ -836,27 +836,52 @@ func lockMomentFor(dayISO string) time.Time {
 	return d.AddDate(0, 0, -1).Add(lockHourIST * time.Hour)
 }
 
-// subscriptionNextDelivery is the first day the plan still delivers as seen
-// at now: a day already claimed with a live order counts, otherwise the day
-// must be open to changes (the noon rule). "" when nothing is due in the
-// next three weeks.
-func subscriptionNextDelivery(sub *subscription, now time.Time) string {
+// subscriptionNextDelivery is the first day the plan really delivers as seen
+// at now, derived from the orders (live returns a day's live order, or nil):
+//
+//   - a day already past its cut-off (today, and tomorrow from noon) delivers
+//     only through the live order it holds, whatever the plan's status now:
+//     a pause or cancel after noon applies from the day after tomorrow, so a
+//     locked tomorrow is still delivered and billed. A preview no tick has
+//     locked yet goes the LOCK step's way (a plan changed before the cut-off
+//     decides it; one changed after keeps it).
+//   - an open day counts when the plan is due on it and the member has not
+//     skipped it (a claimed day whose order was cancelled).
+//
+// "" when nothing is due in the next three weeks.
+func subscriptionNextDelivery(sub *subscription, now time.Time, live func(day string) *order) string {
 	today := istToday(now)
-	editable := firstEditableDay(now)
+	lockedThrough := lockedThroughDay(now)
 	from := 0
 	if now.In(istZone).Hour() >= 8 { // the 05:00-07:30 route has run: today is behind us
 		from = 1
 	}
 	for i := from; i < 21; i++ {
 		day := addDaysIST(today, i)
+		if day <= lockedThrough {
+			o := live(day)
+			if o != nil && (o.SubLockedAt != "" || !sub.subChangedBefore(lockMomentFor(day)) || subscriptionDueOn(sub, day)) {
+				return day
+			}
+			continue
+		}
 		if !subscriptionDueOn(sub, day) {
 			continue
 		}
-		if day >= editable || sub.claimed(day) {
-			return day
+		if sub.claimed(day) && live(day) == nil {
+			continue // the member skipped this day
 		}
+		return day
 	}
 	return ""
+}
+
+// nextDeliveryFor is subscriptionNextDelivery over this plan's live orders.
+func (s *service) nextDeliveryFor(ctx context.Context, sub *subscription, now time.Time) string {
+	return subscriptionNextDelivery(sub, now, func(day string) *order {
+		o, _ := s.repo.findLiveSubscriptionOrder(ctx, sub.SubscriptionID, day)
+		return o
+	})
 }
 
 // addDaysIST offsets a YYYY-MM-DD day on the IST calendar.
@@ -1320,7 +1345,7 @@ func (h *handler) createSubscription(w http.ResponseWriter, r *http.Request) {
 	kickCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
 	h.svc.sweepOneSubscription(kickCtx, sub, time.Now())
 	cancel()
-	sub.NextDeliveryDate = subscriptionNextDelivery(sub, time.Now())
+	sub.NextDeliveryDate = h.svc.nextDeliveryFor(r.Context(), sub, time.Now())
 	writeJSON(w, http.StatusCreated, sub)
 }
 
@@ -1337,7 +1362,7 @@ func (h *handler) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	for i := range list {
-		list[i].NextDeliveryDate = subscriptionNextDelivery(&list[i], now)
+		list[i].NextDeliveryDate = h.svc.nextDeliveryFor(r.Context(), &list[i], now)
 	}
 	writeJSON(w, http.StatusOK, list)
 }
@@ -1354,7 +1379,7 @@ func (h *handler) subscriptionAction(action string) http.HandlerFunc {
 			writeErr(w, err)
 			return
 		}
-		sub.NextDeliveryDate = subscriptionNextDelivery(sub, time.Now())
+		sub.NextDeliveryDate = h.svc.nextDeliveryFor(r.Context(), sub, time.Now())
 		writeJSON(w, http.StatusOK, sub)
 	}
 }
@@ -1381,7 +1406,7 @@ func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	sub.NextDeliveryDate = subscriptionNextDelivery(sub, time.Now())
+	sub.NextDeliveryDate = h.svc.nextDeliveryFor(r.Context(), sub, time.Now())
 	writeJSON(w, http.StatusOK, sub)
 }
 

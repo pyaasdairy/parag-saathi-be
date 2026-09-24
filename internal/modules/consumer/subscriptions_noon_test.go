@@ -77,15 +77,25 @@ func TestNoonLockDayArithmetic(t *testing.T) {
 	if !sub.subChangedBefore(lockMomentFor("2026-10-07")) || sub.subChangedBefore(lockMomentFor("2026-10-06")) {
 		t.Fatalf("subChangedBefore")
 	}
-	if nd := subscriptionNextDelivery(sub, after); nd != "2026-10-08" {
+	none := func(string) *order { return nil }
+	if nd := subscriptionNextDelivery(sub, after, none); nd != "2026-10-08" {
 		t.Fatalf("a plan seen after noon next delivers the day after tomorrow, got %s", nd)
 	}
-	if nd := subscriptionNextDelivery(sub, before); nd != "2026-10-07" {
+	if nd := subscriptionNextDelivery(sub, before, none); nd != "2026-10-07" {
 		t.Fatalf("a plan seen before noon next delivers tomorrow, got %s", nd)
 	}
 	sub.OrderedDays = []string{"2026-10-07"}
-	if nd := subscriptionNextDelivery(sub, after); nd != "2026-10-07" {
-		t.Fatalf("a claimed (locked) tomorrow still counts, got %s", nd)
+	lockedTomorrow := func(day string) *order {
+		if day == "2026-10-07" {
+			return &order{ScheduledFor: day, SubLockedAt: "2026-10-06T06:30:00Z"}
+		}
+		return nil
+	}
+	if nd := subscriptionNextDelivery(sub, after, lockedTomorrow); nd != "2026-10-07" {
+		t.Fatalf("a locked tomorrow still counts, got %s", nd)
+	}
+	if nd := subscriptionNextDelivery(sub, after, none); nd != "2026-10-08" {
+		t.Fatalf("a claimed tomorrow with no live order (cancelled) does not count, got %s", nd)
 	}
 	legacy := &subscription{Status: "active", Frequency: "daily", StartDate: "2026-10-01"}
 	if !legacy.subChangedBefore(lockMomentFor("2026-10-07")) {
@@ -261,7 +271,7 @@ func TestNoonLockLifecycle(t *testing.T) {
 	// The wire shape says when the plan next delivers.
 	if list, _ := w.svc.listSubscriptionsFor(ctx, cid); len(list) != 1 {
 		t.Fatalf("list: %d", len(list))
-	} else if nd := subscriptionNextDelivery(&list[0], istDayAt(D1, 13, 0)); nd != D2 {
+	} else if nd := w.svc.nextDeliveryFor(ctx, &list[0], istDayAt(D1, 13, 0)); nd != D2 {
 		t.Fatalf("next_delivery_date at 13:00 on D1: %s want %s", nd, D2)
 	}
 }
@@ -292,7 +302,7 @@ func TestNoonLockNewPlanAfterNoonStartsDayAfterTomorrow(t *testing.T) {
 	if o := liveSubOrder(t, w, sub.SubscriptionID, D2); o == nil || o.SubLockedAt != "" {
 		t.Fatalf("its first day is the day after tomorrow, as a preview: %+v", o)
 	}
-	if nd := subscriptionNextDelivery(sub, istDayAt(D, 14, 5)); nd != D2 {
+	if nd := w.svc.nextDeliveryFor(ctx, sub, istDayAt(D, 14, 5)); nd != D2 {
 		t.Fatalf("next_delivery_date: %s want %s", nd, D2)
 	}
 	// The next morning's catch-up still leaves D1 alone.
@@ -613,5 +623,91 @@ func TestNoonLockKeepsAPreNoonChangeUnderALaterOne(t *testing.T) {
 	}
 	if o2 := liveSubOrder(t, w, edited.SubscriptionID, D2); o2 == nil || o2.Items[0].Qty != 3 {
 		t.Fatalf("(b) the day after tomorrow carries the plan as edited: %+v", o2)
+	}
+}
+
+// next_delivery_date is what the app's picker and strip read (handoff 9.3),
+// so it must name the day the rider will really come: never a day whose
+// order is cancelled (the LOCK step cancelled it for a pause before noon, or
+// the member cancelled the preview), and a locked tomorrow still counts
+// after a pause or cancel made after noon, because that milk is delivered
+// and billed.
+func TestNextDeliveryDateFollowsTheLiveOrders(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+	plan := func(phone string) (*subscription, primitive.ObjectID) {
+		cid := w.customer(t, phone, 5000)
+		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		if err != nil {
+			t.Fatalf("createSubscription: %v", err)
+		}
+		chainBackdateSubscription(t, w, sub, istDayAt(D, 8, 0))
+		return sub, cid
+	}
+	next := func(sub *subscription, at time.Time) string {
+		t.Helper()
+		fresh, err := w.svc.repo.findSubscriptionByID(ctx, sub.SubscriptionID)
+		if err != nil || fresh == nil {
+			t.Fatalf("reload: %v", err)
+		}
+		return w.svc.nextDeliveryFor(ctx, fresh, at)
+	}
+	resumed, resumedCID := plan("9000010121")
+	skipped, skippedCID := plan("9000010122")
+	late, lateCID := plan("9000010123")
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+	if nd := next(late, istDayAt(D, 9, 30)); nd != D1 {
+		t.Fatalf("before noon an active plan next delivers tomorrow: %s", nd)
+	}
+
+	// (a) pause 11:55; the 12:10 tick cancels tomorrow; resume 12:30.
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, resumedCID, resumed.SubscriptionID, "pause", istDayAt(D, 11, 55)); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// (b) the member cancels tomorrow's preview directly at 10:00.
+	prev := liveSubOrder(t, w, skipped.SubscriptionID, D1)
+	if _, err := w.svc.cancelOrder(ctx, skippedCID.Hex(), prev.OrderID); err != nil {
+		t.Fatalf("cancel preview: %v", err)
+	}
+	if nd := next(skipped, istDayAt(D, 10, 20)); nd != D2 {
+		t.Fatalf("(b) a cancelled tomorrow is skipped: next_delivery_date %s want %s", nd, D2)
+	}
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 10))
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, resumedCID, resumed.SubscriptionID, "resume", istDayAt(D, 12, 30)); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 45))
+	if liveSubOrder(t, w, resumed.SubscriptionID, D1) != nil {
+		t.Fatalf("(a) the 11:55 pause must take tomorrow")
+	}
+	if nd := next(resumed, istDayAt(D, 12, 50)); nd != D2 {
+		t.Fatalf("(a) tomorrow's order is cancelled: next_delivery_date %s want %s", nd, D2)
+	}
+	if nd := next(skipped, istDayAt(D, 12, 50)); nd != D2 {
+		t.Fatalf("(b) after noon: next_delivery_date %s want %s", nd, D2)
+	}
+
+	// (c) tomorrow locked at noon; the plan is paused, then cancelled, at 13:00.
+	if o := liveSubOrder(t, w, late.SubscriptionID, D1); o == nil || o.SubLockedAt == "" {
+		t.Fatalf("(c) tomorrow should be locked: %+v", o)
+	}
+	if nd := next(late, istDayAt(D, 12, 50)); nd != D1 {
+		t.Fatalf("(c) a locked tomorrow is the next delivery: %s", nd)
+	}
+	for _, action := range []string{"pause", "cancel"} {
+		got, err := w.svc.setSubscriptionStatusAt(ctx, lateCID, late.SubscriptionID, action, istDayAt(D, 13, 0))
+		if err != nil {
+			t.Fatalf("(c) %s: %v", action, err)
+		}
+		w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 13, 15))
+		if liveSubOrder(t, w, late.SubscriptionID, D1) == nil {
+			t.Fatalf("(c) a %s after noon must leave tomorrow's locked order", action)
+		}
+		if nd := w.svc.nextDeliveryFor(ctx, got, istDayAt(D, 13, 0)); nd != D1 {
+			t.Fatalf("(c) %s at 13:00: next_delivery_date %q want %s (the locked milk still comes)", action, nd, D1)
+		}
 	}
 }
