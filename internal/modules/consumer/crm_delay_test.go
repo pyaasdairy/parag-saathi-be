@@ -76,7 +76,7 @@ func TestCRMDelayHonouredWithFakeClock(t *testing.T) {
 
 	// A-01 (user.registered, PT2H, orders_count == 0) for two fresh members.
 	waits := w.customer(t, "9000007301", 0)
-	shops := w.customer(t, "9000007302", 500)
+	shops := w.customer(t, "9000007302", 0) // recharges during the delay (below)
 	nowIST := time.Now().In(istZone)
 	t0 := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 9, 0, 0, 0, istZone)
 	for _, cid := range []primitive.ObjectID{waits, shops} {
@@ -113,8 +113,12 @@ func TestCRMDelayHonouredWithFakeClock(t *testing.T) {
 		t.Fatalf("early tick must leave the row NEW: %+v", rows[0])
 	}
 
-	// Meanwhile the second member's first order is delivered: at fire time
-	// orders_count is 1, so their A-01 is refused by the re-check.
+	// Meanwhile the second member recharges and their first order is
+	// delivered: at fire time orders_count is 1, so their A-01 is refused by
+	// the re-check.
+	if _, err := w.svc.creditTopup(ctx, shops, 500, "razorpay", "fund-9000007302"); err != nil {
+		t.Fatalf("recharge: %v", err)
+	}
 	instantOrderDelivered(t, w, shops)
 
 	w.svc.crmProcessSchedules(ctx, t0.Add(2*time.Hour))

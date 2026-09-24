@@ -567,7 +567,8 @@
    "event": "user.registered",
    "delay": "PT2H",
    "conditions": [
-    "orders_count == 0"
+    "orders_count == 0",
+    "member.started == false"
    ],
    "segments": [
     "new"

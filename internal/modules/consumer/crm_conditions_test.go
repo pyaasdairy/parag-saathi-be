@@ -25,6 +25,7 @@ var crmKnownFactKeys = map[string]bool{
 	"new_eta_known": true, "rating": true, "offer.id": true, "offer.entitled_free_deliveries_remaining": true,
 	"wallet.topup_balance": true, "wallet.covers_first_cycle": true, "change": true, "complaint_open": true,
 	"before_delivery": true, "serviceability.in_zone": true, "credit.account": true, "order.contains_promotional_line": true,
+	"member.started": true,
 }
 
 func TestCRMCondConfigLinesParseOnKnownFacts(t *testing.T) {

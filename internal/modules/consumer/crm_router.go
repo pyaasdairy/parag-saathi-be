@@ -17,6 +17,9 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // crmLifecycleTopics are the outbox topics the lifecycle emits (contract C6).
@@ -216,6 +219,13 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 			return nil, err
 		}
 		return float64(n), nil
+	case "member.started":
+		// The member has begun: an order that is not cancelled (placed, on its
+		// way or delivered), a recharge, or a plan that is not cancelled.
+		// orders_count counts DELIVERED orders only, so on its own it let A-01
+		// ("recharge your Wallet & place your first order") reach a member who
+		// had recharged and whose first order was still on its way.
+		return e.s.crmMemberStarted(e.ctx, e.ev.ConsumerID)
 	case "complaint.type":
 		if v, ok := p["category"].(string); ok && v != "" {
 			return v, nil
@@ -294,6 +304,30 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 		return n > 0, nil
 	}
 	return nil, fmt.Errorf("unknown condition key %q", key)
+}
+
+// crmMemberStarted answers the member.started condition key: any order that
+// is not cancelled, any TOPUP ledger row, or any plan that is not cancelled.
+func (s *service) crmMemberStarted(ctx context.Context, cid primitive.ObjectID) (any, error) {
+	one := options.Count().SetLimit(1)
+	notCancelled := bson.D{{Key: "$ne", Value: "cancelled"}}
+	for _, q := range []struct {
+		col    *mongo.Collection
+		filter bson.D
+	}{
+		{s.repo.orders, bson.D{{Key: "user_id", Value: cid.Hex()}, {Key: "status", Value: notCancelled}}},
+		{s.repo.walletTxns, bson.D{{Key: "consumer_id", Value: cid}, {Key: "type", Value: "TOPUP"}}},
+		{s.repo.subscriptions, bson.D{{Key: "consumer_id", Value: cid}, {Key: "status", Value: notCancelled}}},
+	} {
+		n, err := q.col.CountDocuments(ctx, q.filter, one)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // offer resolves the consumer's campaign offer at most once, lazily.

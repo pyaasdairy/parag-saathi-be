@@ -186,6 +186,8 @@ func crmEventStale(e *crmEventCtx) (bool, string) {
 		return false, ""
 	case "payment.failed":
 		return crmPaymentFailureStale(e)
+	case "subscription.modified", "subscription.created_unpaid":
+		return crmPlanChangeStale(e)
 	}
 	if id, _ := e.ev.Payload["order_id"].(string); strings.TrimSpace(id) == "" {
 		return false, ""
@@ -218,6 +220,46 @@ func crmPaymentFailureStale(e *crmEventCtx) (bool, string) {
 	})
 	if err == nil && n > 0 {
 		return true, fmt.Sprintf("payment order %s was credited by a later attempt", orderID)
+	}
+	return false, ""
+}
+
+// crmPlanChangeStale reloads the plan a delayed plan message is about. The
+// event's payload records the change as it happened; the member may have
+// changed their mind within the hour (C-03) or the two hours (A-05), and the
+// message must describe the plan as it is when it is sent:
+//   - A-05 (subscription.created_unpaid) only while the plan is still active;
+//   - C-03 on a pause only while the plan is still paused, on a quantity
+//     reduction only while the quantity is still below what it was.
+//
+// A plan that no longer exists (or cannot be read) is stale: fail closed.
+func crmPlanChangeStale(e *crmEventCtx) (bool, string) {
+	subID, _ := e.ev.Payload["subscription_id"].(string)
+	if subID = strings.TrimSpace(subID); subID == "" {
+		return false, ""
+	}
+	sub, err := e.s.repo.findSubscriptionByID(e.ctx, subID)
+	if err != nil {
+		return true, "plan lookup failed: " + err.Error()
+	}
+	if sub == nil || sub.ConsumerID != e.ev.ConsumerID {
+		return true, fmt.Sprintf("plan %s no longer exists", subID)
+	}
+	if e.ev.Topic == "subscription.created_unpaid" {
+		if sub.Status != "active" {
+			return true, fmt.Sprintf("plan %s is %s", subID, sub.Status)
+		}
+		return false, ""
+	}
+	switch change, _ := e.ev.Payload["change"].(string); change {
+	case "paused":
+		if sub.Status != "paused" {
+			return true, fmt.Sprintf("plan %s is %s again", subID, sub.Status)
+		}
+	case "quantity_reduced":
+		if prev, ok := crmPayloadNumber(e.ev.Payload["previous_qty"]); ok && float64(sub.Qty) >= prev {
+			return true, fmt.Sprintf("plan %s is back to %d", subID, sub.Qty)
+		}
 	}
 	return false, ""
 }

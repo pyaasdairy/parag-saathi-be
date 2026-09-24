@@ -118,6 +118,17 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 		}
 		return o.OrderID
 	}
+	// stagePlan stages the plan a delayed plan message re-reads when it fires
+	// (crmPlanChangeStale): A-05 needs it still active, C-03 still paused.
+	stagePlan := func(cid primitive.ObjectID, subID, status string) {
+		if _, err := w.db.Collection(collSubscriptions).InsertOne(ctx, &subscription{
+			MongoID: primitive.NewObjectID(), SubscriptionID: subID, ConsumerID: cid, ProductID: "gold-500ml",
+			Name: "Full Cream Milk - Parag Gold", Variant: "500ml", Qty: 2, UnitPrice: 35, Frequency: "daily", Status: status,
+			StartDate: istDay(time.Now().Add(24 * time.Hour)), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("stage plan: %v", err)
+		}
+	}
 	grantMarketing := func(cid primitive.ObjectID) {
 		yes := true
 		if aerr := w.svc.applyConsents(ctx, cid, []consentInput{{Type: "marketing_whatsapp", Granted: &yes, Version: "2026-07"}}); aerr != nil {
@@ -139,7 +150,9 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 				"frequency": "daily", "start_date": istDay(time.Now().Add(24 * time.Hour)), "start_label": "tomorrow"}
 		}, crmMatrixInbox},
 		"A-05": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
-			return member(0), map[string]any{"subscription_id": "sub_mx_a05", "first_cycle_amount": float64(70), "scope_key": "sub_mx_a05"}
+			cid := member(0)
+			stagePlan(cid, "sub_mx_a05", "active")
+			return cid, map[string]any{"subscription_id": "sub_mx_a05", "first_cycle_amount": float64(70), "scope_key": "sub_mx_a05"}
 		}, crmMatrixInbox},
 		"B-03": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			return member(0), map[string]any{"payment_order_id": "order_mx_b03", "payment_id": "pay_mx_b03", "amount": float64(500),
@@ -149,7 +162,9 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 			return member(0), map[string]any{"amount": float64(500), "account": "topup", "reason": "recharge", "ref": "order_mx_b06", "scope_key": "order_mx_b06"}
 		}, crmMatrixInbox},
 		"C-03": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
-			return member(0), map[string]any{"subscription_id": "sub_mx_c03", "change": "paused", "scope_key": "sub_mx_c03:pause"}
+			cid := member(0)
+			stagePlan(cid, "sub_mx_c03", "paused")
+			return cid, map[string]any{"subscription_id": "sub_mx_c03", "change": "paused", "scope_key": "sub_mx_c03:pause"}
 		}, crmMatrixInbox},
 		"D-01": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			cid := member(0)

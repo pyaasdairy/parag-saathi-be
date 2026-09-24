@@ -14,8 +14,9 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 
 - **When (IST).** Event triggers fire on the next worker tick (the worker runs every 60 s)
   after their product event, plus the trigger's `delay` when it has one; a delayed
-  trigger re-checks its conditions when it fires and skips an order cancelled
-  meanwhile. Scheduled triggers fire on the first tick at or after the time shown.
+  trigger re-checks its conditions when it fires and skips an event undone
+  meanwhile (an order cancelled, a plan changed back, a failure undone, a failed
+  payment paid by a retry). Scheduled triggers fire on the first tick at or after the time shown.
   Every message is claimed exactly once per (trigger, member, IST day, order or
   complaint), so two orders on one day each get their own message.
 - **Channels, in order.** The first is the primary; `+x` runs in parallel; `then x` is a
@@ -53,15 +54,15 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 
 | id | topic / schedule | when (IST) | channels | env to leave the building | status today | body (EN) |
 |---|---|---|---|---|---|---|
-| A-01 | `user.registered` | 2 h after a new account is created by OTP sign-in, if the member still has no delivered order | push, then whatsapp, then sms | push; or WA A-01; or DLT A-01 | INBOX-ONLY | Welcome to Pyaas! Fresh milk is 2 taps away — recharge your Wallet & place your first order. Help: 96672 60050. |
+| A-01 | `user.registered` | 2 h after a new account is created by OTP sign-in, if the member still has not started (no order that is not cancelled, no recharge, no plan) | push, then whatsapp, then sms | push; or WA A-01; or DLT A-01 | INBOX-ONLY | Welcome to Pyaas! Fresh milk is 2 taps away — recharge your Wallet & place your first order. Help: 96672 60050. |
 | A-02 | `order.delivered` | on delivery, when the member's first-ever delivered order is a Quick Pyaas (instant) order | whatsapp, then sms | WA A-02; or DLT A-02 | INBOX-ONLY | Delivered! Thanks for trying Full Cream Milk - Parag Gold 500ml — delivered by PYAAS. Reorder anytime in the app. |
 | A-03 | `subscription.activated` | when the member creates a plan in the app (not the Welcome Litre plan, which W-01 announces) | whatsapp | WA A-03 | INBOX-ONLY | Your morning milk starts tomorrow, delivered by 7 am. Pause/resume anytime — changes before 12 noon apply from the next morning. Keep your Wallet topped up so it never stops. |
-| A-05 | `subscription.created_unpaid` | 2 h after an app plan is created with a wallet that cannot cover its first day; skipped if the member topped up meanwhile | whatsapp, then sms | WA A-05; or DLT A-05 | INBOX-ONLY | One step left — recharge your Wallet to start tomorrow's delivery. |
+| A-05 | `subscription.created_unpaid` | 2 h after an app plan is created with a wallet that cannot cover its first day; skipped if the member topped up meanwhile or the plan is no longer active | whatsapp, then sms | WA A-05; or DLT A-05 | INBOX-ONLY | One step left — recharge your Wallet to start tomorrow's delivery. |
 | B-01 | `0 9 * * *` (code) | first tick after 09:00, when the wallet covers under 4 days of the member's daily plans; at most once in 7 days; not during a live Welcome Litre journey | whatsapp, +push, then sms | WA B-01; push; or DLT B-01 | INBOX-ONLY | Your Wallet is running low. Recharge to keep your morning milk coming. |
 | B-02 | config says `0 17 * * *`; code runs at 12:00 | first tick after 12:00, when tomorrow's plan costs more than the wallet holds; every day it stays short | sms, +whatsapp | DLT B-02; WA B-02 | INBOX-ONLY (SMS refused: no DLT id) | Low balance — recharge by 12 noon tomorrow to receive your delivery. (Copy vs horizon is the founder's open call, handoff 6b.) |
 | B-03 | `payment.failed` | 10 min after a Razorpay top-up payment fails (webhook, once per payment), skipped if a retry paid that same order meanwhile; or an AutoPay mandate charge finds the wallet short (once per mandate per day) | sms, +whatsapp | DLT B-03; WA B-03 | INBOX-ONLY | Your recharge didn't go through. Try again or use another method — no money was deducted. |
 | B-06 | `wallet.credited` | every wallet credit, once per ledger ref, after the money is in: top-up (app verify, Razorpay webhook, reconcile sweep, dev top-up), refund, rider undo (refundable wording); promo credit (Pyaas-credit wording) | whatsapp, then sms | WA B-06; or DLT B-06 | INBOX-ONLY | ₹500 added to your Wallet (recharge). Refundable. Ready for your next order. / promo: ₹75 Pyaas credit added (Welcome credit). Usable on orders; not refundable in cash. Valid 30 days. |
-| C-03 | `subscription.modified` | 1 h after the member pauses a plan or reduces its quantity | whatsapp | WA C-03 | INBOX-ONLY | We noticed a change. Everything okay with your deliveries? Reply here or we can call. |
+| C-03 | `subscription.modified` | 1 h after the member pauses a plan or reduces its quantity; skipped if the plan was resumed or the quantity restored meanwhile | whatsapp | WA C-03 | INBOX-ONLY | We noticed a change. Everything okay with your deliveries? Reply here or we can call. |
 | D-01 | `order.confirmed` | an instant order is placed; a morning order goes live at the lock; never for a free promo pack | push, then whatsapp, then sms | push; or WA D-01; or DLT D-01 | INBOX-ONLY | Order confirmed ✅ Full Cream Milk - Parag Gold 500ml — delivered by PYAAS. Arriving tomorrow by 7 am. |
 | D-02 | `order.dispatched` | the rider picks up an instant (Quick Pyaas) order | push, then whatsapp, then sms | push; or WA D-02; or DLT D-02 | INBOX-ONLY | Out for delivery — Ravi, ETA 12 min. |
 | D-03 | `delivery.delayed` | a task on the road is 5 min past its window end (detector on the worker tick, once per task) | push, +whatsapp | push; WA D-03 | INBOX-ONLY | Running a little late — new ETA about 7:52 am. Sorry for the wait. |
