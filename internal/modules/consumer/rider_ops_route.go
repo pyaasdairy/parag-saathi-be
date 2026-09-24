@@ -233,16 +233,30 @@ func (r *repository) riderRouteTasksForDay(ctx context.Context, riderPartyID, da
 	// "0 pending" over a list of stops, and worse, POST /route/complete would
 	// happily close a day with live deliveries still on it, because its
 	// ROUTE_NOT_COMPLETE guard reads the same set.
+	//
+	// Neither branch may reach a stop due on a LATER day. Under the noon lock
+	// tomorrow's morning tasks exist (and are assigned) from 12:00 today, so a
+	// rider given tomorrow's round in the afternoon had it counted as today's
+	// pending work, POST /route/complete refused until the next morning, and
+	// today's pickup sheet listed tomorrow's crates. An undated task (an
+	// instant order) belongs to whenever it is open.
 	openStatuses := bson.A{"ASSIGNED", "ACCEPTED", "OUT_FOR_DELIVERY"}
 	cur, err := r.deliveries.Find(ctx,
 		bson.D{
 			{Key: "rider_party_id", Value: riderPartyID},
-			{Key: "$or", Value: bson.A{
-				bson.D{{Key: "assigned_at", Value: bson.D{
-					{Key: "$gte", Value: rfc3339(from)},
-					{Key: "$lt", Value: rfc3339(to)},
+			{Key: "$and", Value: bson.A{
+				bson.D{{Key: "$or", Value: bson.A{
+					bson.D{{Key: "assigned_at", Value: bson.D{
+						{Key: "$gte", Value: rfc3339(from)},
+						{Key: "$lt", Value: rfc3339(to)},
+					}}},
+					bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: openStatuses}}}},
 				}}},
-				bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: openStatuses}}}},
+				bson.D{{Key: "$or", Value: bson.A{
+					bson.D{{Key: "delivery_date", Value: bson.D{{Key: "$exists", Value: false}}}},
+					bson.D{{Key: "delivery_date", Value: nil}},
+					bson.D{{Key: "delivery_date", Value: bson.D{{Key: "$lte", Value: day}}}}, // "" sorts first
+				}}},
 			}},
 		},
 		options.Find().SetSort(bson.D{{Key: "assigned_at", Value: 1}}).SetLimit(riderRouteMaxTasks),
