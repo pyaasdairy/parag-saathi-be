@@ -1048,3 +1048,121 @@ the report files in `docs/handoff-2026-09-24-reports/`.
   matrix, fixes per dead row, unnamed topics, structural gaps)
 - `docs/handoff-2026-09-24-reports/00..11-*.json` (raw stage reports and reviewer verdicts
   the `(source: NN)` tags point at; agent prose, kept verbatim as evidence)
+
+---
+
+## 10. Noon rules, 24 Sep afternoon
+
+Branch `feature/noon-rules` (from `integration/delivery` at `0304b23`, after the
+founding/noon-lock merge and its post-merge fixes). The owner's decisions of 24 Sep; the
+design is the stage 2b design note. Every time-dependent test runs on an injected clock.
+
+### 10.1 Low wallet, the noon wake and the copy that names the day
+
+| commit | what |
+|---|---|
+| `fef95fc` | the noon lock decides a member's day once, on the wallet at 12:00 |
+| `7f23949` | a free trial day costs nothing at the noon lock (decision 9) |
+| `388f51e` | the worker wakes at 12:00:05 IST to lock tomorrow's orders |
+| `8a8b82e` | D-07 tells a day skipped at noon, once; B-02 waits for the lock and stays quiet beside D-07; A-05 and FF-01 name the real day |
+| `747e490` | `pause_reason: "member"` on POST /pause |
+
+**The rule, as built** (`subscriptions.go` `lockConsumerDay`):
+
+- One member's previews for one day are decided together, once, after that day's cut-off
+  (12:00 IST the day before). Re-checked against the plan (a plan changed before the
+  cut-off decides it as it is now; one changed after keeps the day as previewed), then
+  funded **oldest plan first** from `walletAsOf(12:00:00)`: the Available balance now with
+  every ledger row stamped after 12:00:00 played back out. **Debits are added back as well
+  as credits taken off** (owner's decision 1), so a tick at 12:00:05 and one at 12:14:59
+  decide the same. Less what the member already owes that day: subscription orders already
+  locked and wallet-paid one-off morning orders dated that day (G7; a one-off is fixed once
+  its day's cut-off has passed). Each order costs what the door will take: a 2+2 free trial
+  day costs Rs 0 (decision 9), and the locked order's `trial_free` follows the trial as read
+  at the lock.
+- Covered: locked, store task minted, D-01 as before. Not covered: the preview is closed at
+  once as `cancelled`, `cancelled_by: "wallet_short"`, `skipped_at`; **the day claim is
+  kept** (never re-previewed), no task, no money; `subscription.day_skipped` is emitted
+  `{subscription_id, day, reason, shortfall, resume_label, tomorrow_blocked, scope_key}`.
+  Nothing is retried on later ticks, so a top-up after noon (or in the night) never mints a
+  late task. The plan stays `active` and the next editable day is previewed as usual:
+  recharge before 12 noon, the next morning is delivered; after noon, the one after.
+- A preview no lock decided before its route left (05:00, the server down over noon)
+  expires (cancelled, no `cancelled_by`, no message), as `d560e13` made it.
+- The catch-up (a day past its cut-off that was never previewed: an outage) now claims the
+  day, writes the preview and runs the same lock. A day whose route has already left is not
+  caught up at all (before: a locked order and task for a round already gone at, say,
+  09:00).
+- `listActiveSubscriptions` is sorted oldest plan first, so the catch-up funds in the same
+  order.
+- New non-fatal index `consumer_wallet_txns {consumer_id, created_at}` (`consumer_created_at`).
+- The worker (`runSubscriptionWorker`): one tick at boot, one every 15 minutes, and a
+  one-shot wake at the next 12:00:05 IST, armed from the clock before the boot tick and again
+  after each wake (no stored state). **`render.yaml` still says `plan: free`** (spins down
+  when idle): a sleeping instance runs neither timer, and the first request after noon wakes
+  it; the lock outcome is the same whenever it runs, only the store sees tomorrow's tasks
+  later. An always-on plan or an external 12:00:05 ping is the ops decision.
+- `pause_reason: "member"` is stored and returned on POST /pause and cleared on resume. The
+  server never pauses for a low wallet and never resumes a pause (Option A); a test pins
+  that a credit plus a day of ticks leaves a member's pause paused with no orders.
+
+**CRM** (`crm_triggers.json`, `docs/CRM-MESSAGES.md` updated):
+
+- **D-07** is live on `subscription.day_skipped` (condition `tomorrow.delivery_blocked ==
+  true`: the skipped day is tomorrow, the plan is active, and no free Welcome Litre pack still
+  arrives that morning). Once per member and day (`scope_key: day_skipped:<day>`). Channels:
+  sms, +whatsapp, +push, inbox always. Body: "No delivery tomorrow - your wallet was short at
+  12 noon. Recharge by 12 noon tomorrow and your milk resumes 8 Oct." [DATE] is the next
+  morning the plan delivers after the skipped one (the day after tomorrow for a daily plan),
+  whose own cut-off is never before 12 noon tomorrow, so the deadline is true for every
+  cadence.
+- **B-02** claims its day only once no preview for tomorrow is still undecided (from 13:00
+  regardless), so it always runs after the lock; it is not sent to a member D-07 reached at
+  that noon. It stays on the CRM minute tick (it fires within a minute of the 12:00:05 lock):
+  the subscription worker's boot tick can run before the CRM claim indexes are built, and a
+  claim without its unique index could send the day twice.
+- **A-05** "One step left — recharge your Wallet and your morning milk starts [DATE]."
+  [DATE] is read from the plan when the message fires (a tomorrow skipped at noon inside the
+  two hours is not offered). **FF-01** "First delivery [DATE] by 7 AM", the first morning an
+  order placed at the unlock reaches.
+- T-A05, T-D07 and T-FF01 changed wording: register the new DLT / Meta templates before
+  mapping them in `CRM_DLT_TEMPLATE_IDS` / `CRM_WA_TEMPLATE_NAMES`. Until then they are
+  inbox (and push, once enabled) only.
+
+**What the apps see**
+
+- Member: a skipped day is a `cancelled` order for that date in Orders (`cancelled_by` is
+  not on the wire); the shipped build's cancelled line reads "Any amount held has been
+  released", which is harmless. `next_delivery_date` moves past a skipped day. The new
+  optional `pause_reason` key. D-07 in the inbox.
+- Store: an unfunded tomorrow leaves Upcoming at 12:00:05 for good instead of lingering as
+  `awaiting_funds` until its day; `awaiting_funds` is now true only between 12:00 and the
+  lock tick (seconds). Funded tomorrow tasks appear seconds after noon, not up to 15
+  minutes later. No task is minted after the route has left.
+- Rider: no late "morning" task minted after the round.
+
+**Tests** (`CONSUMER_MONGO_TEST_URI=mongodb://127.0.0.1:27018`): `wallet_asof_test.go`,
+`subscriptions_wallet_lock_test.go` (noon wallet, 12:00:01 / 12:14:59 / 23:59 and month end,
+recharge before and after noon, two plans one wallet, the one-off reservation, the free
+trial day, catch-up), `subscriptions_worker_test.go` (the wake and the boot tick, no sleeps),
+`crm_noon_copy_test.go` (D-07 / B-02 / A-05 / FF-01), `subscriptions_pause_reason_test.go`.
+Rewritten because the rule changed: `subscriptions_route_start_test.go` (a night top-up no
+longer revives a day skipped at noon; the expiry case is an outage),
+`TestStoreUpcomingFlagsPreviewsAwaitingFunds`. Re-dated to a fixed clock:
+`TestFullChainSubscriptionMorningDelivery`, the doorstep-prefs sweep (03:00, before the
+route). The test world stamps its seed top-ups at 2026-01-01 (`chainStampLedger`).
+
+**Residuals, accepted and known**
+
+- The as-of window ends at the tick's clock: a movement in the seconds between the tick
+  starting and the member's wallet read counts as before noon. A credit or debit whose ledger
+  row is written but whose balance move has not landed at the instant of the read is
+  miscounted by that one amount (milliseconds). The Play-review account's wallet floor moves
+  money without a ledger row.
+- An instant order delivered after 12:00 is added back by the as-of rule, so the door can
+  still find the wallet short the next morning (the owner's decision 1).
+- Not changed here: W-01 ("Tomorrow by 7 am") follows the pack 1 date, which the G9 item
+  owns (its DLT id is mapped in production, so a wording change needs a new registration
+  first); W-03a ("Recharge by 12 noon today") is only true when its 10:30 tick runs before
+  noon; the pack-2 attach still checks the current wallet before noon; `T-SMS-SKIP` (a
+  standalone SMS template no trigger uses) still carries the old alternative-text block.
