@@ -180,3 +180,63 @@ func TestNotificationsInboxMarkReadNullAndMissingReadAt(t *testing.T) {
 		t.Fatalf("a foreign row was marked read: %v", foreign["read_at"])
 	}
 }
+
+// Every Saathi login queues an 'OTP' transport row addressed to the party
+// (identity.requestOTP: the audit record of the code's SMS, carrying the code
+// itself only in local development). It is not a message for the inbox: it
+// rendered as a bare "OTP" row and counted unread on the store manager's
+// bell, one more per login. GET /notifications/me leaves those rows out (the
+// list and its total); the audit outbox (GET /notifications?phone=) keeps
+// them, redacted as before.
+func TestNotificationsInboxLeavesOutOTPTransportRows(t *testing.T) {
+	db, repo, svc := inboxWorld(t)
+	ctx := context.Background()
+	party := primitive.NewObjectID()
+	phone := "+919900000078"
+	at := func(min int) time.Time { return time.Date(2026, 9, 24, 3, min, 0, 0, time.UTC) }
+
+	// Two logins' OTP rows, as identity writes them (dev: the code in params).
+	for i, code := range []string{"482913", "105577"} {
+		insertInboxRow(t, db, bson.D{
+			{Key: "party_id", Value: party}, {Key: "phone", Value: phone},
+			{Key: "channel", Value: "SMS"}, {Key: "template_key", Value: "OTP"},
+			{Key: "language", Value: "hi"}, {Key: "params", Value: bson.M{"otp": code}},
+			{Key: "status", Value: "QUEUED"}, {Key: "queued_at", Value: at(i)},
+		})
+	}
+	// A real alert for the same party.
+	alert := insertInboxRow(t, db, bson.D{
+		{Key: "party_id", Value: party}, {Key: "phone", Value: phone},
+		{Key: "channel", Value: "APP"}, {Key: "template_key", Value: "STORE_INSTANT_CLOSING"},
+		{Key: "language", Value: "hi"}, {Key: "params", Value: bson.M{"store_id": "s1"}},
+		{Key: "status", Value: "QUEUED"}, {Key: "queued_at", Value: at(5)},
+		{Key: "read_at", Value: nil},
+	})
+
+	items, total, err := svc.listMyNotifications(ctx, auth.Actor{PartyID: party.Hex()}, httpx.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("listMyNotifications: %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].ID != alert.Hex() || items[0].Read {
+		t.Fatalf("inbox = %d rows (total %d): %+v, want only the unread alert", len(items), total, items)
+	}
+
+	// The audit outbox still has both OTP rows, the code redacted on read.
+	outbox, n, err := repo.listNotifications(ctx, phone, "", httpx.Page{Limit: 50})
+	if err != nil {
+		t.Fatalf("listNotifications: %v", err)
+	}
+	otps := 0
+	for i := range outbox {
+		if outbox[i].TemplateKey == "OTP" {
+			otps++
+			redactNotificationSecrets(&outbox[i])
+			if outbox[i].Params["otp"] != redactedValue {
+				t.Fatalf("outbox OTP row not redacted: %v", outbox[i].Params)
+			}
+		}
+	}
+	if n != 3 || otps != 2 {
+		t.Fatalf("audit outbox: %d rows, %d OTP rows; want 3 and 2", n, otps)
+	}
+}

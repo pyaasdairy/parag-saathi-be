@@ -180,8 +180,17 @@ func (r *repository) listNotifications(ctx context.Context, phone, status string
 
 // listNotificationsForParty returns one party's own notifications, newest
 // first, plus the total count — the GET /notifications/me inbox read.
+//
+// The login-code rows (template OTP) are left out, list and total alike:
+// identity.requestOTP queues one per login as the SMS's audit record, not
+// as a message for the party, and each one counted unread on Saathi's bell.
+// They stay in the outbox (GET /notifications?phone=, redacted) for audit,
+// and nothing reads a code from this inbox (it was always redacted here).
 func (r *repository) listNotificationsForParty(ctx context.Context, partyID primitive.ObjectID, page httpx.Page) ([]StoredNotification, int64, error) {
-	filter := bson.D{{Key: "party_id", Value: partyID}}
+	filter := bson.D{
+		{Key: "party_id", Value: partyID},
+		{Key: "template_key", Value: bson.D{{Key: "$ne", Value: domain.TemplateOTP}}},
+	}
 
 	total, err := r.notifications.CountDocuments(ctx, filter)
 	if err != nil {
