@@ -150,6 +150,11 @@ func Register(r chi.Router, d *deps.Deps) {
 		}
 	}()
 	go svc.crmWorker(context.Background())
+	// Instant closing alert (instant_alerts.go): a one-minute tick asks each
+	// store's managers, 15 minutes before instant closes, to extend it or let
+	// it close, and tells them once it has closed. It builds its own
+	// exactly-once claim index (non-fatal; it alerts only once that exists).
+	go svc.instantAlertWorker(context.Background())
 	// Second recovery net for captured-but-unconfirmed payments (the first is
 	// the webhook above). Inert without a real Razorpay key secret.
 	go svc.paymentReconcileWorker(context.Background())
