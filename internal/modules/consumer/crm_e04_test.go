@@ -17,7 +17,9 @@ package consumer
 //	  go test ./internal/modules/consumer/ -run CRME04 -v
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -119,5 +121,35 @@ func TestCRME04OffersOnlyWhatWasPaid(t *testing.T) {
 	want = "refund ₹" + crmRupees(codPaid.Subtotal) + " to your Wallet"
 	if got = e04Bodies(t, w, d); len(got) != 1 || !strings.Contains(got[0], want) {
 		t.Fatalf("E-04 for a delivered cash order: %q, want %q", got, want)
+	}
+}
+
+// E2E-03: E-04 needs the member's own order. An order-less "missing"
+// complaint is still acknowledged by E-02, and E-04 stays silent by its
+// conditions, not by an unresolved-token error. Someone else's order id is
+// no order of the member's: its product and amount are never rendered.
+func TestCRME04NeedsTheMembersOrder(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	var logs bytes.Buffer
+	w.svc.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ctx := context.Background()
+	cid := w.customer(t, "9000012201", 500)
+	other := w.customer(t, "9000012202", 500)
+	theirs := instantOrderDelivered(t, w, other)
+	w.svc.crmProcessEvents(ctx)
+	logs.Reset()
+
+	e2eMissing(t, w, cid, "PYS-E2E-5", "")              // no order at all
+	e2eMissing(t, w, cid, "PYS-E2E-6", theirs.OrderID)  // someone else's order
+	e2eMissing(t, w, cid, "PYS-E2E-7", "ord_000000000") // an order that does not exist
+	if n := inboxCount(t, w.db, cid, "E-04"); n != 0 {
+		t.Fatalf("E-04 without the member's own order: %d rows %q", n, e04Bodies(t, w, cid))
+	}
+	if n := inboxCount(t, w.db, cid, "E-02"); n != 3 {
+		t.Fatalf("E-02 still acknowledges every complaint: %d", n)
+	}
+	if s := logs.String(); strings.Contains(s, "unresolved template token") || strings.Contains(s, "fails closed") {
+		t.Fatalf("an order-less E-04 must be a clean non-fire, logged:\n%s", s)
 	}
 }

@@ -25,7 +25,7 @@ var crmKnownFactKeys = map[string]bool{
 	"new_eta_known": true, "rating": true, "offer.id": true, "offer.entitled_free_deliveries_remaining": true,
 	"wallet.topup_balance": true, "wallet.covers_first_cycle": true, "change": true, "complaint_open": true,
 	"before_delivery": true, "serviceability.in_zone": true, "credit.account": true, "order.contains_promotional_line": true,
-	"member.started": true, "complaint.refundable_amount": true,
+	"member.started": true, "complaint.refundable_amount": true, "complaint.has_order": true,
 }
 
 func TestCRMCondConfigLinesParseOnKnownFacts(t *testing.T) {
@@ -66,7 +66,7 @@ func TestCRMCondConfigLinesParseOnKnownFacts(t *testing.T) {
 	if cfg.Triggers["W-01"].Event != "offer.finalized" {
 		t.Fatalf("W-01 must route on the topic enrolment emits, got %q", cfg.Triggers["W-01"].Event)
 	}
-	if got := cfg.Triggers["E-04"].Conditions; len(got) != 1 || got[0] != "complaint.type in ['missing']" {
+	if got := cfg.Triggers["E-04"].Conditions; len(got) != 2 || got[0] != "complaint.type in ['missing']" || got[1] != "complaint.has_order == true" {
 		t.Fatalf("E-04 conditions: %v", got)
 	}
 	if got := cfg.Triggers["E-05"].Conditions; len(got) != 1 || got[0] != "complaint.type == 'quality'" {
@@ -105,7 +105,8 @@ func TestCRMCondComplaintTypesMatchTheApp(t *testing.T) {
 	if e04[missing.ID] != "SENT" {
 		t.Fatalf("E-04 scope must be the missing complaint's id: %v", e04)
 	}
-	// An order-less 'missing' complaint cannot name an amount: refused, not half-rendered.
+	// An order-less 'missing' complaint has nothing to redeliver: E-04's
+	// complaint.has_order condition keeps it silent (E2E-03).
 	if _, err := w.svc.fileComplaint(ctx, cid, complaintInput{Ref: "PYS-M2", Category: "missing", Detail: "no order"}); err != nil {
 		t.Fatalf("fileComplaint order-less: %v", err)
 	}

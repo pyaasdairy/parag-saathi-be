@@ -200,8 +200,8 @@ func (e *crmEventCtx) params() map[string]string {
 		return e.prm
 	}
 	var o *order
-	if e.ev.Topic == "complaint.created" { // the label comes from the order
-		o = e.order()
+	if e.ev.Topic == "complaint.created" { // the label comes from the member's own order
+		o = e.ownOrder()
 	}
 	p := crmEventParams(e.ev.Topic, e.ev.Payload, o)
 	if e.ev.Topic == "complaint.created" {
@@ -262,6 +262,12 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 		return nil, fmt.Errorf("payload carries no category")
 	case "complaint.refundable_amount":
 		return e.refundable()
+	case "complaint.has_order":
+		// E-04 offers to redeliver the order's goods, so it needs the member's
+		// own order: an order-less complaint (E-02 still acknowledges it) or
+		// another member's order id is a clean non-fire, not a message that
+		// cannot resolve [LABELLED_PRODUCT] or names someone else's milk.
+		return e.ownOrder() != nil, nil
 	case "new_eta_known":
 		if v, ok := p["new_eta_known"].(bool); ok {
 			return v, nil
@@ -370,6 +376,15 @@ func (e *crmEventCtx) offer() *consumerOffer {
 		}
 	}
 	return e.off
+}
+
+// ownOrder is the order the event names when it is the member's own; nil for
+// no order, an unknown id, or another member's order.
+func (e *crmEventCtx) ownOrder() *order {
+	if o := e.order(); o != nil && o.UserID == e.ev.ConsumerID.Hex() {
+		return o
+	}
+	return nil
 }
 
 // refundable is crmComplaintRefundable for the order this complaint names,

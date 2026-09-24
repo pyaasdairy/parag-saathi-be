@@ -1645,7 +1645,8 @@
    "event": "complaint.created",
    "delay": "PT0S",
    "conditions": [
-    "complaint.type in ['missing']"
+    "complaint.type in ['missing']",
+    "complaint.has_order == true"
    ],
    "segments": [
     "*"
