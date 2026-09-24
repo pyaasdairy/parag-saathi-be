@@ -56,6 +56,11 @@ func Register(r chi.Router, d *deps.Deps) {
 	if err := repo.ensureDeliveryQueryIndexes(ctx); err != nil {
 		log.Warn("delivery query index setup incomplete", slog.Any("err", err))
 	}
+	// The noon lock's as-of wallet replay (walletAsOf) reads the ledger by
+	// (consumer_id, created_at) — a query index, non-fatal like the above.
+	if err := repo.ensureWalletAsOfIndex(ctx); err != nil {
+		log.Warn("wallet as-of ledger index setup incomplete", slog.Any("err", err))
+	}
 
 	// Phase-2 feature indexes (complaints, push devices). NON-fatal for the
 	// same reason as the rider console: the complaint uniqueness guard makes a

@@ -60,6 +60,9 @@ func TestCRMPlanVariantWelcomeLitreCarriesPackSize(t *testing.T) {
 		if _, err := w.svc.creditTopup(ctx, cid, 500, "razorpay", "fund-"+phone); err != nil {
 			t.Fatalf("fund: %v", err)
 		}
+		// The noon lock reads the wallet as it stood at 12:00 (walletAsOf):
+		// the top-up is dated long before, whatever the wall clock says.
+		chainStampLedger(t, w, cid, "fund-"+phone, "TOPUP", chainLedgerEpoch)
 		return cid, res.SubscriptionID
 	}
 	_, litre := enrol("9000008401", "Flat 11, Size Tower", "gold-1l", 1)

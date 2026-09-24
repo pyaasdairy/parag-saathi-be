@@ -1182,8 +1182,9 @@ func (s *service) crmPlanCostOn(ctx context.Context, sub *subscription, day stri
 // spendable now, less every order due on or before through that is paid for
 // first. Money moves at delivery, so a locked order (and an instant or dated
 // one-off on its way) still sits in the balance until its morning. A preview
-// that has not locked yet counts only while the balance can still lock it,
-// the LOCK step's own wallet floor. A read error leaves the balance as it is.
+// that has not locked yet counts only while the balance can still lock it
+// (the noon lock funds it only then; lockConsumerDay). A read error leaves
+// the balance as it is.
 func (s *service) crmSpendableAtLock(ctx context.Context, consumerID primitive.ObjectID, available float64, through string) float64 {
 	cur, err := s.repo.orders.Find(ctx, bson.D{
 		{Key: "user_id", Value: consumerID.Hex()},

@@ -195,11 +195,13 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	}
 }
 
-// From noon the upcoming window holds tomorrow's previews the lock could not
-// fund beside the day after tomorrow's editable ones. Each row now says
-// which it is: awaiting_funds (past its cut-off, ships only if the member
-// tops up) and locks_at, the preview's noon cut-off, so the manager does not
-// pack for a preview that will not ship.
+// Each upcoming row says whether its noon cut-off has passed without a lock
+// deciding it yet (awaiting_funds) and when it locks (locks_at). Since the
+// low-wallet rule (24 Sep) the lock decides a day once, on the wallet at
+// 12:00: before the lock tick both members' tomorrow is flagged; after it
+// the funded one has left for the task queue and the short one is skipped,
+// gone from the list instead of lingering until its day, and only the day
+// after tomorrow's previews remain, neither flagged.
 func TestStoreUpcomingFlagsPreviewsAwaitingFunds(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
@@ -218,33 +220,47 @@ func TestStoreUpcomingFlagsPreviewsAwaitingFunds(t *testing.T) {
 	funded := plan("9000006101", 500)
 	short := plan("9000006102", 0)
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
-	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 0))
 
-	rows, err := w.svc.storeUpcomingAt(ctx, w.mgr, w.storeID.Hex(), istDayAt(D, 12, 30))
-	if err != nil {
-		t.Fatalf("storeUpcoming: %v", err)
-	}
-	raw, _ := json.Marshal(rows)
-	var wire []map[string]any
-	_ = json.Unmarshal(raw, &wire)
-	want := map[string]struct {
+	type wantRow struct {
 		awaiting bool
 		locksAt  string
-	}{
-		liveSubOrder(t, w, short.SubscriptionID, D1).OrderID:  {true, istDayAt(D, 12, 0).UTC().Format(time.RFC3339)},
-		liveSubOrder(t, w, short.SubscriptionID, D2).OrderID:  {false, istDayAt(D1, 12, 0).UTC().Format(time.RFC3339)},
-		liveSubOrder(t, w, funded.SubscriptionID, D2).OrderID: {false, istDayAt(D1, 12, 0).UTC().Format(time.RFC3339)},
 	}
-	if len(wire) != len(want) {
-		t.Fatalf("rows: %s", raw)
-	}
-	for _, r := range wire {
-		exp, ok := want[r["order_id"].(string)]
-		if !ok {
-			t.Fatalf("unexpected row %v", r)
+	check := func(at time.Time, want map[string]wantRow) {
+		t.Helper()
+		rows, err := w.svc.storeUpcomingAt(ctx, w.mgr, w.storeID.Hex(), at)
+		if err != nil {
+			t.Fatalf("storeUpcoming: %v", err)
 		}
-		if r["awaiting_funds"] != exp.awaiting || r["locks_at"] != exp.locksAt {
-			t.Fatalf("row %s %s: awaiting_funds=%v locks_at=%v, want %v %s", r["order_id"], r["delivery_date"], r["awaiting_funds"], r["locks_at"], exp.awaiting, exp.locksAt)
+		raw, _ := json.Marshal(rows)
+		var wire []map[string]any
+		_ = json.Unmarshal(raw, &wire)
+		if len(wire) != len(want) {
+			t.Fatalf("rows at %s: %s", at.In(istZone).Format("15:04"), raw)
+		}
+		for _, r := range wire {
+			exp, ok := want[r["order_id"].(string)]
+			if !ok {
+				t.Fatalf("unexpected row %v", r)
+			}
+			if r["awaiting_funds"] != exp.awaiting || r["locks_at"] != exp.locksAt {
+				t.Fatalf("row %s %s: awaiting_funds=%v locks_at=%v, want %v %s", r["order_id"], r["delivery_date"], r["awaiting_funds"], r["locks_at"], exp.awaiting, exp.locksAt)
+			}
 		}
 	}
+	noonD, noonD1 := istDayAt(D, 12, 0).UTC().Format(time.RFC3339), istDayAt(D1, 12, 0).UTC().Format(time.RFC3339)
+
+	// 12:02, the lock tick not run yet: tomorrow is past its cut-off, undecided.
+	check(istDayAt(D, 12, 2), map[string]wantRow{
+		liveSubOrder(t, w, short.SubscriptionID, D1).OrderID:  {true, noonD},
+		liveSubOrder(t, w, funded.SubscriptionID, D1).OrderID: {true, noonD},
+	})
+
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 5))
+	if liveSubOrder(t, w, short.SubscriptionID, D1) != nil {
+		t.Fatalf("the short member's tomorrow must be skipped at the lock")
+	}
+	check(istDayAt(D, 12, 30), map[string]wantRow{
+		liveSubOrder(t, w, short.SubscriptionID, D2).OrderID:  {false, noonD1},
+		liveSubOrder(t, w, funded.SubscriptionID, D2).OrderID: {false, noonD1},
+	})
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -364,10 +365,12 @@ func (r *repository) listSubscriptions(ctx context.Context, consumerID primitive
 	return out, nil
 }
 
-// listActiveSubscriptions — the worker's scan (all consumers, active only).
+// listActiveSubscriptions — the worker's scan (all consumers, active only),
+// oldest plan first: the catch-up funds a member's plans in the same order
+// the noon lock does (lockConsumerDay), whichever replica runs it.
 func (r *repository) listActiveSubscriptions(ctx context.Context) ([]subscription, error) {
 	cur, err := r.subscriptions.Find(ctx, bson.D{{Key: "status", Value: "active"}},
-		options.Find().SetLimit(5000))
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "subscription_id", Value: 1}}).SetLimit(5000))
 	if err != nil {
 		return nil, errInternal("subscriptions scan failed")
 	}
@@ -523,6 +526,62 @@ func (r *repository) listUnlockedSubOrdersFor(ctx context.Context, subID, throug
 	out := []order{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, errInternal("scheduled orders decode failed")
+	}
+	return out, nil
+}
+
+// listMemberDayPreviews is listUnlockedSubOrders for ONE member's day: the
+// previews the noon lock decides together (lockConsumerDay).
+func (r *repository) listMemberDayPreviews(ctx context.Context, userID, day string) ([]order, error) {
+	cur, err := r.orders.Find(ctx, bson.D{
+		{Key: "user_id", Value: userID},
+		{Key: "subscription_id", Value: bson.D{{Key: "$gt", Value: ""}}},
+		{Key: "scheduled_for", Value: day},
+		{Key: "status", Value: "placed"},
+		{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+	}, options.Find().SetLimit(100))
+	if err != nil {
+		return nil, errInternal("scheduled orders scan failed")
+	}
+	out := []order{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("scheduled orders decode failed")
+	}
+	return out, nil
+}
+
+// memberDayCommittedStatuses are the order statuses whose money the wallet
+// still owes (or, delivered on the day itself, already paid after the lock
+// moment - walletAsOf adds that debit back, so it is reserved here again).
+var memberDayCommittedStatuses = bson.A{"placed", "confirmed", "preparing", "assigned", "out_for_delivery", "delivered"}
+
+// listMemberDayCommitted is what a member's wallet already owes for day
+// before any preview is funded: the subscription orders already locked for
+// that day, and the wallet-paid one-off morning orders due on it (a one-off
+// order dated for a day is fixed once that day's cut-off has passed).
+func (r *repository) listMemberDayCommitted(ctx context.Context, userID, day string) ([]order, error) {
+	cur, err := r.orders.Find(ctx, bson.D{
+		{Key: "user_id", Value: userID},
+		{Key: "status", Value: bson.D{{Key: "$in", Value: memberDayCommittedStatuses}}},
+		{Key: "payment_method", Value: bson.D{{Key: "$in", Value: bson.A{"wallet", "prepaid"}}}},
+		{Key: "lane", Value: bson.D{{Key: "$ne", Value: "instant"}}},
+		{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "delivery_date", Value: day}},
+				bson.D{{Key: "scheduled_for", Value: day}},
+			}}},
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "sub_locked_at", Value: bson.D{{Key: "$gt", Value: ""}}}},
+				bson.D{{Key: "subscription_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}},
+			}}},
+		}},
+	}, options.Find().SetLimit(200))
+	if err != nil {
+		return nil, errInternal("committed orders scan failed")
+	}
+	out := []order{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("committed orders decode failed")
 	}
 	return out, nil
 }
@@ -877,11 +936,15 @@ func (s *service) patchSubscriptionAt(ctx context.Context, consumerID primitive.
 //                reconcile it, pause/vacation cancel it (claim released), a
 //                direct order cancel skips the day.
 //   12:00 IST    LOCK - tomorrow's preview is re-checked against the LIVE
-//                subscription, its line refreshed, the wallet floor enforced,
-//                then the store delivery task is created. From here edits no
+//                subscription, its line refreshed, funded from the wallet as
+//                it stood at 12:00:00 (the member's plans oldest first), then
+//                the store delivery task is created. From here edits no
 //                longer touch it: a change made after noon applies to the day
-//                after tomorrow. An unfunded preview is retried every tick
-//                until its route leaves (05:00 on its day), then expires.
+//                after tomorrow. A preview the noon wallet does not cover is
+//                closed at once as a skipped day (wallet_short, the claim
+//                kept, subscription.day_skipped for D-07): a top-up after
+//                noon reaches the day after tomorrow, never a late task
+//                (lockConsumerDay).
 //   05:00-07:30  The morning route delivers; money settles on delivery.
 //   later        MISSED - a locked order whose day passed with no delivery is
 //                closed (closeMissedSubscriptionOrders) so it never reads as
@@ -1123,16 +1186,13 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 	s.closeMissedSubscriptionOrders(ctx, now)
 
 	// 2) LOCK — every preview whose day's noon has passed (today's, and from
-	//    noon tomorrow's). Re-evaluate each against the live subscription: a
-	//    pause/cancel/vacation made before the cut-off kills it; otherwise
-	//    refresh the line, enforce the wallet floor (unfunded → retried every
-	//    tick), then create the store delivery task.
+	//    noon tomorrow's), decided once per member and day (lockConsumerDay):
+	//    re-checked against the live subscription, funded from the wallet as
+	//    it stood at 12:00:00 oldest plan first, then locked with its store
+	//    task, or closed as a skipped day when the wallet did not cover it.
 	if due, err := s.repo.listUnlockedSubOrders(ctx, bson.D{{Key: "$lte", Value: lockedThrough}}); err == nil {
-		for i := range due {
-			sub, _ := s.repo.findSubscriptionByID(ctx, due[i].SubscriptionID)
-			if s.lockSubPreview(ctx, &due[i], sub, now) {
-				placed++
-			}
+		for _, md := range subMemberDays(due) {
+			placed += s.lockConsumerDay(ctx, md.userID, md.day, now)
 		}
 	}
 
@@ -1171,36 +1231,142 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 	return placed
 }
 
-// lockSubPreview is the LOCK step for one preview whose day is past its noon
-// cut-off: re-checked against sub (a pause/cancel/vacation made before the
-// cut-off cancels it; otherwise the line is refreshed), the wallet floor
-// enforced (unfunded -> left for the next tick), then locked with its store
-// task. Returns whether this call locked it.
-func (s *service) lockSubPreview(ctx context.Context, o *order, sub *subscription, now time.Time) bool {
-	// A day whose morning route has left is past locking: the preview
-	// expires. Retried until then (an unfunded preview at the cut-off, a
-	// member topping up in the night) it still makes the round; after it, a
-	// task minted for a round already gone was closed as missed the next noon
-	// and the member told the day was missed about 30 hours later.
-	if rs := routeStartFor(o.ScheduledFor); !rs.IsZero() && !now.Before(rs) {
-		s.cancelScheduledSubOrder(ctx, o)
-		return false
-	}
-	// The tick runs every 15 minutes, so it can reach a day after its lock
-	// moment has passed. A member change stamped after that moment belongs to
-	// the next editable day (the noon rule), so the preview locks as it
-	// stands: no cancel, no refresh.
-	asPreviewed := sub != nil && !sub.subChangedBefore(lockMomentFor(o.ScheduledFor))
-	if !asPreviewed {
-		if sub == nil || !subscriptionDueOn(sub, o.ScheduledFor) {
-			s.cancelScheduledSubOrder(ctx, o)
-			return false
+// subMemberDay is one member's delivery day, the unit the noon lock decides.
+type subMemberDay struct{ userID, day string }
+
+// subMemberDays is the distinct (member, day) pairs of a set of previews, in
+// a stable order.
+func subMemberDays(previews []order) []subMemberDay {
+	seen := map[subMemberDay]bool{}
+	var out []subMemberDay
+	for i := range previews {
+		md := subMemberDay{userID: previews[i].UserID, day: previews[i].ScheduledFor}
+		if md.userID == "" || md.day == "" || seen[md] {
+			continue
 		}
-		o = s.refreshSubOrder(ctx, o, sub)
+		seen[md] = true
+		out = append(out, md)
 	}
-	if wv, werr := s.wallet(ctx, sub.ConsumerID); werr != nil || wv.Available < o.Total {
-		return false
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].day != out[j].day {
+			return out[i].day < out[j].day
+		}
+		return out[i].userID < out[j].userID
+	})
+	return out
+}
+
+// lockConsumerDay is the noon LOCK for one member's delivery day, once its
+// cut-off (lockMomentFor) has passed. Every preview the member still holds
+// for that day is decided exactly once, the same way whichever tick,
+// replica or member change gets there first:
+//
+//  1. Re-checked against its plan: a plan changed before the cut-off
+//     decides the day as it is now (a pause, cancel or vacation cancels the
+//     preview; an edit refreshes its line); a plan changed after the cut-off
+//     keeps the day as previewed (the change belongs to the next editable
+//     day).
+//  2. Funded, oldest plan first, from the wallet as it stood at 12:00:00
+//     (walletAsOf: identical at 12:00:05 and 12:14:59), less what the member
+//     already owes that day (orders already locked, one-off morning orders).
+//  3. Covered: locked, with its store task. Not covered: closed at once as a
+//     skipped day (skipSubPreview), never retried on later ticks, so a
+//     top-up after noon cannot mint a late task; the plan stays active and
+//     the next editable day is previewed as usual.
+//
+// A day whose morning route has left is past locking: its previews expire
+// (cancelled, the day stays skipped, no task, no message) instead of
+// minting a task for a round already gone. A read failure decides nothing;
+// the next tick decides the same way. Returns how many previews this call
+// locked.
+func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now time.Time) int {
+	lockAt := lockMomentFor(day)
+	if lockAt.IsZero() || now.Before(lockAt) {
+		return 0 // before its cut-off the day is still an editable preview
 	}
+	previews, err := s.repo.listMemberDayPreviews(ctx, userID, day)
+	if err != nil || len(previews) == 0 {
+		return 0
+	}
+	if rs := routeStartFor(day); !rs.IsZero() && !now.Before(rs) {
+		for i := range previews {
+			s.cancelScheduledSubOrder(ctx, &previews[i])
+		}
+		return 0
+	}
+	type candidate struct {
+		o   *order
+		sub *subscription
+	}
+	var cands []candidate
+	for i := range previews {
+		o := &previews[i]
+		sub, serr := s.repo.findSubscriptionByID(ctx, o.SubscriptionID)
+		if serr != nil {
+			return 0
+		}
+		// The tick runs every 15 minutes, so it can reach a day after its lock
+		// moment has passed. A member change stamped after that moment belongs
+		// to the next editable day (the noon rule), so the preview is decided
+		// as it stands: no cancel, no refresh.
+		asPreviewed := sub != nil && !sub.subChangedBefore(lockAt)
+		if !asPreviewed {
+			if sub == nil || !subscriptionDueOn(sub, day) {
+				s.cancelScheduledSubOrder(ctx, o)
+				continue
+			}
+			o = s.refreshSubOrder(ctx, o, sub)
+		}
+		cands = append(cands, candidate{o: o, sub: sub})
+	}
+	if len(cands) == 0 {
+		return 0
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		a, b := cands[i].sub, cands[j].sub
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		return a.SubscriptionID < b.SubscriptionID
+	})
+	cid, cerr := primitive.ObjectIDFromHex(userID)
+	if cerr != nil {
+		return 0
+	}
+	avail, werr := s.walletAsOf(ctx, cid, lockAt, now)
+	if werr != nil {
+		s.log.WarnContext(ctx, "noon lock: wallet read failed - the day is decided on a later tick",
+			"consumer", userID, "day", day, "err", werr)
+		return 0
+	}
+	committed, cmerr := s.repo.listMemberDayCommitted(ctx, userID, day)
+	if cmerr != nil {
+		return 0
+	}
+	for i := range committed {
+		avail -= committed[i].Total
+	}
+	avail = round2(avail)
+	locked := 0
+	for _, c := range cands {
+		cost := round2(c.o.Total)
+		if avail >= cost {
+			if s.lockSubOrder(ctx, c.o, now) {
+				locked++
+			}
+			// Reserved whether or not this call won the lock: a replica that
+			// won it made the same decision on the same wallet.
+			avail = round2(avail - cost)
+			continue
+		}
+		s.skipSubPreview(ctx, c.o, round2(cost-avail), now)
+	}
+	return locked
+}
+
+// lockSubOrder locks one funded preview: the guarded stamp (placed, never
+// locked - a replica that got there first owns it), then the store task.
+func (s *service) lockSubOrder(ctx context.Context, o *order, now time.Time) bool {
 	upd, uerr := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
 		bson.D{{Key: "sub_locked_at", Value: now.UTC().Format(time.RFC3339)}},
 		bson.D{
@@ -1214,21 +1380,52 @@ func (s *service) lockSubPreview(ctx context.Context, o *order, sub *subscriptio
 	return true
 }
 
-// lockPreviewsBeforeChange runs the LOCK step for this plan's previews whose
-// cut-off has passed but that no tick has locked yet, against the plan AS IT
-// STOOD, before a member change made at now is written. changed_at keeps
-// only the LAST change and the tick runs every 15 minutes, so without this a
-// change made before noon followed by another before the first tick after
-// noon was lost: the tick saw a plan changed after the lock moment and
+// skipSubPreview closes a preview the member's noon wallet could not cover:
+// cancelled by "wallet_short" (guarded on a still-unlocked, placed preview,
+// so it can never race a lock into two outcomes), the day claim KEPT so the
+// day is never previewed again, no task, no money. subscription.day_skipped
+// tells the CRM (D-07). Returns whether this call closed it.
+func (s *service) skipSubPreview(ctx context.Context, o *order, shortfall float64, now time.Time) bool {
+	if _, err := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
+		bson.D{
+			{Key: "status", Value: "cancelled"},
+			{Key: "cancelled_by", Value: orderCancelledByWalletShort},
+			{Key: "skipped_at", Value: now.UTC()},
+		},
+		bson.D{
+			{Key: "status", Value: "placed"},
+			{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+		}); err != nil {
+		return false // locked, cancelled or skipped by another path first
+	}
+	s.log.InfoContext(ctx, "noon lock: day skipped - the wallet at 12:00 did not cover it",
+		"subscription", o.SubscriptionID, "day", o.ScheduledFor, "shortfall", shortfall)
+	if cid, err := primitive.ObjectIDFromHex(o.UserID); err == nil {
+		s.emitCRMEvent(ctx, "subscription.day_skipped", cid, map[string]any{
+			"subscription_id": o.SubscriptionID, "day": o.ScheduledFor,
+			"reason": orderCancelledByWalletShort, "shortfall": shortfall,
+		})
+	}
+	return true
+}
+
+// lockPreviewsBeforeChange runs the LOCK for every day of this plan whose
+// cut-off has passed but that no tick has decided yet, against the plans AS
+// THEY STOOD, before a member change made at now is written. changed_at
+// keeps only the LAST change and the tick runs every 15 minutes, so without
+// this a change made before noon followed by another before the first tick
+// after noon was lost: the tick saw a plan changed after the lock moment and
 // locked tomorrow as previewed (a pause at 11:50 and a resume at 12:05 still
-// delivered and billed tomorrow; a qty edit at 11:50 never reached it).
+// delivered and billed tomorrow; a qty edit at 11:50 never reached it). The
+// whole member-day is decided, so the member's other plans are funded in the
+// same order the tick would have used.
 func (s *service) lockPreviewsBeforeChange(ctx context.Context, sub *subscription, now time.Time) {
 	due, err := s.repo.listUnlockedSubOrdersFor(ctx, sub.SubscriptionID, lockedThroughDay(now))
 	if err != nil {
 		return
 	}
-	for i := range due {
-		s.lockSubPreview(ctx, &due[i], sub, now)
+	for _, md := range subMemberDays(due) {
+		s.lockConsumerDay(ctx, md.userID, md.day, now)
 	}
 }
 
@@ -1236,7 +1433,7 @@ func (s *service) lockPreviewsBeforeChange(ctx context.Context, sub *subscriptio
 // and 4) for ONE subscription. The worker calls it for every active
 // subscription; createSubscription's handler calls it right after the insert,
 // so a new subscriber's preview exists at once instead of on the next
-// 15-minute tick. Same claims, same wallet floor — so the two callers can
+// 15-minute tick. Same claims, same noon lock — so the two callers can
 // never double-order a day. Returns how many orders went LIVE.
 func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, now time.Time) int {
 	today := istToday(now)
@@ -1249,23 +1446,23 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 	//    preview and the lock should have run still puts the milk on the
 	//    route. A plan created, resumed or edited after the cut-off does not
 	//    reach that day - it starts on the first editable one (the noon rule
-	//    for new orders and changes). Wallet floor, claim, create LOCKED.
+	//    for new orders and changes). Claim, preview, then the same LOCK as
+	//    every other day (lockConsumerDay): the wallet as it stood at that
+	//    day's 12:00, the member's plans funded oldest first, a short day
+	//    skipped once. A day whose route has already left is not caught up.
 	for day := today; day <= lockedThrough; day = addDaysIST(day, 1) {
 		if sub.claimed(day) || !subscriptionDueOn(sub, day) || !sub.subChangedBefore(lockMomentFor(day)) {
+			continue
+		}
+		if rs := routeStartFor(day); !rs.IsZero() && !now.Before(rs) {
 			continue
 		}
 		addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID)
 		if aerr != nil {
 			continue
 		}
-		cost := round2(s.subscriptionLinePrice(ctx, sub)*float64(sub.Qty)) + subscriptionDeliveryFee // must match the fee-free debit
-		if wv, werr := s.wallet(ctx, sub.ConsumerID); werr != nil || wv.Available < cost {
-			continue
-		}
 		if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, day); won {
-			if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, day, true, now); oerr == nil {
-				placed++
-			} else {
+			if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, day, false, now); oerr != nil {
 				// The claim is what stops a second order for this day, so a
 				// claim with no order behind it means the day is now skipped
 				// FOREVER: the next tick sees it claimed and moves on, and
@@ -1275,7 +1472,9 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 				s.repo.unclaimSubscriptionDay(ctx, sub.SubscriptionID, day)
 				s.log.ErrorContext(ctx, "subscription sweep: catch-up order failed — day released for retry",
 					"subscription", sub.SubscriptionID, "day", day, "err", oerr)
+				continue
 			}
+			placed += s.lockConsumerDay(ctx, sub.ConsumerID.Hex(), day, now)
 		}
 	}
 	// 4) PREVIEW — materialise the first still-editable day as a visible,
@@ -1299,6 +1498,11 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 // delivery day passed with no delivery. Distinct from a task's cancel
 // (orderCancelledByDelivery) so a rider's undo can never resurrect it.
 const orderCancelledByMissed = "missed"
+
+// orderCancelledByWalletShort marks a preview the noon lock closed because
+// the member's wallet, as it stood at 12:00:00 the day before, could not
+// cover it: a skipped day (the claim is kept, so it is never re-previewed).
+const orderCancelledByWalletShort = "wallet_short"
 
 // The words a missed close writes where people read them: the task's
 // failure reason (the rider and store consoles print it after "Reported:")

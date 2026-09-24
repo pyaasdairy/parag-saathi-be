@@ -57,9 +57,13 @@ type upcomingRow struct {
 	Items          []upcomingItem `json:"items"`
 	Source         string         `json:"source"`
 	// AwaitingFunds marks a subscription preview whose noon cut-off has
-	// passed without it locking: the wallet did not cover it, and it ships
-	// only if the member tops up before its day. LocksAt is a preview's
-	// cut-off (RFC3339 UTC; "" on a scheduled one-off order). Additive keys.
+	// passed but that no lock has decided yet (the seconds between 12:00 and
+	// the lock tick, or a server that was down over noon). The lock decides
+	// it on the wallet as it stood at 12:00 (lockConsumerDay): locked, it
+	// leaves this list for the store's task queue; short, it is skipped and
+	// leaves this list for good - it no longer lingers waiting for a top-up.
+	// LocksAt is a preview's cut-off (RFC3339 UTC; "" on a scheduled one-off
+	// order). Additive keys.
 	AwaitingFunds bool   `json:"awaiting_funds"`
 	LocksAt       string `json:"locks_at"`
 }
