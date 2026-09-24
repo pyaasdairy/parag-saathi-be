@@ -570,83 +570,114 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 		return nil, perr
 	}
 
-	// A member whose enrolment already FINISHED is retrying (a timeout, a
-	// double tap, the operator enrolling the household again): answer 409
-	// ALREADY_ENROLLED, which the app routes to the tabs, as the arbitration
-	// below would. It must come before the eligibility reads: enrolment
-	// itself exhausts the 2+2 trial and registers the household claim, so
-	// those reads refused the member's own offer as NOT_ELIGIBLE. Only a
-	// finished offer answers here (an unfinished one is left to the
-	// arbitration, as before), and a failed read falls through to the old
-	// path, so no one else's eligibility changes.
-	if existing, ferr := s.repo.findOffer(ctx, acct.ID); ferr == nil && existing != nil && existing.Pack1OrderID != "" {
-		return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+existing.OfferID)
+	// The member's OWN offer decides first. Enrolment itself exhausts the 2+2
+	// trial (step 5) and registers the household claim, so the eligibility
+	// reads below refuse the member's own offer as NOT_ELIGIBLE:
+	//   - FINISHED (pack 1 minted): a retry (a timeout, a double tap, the
+	//     operator enrolling the household again) answers 409
+	//     ALREADY_ENROLLED, which the app routes to the tabs, as the
+	//     arbitration below would.
+	//   - UNFINISHED (step 6 failed, or a crash mid-mint): the member passed
+	//     the eligibility reads when the offer was inserted, and GET
+	//     /crm/eligibility already says already_enrolled. The retry skips the
+	//     reads and RESUMES that offer at step 5.
+	// A failed read falls through to the reads, so no one else's eligibility
+	// changes.
+	var resume *consumerOffer
+	if existing, ferr := s.repo.findOffer(ctx, acct.ID); ferr == nil && existing != nil {
+		if existing.Pack1OrderID != "" {
+			return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+existing.OfferID)
+		}
+		resume = existing
 	}
 
 	// 2) eligibility — plain reads first; the unique (consumer, offer) index on
 	// the offer INSERT below is the race-proof arbiter (nothing is minted until
 	// this consumer owns the offer doc).
-	if acct.HasPaidOrder {
-		return nil, errUnprocessable("NOT_ELIGIBLE", "this customer has already paid for an order")
+	if resume == nil {
+		if acct.HasPaidOrder {
+			return nil, errUnprocessable("NOT_ELIGIBLE", "this customer has already paid for an order")
+		}
+		// has_paid_order only exists from this release forward — a PRE-CRM paying
+		// customer carries none, so also refuse anyone with real order history.
+		// (Campaign spec: the Welcome Litre is for households that have never paid.)
+		if n, cerr := s.repo.orders.CountDocuments(ctx, bson.D{
+			{Key: "user_id", Value: acct.ID.Hex()},
+			{Key: "total", Value: bson.D{{Key: "$gt", Value: 0}}},
+			{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+		}); cerr != nil {
+			return nil, errInternal("order history check failed")
+		} else if n > 0 {
+			return nil, errUnprocessable("NOT_ELIGIBLE", "this customer already has paid order history")
+		}
+		// The trial and household reads are the two the member's OWN
+		// concurrent enrolment trips (a double tap: the other request inserted
+		// the offer and used the trial after the read above found no offer),
+		// so a refusal re-reads the member's offer before it stands.
+		if t, terr := s.repo.getOrCreateTrial(ctx, acct.ID); terr == nil && (t.DeliveredPaid > 0 || t.DeliveredFree > 0) {
+			own, rerr := s.crmOwnOfferAfterRefusal(ctx, acct.ID,
+				errUnprocessable("NOT_ELIGIBLE", "this customer already has welcome-trial activity"))
+			if rerr != nil {
+				return nil, rerr
+			}
+			resume = own
+		}
 	}
-	// has_paid_order only exists from this release forward — a PRE-CRM paying
-	// customer carries none, so also refuse anyone with real order history.
-	// (Campaign spec: the Welcome Litre is for households that have never paid.)
-	if n, cerr := s.repo.orders.CountDocuments(ctx, bson.D{
-		{Key: "user_id", Value: acct.ID.Hex()},
-		{Key: "total", Value: bson.D{{Key: "$gt", Value: 0}}},
-		{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
-	}); cerr != nil {
-		return nil, errInternal("order history check failed")
-	} else if n > 0 {
-		return nil, errUnprocessable("NOT_ELIGIBLE", "this customer already has paid order history")
-	}
-	if t, terr := s.repo.getOrCreateTrial(ctx, acct.ID); terr == nil && (t.DeliveredPaid > 0 || t.DeliveredFree > 0) {
-		return nil, errUnprocessable("NOT_ELIGIBLE", "this customer already has welcome-trial activity")
-	}
-	// ONE WELCOME PER HOUSEHOLD, FOREVER: the free_pack_claims registry is
-	// keyed by PHONE and deliberately SURVIVES account erasure, so
-	// delete-account → re-signup cannot re-arm this offer (or the 2+2 — both
-	// welcome offers share the registry). Read-only here; the registry is
-	// WRITTEN only after the offer doc wins arbitration below.
-	if claimed, ok := s.crmHouseholdClaimed(ctx, acct.ID, acct.Phone); ok && claimed {
-		return nil, errUnprocessable("NOT_ELIGIBLE", "this household has already used a welcome offer")
+	if resume == nil {
+		// ONE WELCOME PER HOUSEHOLD, FOREVER: the free_pack_claims registry is
+		// keyed by PHONE and deliberately SURVIVES account erasure, so
+		// delete-account → re-signup cannot re-arm this offer (or the 2+2 — both
+		// welcome offers share the registry). Read-only here; the registry is
+		// WRITTEN only after the offer doc wins arbitration below.
+		if claimed, ok := s.crmHouseholdClaimed(ctx, acct.ID, acct.Phone); ok && claimed {
+			own, rerr := s.crmOwnOfferAfterRefusal(ctx, acct.ID,
+				errUnprocessable("NOT_ELIGIBLE", "this household has already used a welcome offer"))
+			if rerr != nil {
+				return nil, rerr
+			}
+			resume = own
+		}
 	}
 
-	// 3) abuse signals — flag, never reject.
-	hash := crmAddressHash(in.Line1, in.Pincode, in.Lat, in.Lng)
+	var offer *consumerOffer
 	flagged := false
-	if dupes, derr := s.repo.findOffersByAddressHash(ctx, hash); derr == nil && len(dupes) > 0 {
-		flagged = true
-	}
+	if resume != nil {
+		// Resuming the member's own unfinished offer: it already won the
+		// arbitration (and carries its abuse flag) when it was inserted.
+		offer, flagged = resume, resume.AbuseFlagged
+	} else {
+		// 3) abuse signals — flag, never reject.
+		hash := crmAddressHash(in.Line1, in.Pincode, in.Lat, in.Lng)
+		if dupes, derr := s.repo.findOffersByAddressHash(ctx, hash); derr == nil && len(dupes) > 0 {
+			flagged = true
+		}
 
-	// 4) THE ARBITRATION POINT — insert the offer FIRST, before any minting.
-	// Two concurrent enrols both reach here; the unique (consumer_id, offer_id)
-	// index lets exactly one through, and the loser has created NOTHING yet —
-	// no orphan subscription, no orphan ₹0 order, no double free milk.
-	// A crash between here and the finalize below leaves an INCOMPLETE offer
-	// (pack1_order_id "") which the next enrol call RESUMES instead of refusing.
-	now := at.UTC()
-	offer := &consumerOffer{
-		ConsumerID: acct.ID, OfferID: offerWelcomeLitre, EnrolledAt: now,
-		Pack1State: pack1Pending, Pack2State: pack2Locked, Source: source,
-		SocietyID: in.SocietyID, PromoterID: in.PromoterID, AssetType: in.AssetType,
-		AddressHash: hash, AbuseFlagged: flagged,
-		Transitions: []offerTransition{{PackNo: 1, From: "", To: pack1Pending, Reason: "enrolled by " + actor, At: now}},
-		CreatedAt:   now, UpdatedAt: now,
-	}
-	freshOffer := true
-	if err := s.repo.insertOffer(ctx, offer); err != nil {
-		existing, e2 := s.repo.findOffer(ctx, acct.ID)
-		if e2 != nil || existing == nil {
-			return nil, err // real conflict surfaced as-is
+		// 4) THE ARBITRATION POINT — insert the offer FIRST, before any minting.
+		// Two concurrent enrols both reach here; the unique (consumer_id, offer_id)
+		// index lets exactly one through, and the loser has created NOTHING yet —
+		// no orphan subscription, no orphan ₹0 order, no double free milk.
+		// A crash between here and the finalize below leaves an INCOMPLETE offer
+		// (pack1_order_id "") which the next enrol call RESUMES instead of refusing.
+		now := at.UTC()
+		offer = &consumerOffer{
+			ConsumerID: acct.ID, OfferID: offerWelcomeLitre, EnrolledAt: now,
+			Pack1State: pack1Pending, Pack2State: pack2Locked, Source: source,
+			SocietyID: in.SocietyID, PromoterID: in.PromoterID, AssetType: in.AssetType,
+			AddressHash: hash, AbuseFlagged: flagged,
+			Transitions: []offerTransition{{PackNo: 1, From: "", To: pack1Pending, Reason: "enrolled by " + actor, At: now}},
+			CreatedAt:   now, UpdatedAt: now,
 		}
-		if existing.Pack1OrderID != "" {
-			return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+existing.OfferID)
+		if err := s.repo.insertOffer(ctx, offer); err != nil {
+			existing, e2 := s.repo.findOffer(ctx, acct.ID)
+			if e2 != nil || existing == nil {
+				return nil, err // real conflict surfaced as-is
+			}
+			if existing.Pack1OrderID != "" {
+				return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+existing.OfferID)
+			}
+			// Incomplete twin (crashed or racing mid-mint) — resume it.
+			offer, flagged = existing, existing.AbuseFlagged
 		}
-		// Incomplete twin (crashed or racing mid-mint) — resume it.
-		offer, freshOffer = existing, false
-		flagged = existing.AbuseFlagged
 	}
 
 	// 5) offer exclusivity: exhaust the 2+2 so the offers can never stack.
@@ -704,10 +735,16 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 	}
 	if res.ModifiedCount == 0 {
 		// A concurrent resume finalized first — retract our duplicates and
-		// report the winner's result.
-		retractSub()
+		// report the winner's result. The plan this call minted is retracted
+		// unless the winner finalized WITH it: a concurrent resume adopts a
+		// plan it finds (crmEnsureSubscriptionAt), so the winner may ride the
+		// plan this call minted, and deleting it would leave the finished
+		// offer pointing at no plan.
 		s.crmRetractPromoOrder(ctx, pack1.OrderID)
 		winner, werr := s.repo.findOffer(ctx, acct.ID)
+		if winner == nil || winner.SubscriptionID != sub.SubscriptionID {
+			retractSub()
+		}
 		if werr != nil || winner == nil || winner.Pack1OrderID == "" {
 			return nil, errConflict("ALREADY_ENROLLED", "enrolment finished on a concurrent request")
 		}
@@ -723,17 +760,21 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 	// consumer case (phone is unique on accounts) logs and never unwinds.
 	s.crmRegisterHouseholdClaim(ctx, acct.ID, acct.Phone)
 
-	if freshOffer {
-		s.emitCRMEvent(ctx, "offer_enrolled", acct.ID, map[string]any{
-			"offer_id": offerWelcomeLitre, "source": source, "society_id": in.SocietyID,
-			"promoter_id": in.PromoterID, "asset_type": in.AssetType,
+	// offer_enrolled (and the abuse notice) come from the ONE request that won
+	// the finalize, fresh or resumed: exactly once per offer. Only the request
+	// that inserted the offer used to emit, so an offer finished by a resume
+	// (a retry after a failed step 6, or the other tap of a double tap
+	// winning the finalize) was never counted. The attribution is the offer's
+	// own, recorded when it was inserted.
+	s.emitCRMEvent(ctx, "offer_enrolled", acct.ID, map[string]any{
+		"offer_id": offerWelcomeLitre, "source": offer.Source, "society_id": offer.SocietyID,
+		"promoter_id": offer.PromoterID, "asset_type": offer.AssetType,
+	})
+	if flagged {
+		s.crmNotifyAdmins(ctx, "CRM_ABUSE_FLAG", map[string]string{
+			"phone": phone, "reason": "address_hash match — second offer at the same address (review, do not auto-reject)",
 		})
-		if flagged {
-			s.crmNotifyAdmins(ctx, "CRM_ABUSE_FLAG", map[string]string{
-				"phone": phone, "reason": "address_hash match — second offer at the same address (review, do not auto-reject)",
-			})
-			s.emitCRMEvent(ctx, "abuse_flag_raised", acct.ID, map[string]any{"rule": "address_match", "entity": "offer"})
-		}
+		s.emitCRMEvent(ctx, "abuse_flag_raised", acct.ID, map[string]any{"rule": "address_match", "entity": "offer"})
 	}
 	// W-01 — welcome confirmation. Dispatched by the WORKER (crmRouteEvent),
 	// never on the request: the SMS leg is a 10 s provider call, and an app
@@ -915,6 +956,22 @@ func (s *service) crmValidatePlan(in crmEnrolInput, cfg crmOffer) (string, int, 
 		return "", 0, "", errUnprocessable("BELOW_MILK_FLOOR", "a delivery day must total at least 1 litre")
 	}
 	return product, qty, freq, nil
+}
+
+// crmOwnOfferAfterRefusal decides an eligibility refusal the member's OWN
+// concurrent enrolment may have caused (the trial it used, the claim it
+// registered). It re-reads the member's offer: a finished one answers 409
+// ALREADY_ENROLLED, an unfinished one is returned for the caller to resume,
+// and with no offer (or a failed read) the refusal stands.
+func (s *service) crmOwnOfferAfterRefusal(ctx context.Context, consumerID primitive.ObjectID, refusal error) (*consumerOffer, error) {
+	own, err := s.repo.findOffer(ctx, consumerID)
+	if err != nil || own == nil {
+		return nil, refusal
+	}
+	if own.Pack1OrderID != "" {
+		return nil, errConflict("ALREADY_ENROLLED", "already enrolled in "+own.OfferID)
+	}
+	return own, nil
 }
 
 // ── One welcome per household (free_pack_claims, shared with the 2+2 gate) ──
