@@ -379,3 +379,82 @@ func TestReferralRewardWaitsForAPaidDelivery(t *testing.T) {
 		t.Fatalf("referee reward rows: %d want 1", n)
 	}
 }
+
+// A friend's code is for a new family: an account that has already had a
+// paid delivery cannot apply one (it would pay Rs 100 to both sides for a
+// customer the programme did not bring), and two members cannot refer each
+// other (each side collected Rs 200). A Rs 0 Welcome Litre pack does not make
+// a family established, and re-applying the code already linked stays 200.
+func TestReferralApplyRefusesEstablishedAndCircular(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	h := &handler{svc: w.svc}
+	a := w.customer(t, "9000007301", 500)
+	b := w.customer(t, "9000007302", 500)
+	c := w.customer(t, "9000007303", 500)
+	d := w.customer(t, "9000007304", 0)
+	// Distinct stored codes: same-second accounts derive colliding ones.
+	for cid, code := range map[primitive.ObjectID]string{a: "PGAAA1", b: "PGBBB2"} {
+		if _, err := w.db.Collection(collAccounts).UpdateOne(ctx, bson.D{{Key: "_id", Value: cid}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "referral_code", Value: code}}}}); err != nil {
+			t.Fatalf("code: %v", err)
+		}
+	}
+	apply := func(cid primitive.ObjectID, code string) (int, string) {
+		return referralAPI(t, w, cid, http.MethodPost, "/referrals/apply", `{"code":"`+code+`"}`, h.applyReferral)
+	}
+	notEligible := func(step string, status int, body string) {
+		t.Helper()
+		if status != 422 || !strings.Contains(body, `"code":"REFERRAL_NOT_ELIGIBLE"`) {
+			t.Fatalf("%s: %d %s want 422 REFERRAL_NOT_ELIGIBLE", step, status, body)
+		}
+	}
+
+	// B joins with A's code; A then tries B's: circular.
+	if code, body := apply(b, "PGAAA1"); code != 200 {
+		t.Fatalf("B applies A: %d %s", code, body)
+	}
+	code, body := apply(a, "PGBBB2")
+	notEligible("A applies the code of the family A referred", code, body)
+
+	// C already had a paid delivery: an existing customer, not a new family.
+	ord, err := w.svc.createOrder(ctx, c.Hex(), orderInput{
+		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Qty: 1, Price: 35}},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow", Lane: "morning",
+	})
+	if err != nil {
+		t.Fatalf("order: %v", err)
+	}
+	chainDeliver(t, w, ord.OrderID)
+	code, body = apply(c, "PGAAA1")
+	notEligible("a customer with a paid delivery", code, body)
+
+	// D only received the Rs 0 Welcome Litre pack: still a new family.
+	acct, _ := w.svc.repo.findAccountByID(ctx, d)
+	addrs, _ := w.svc.repo.listAddresses(ctx, d)
+	pack, err := w.svc.mintPromoPackOrder(ctx, acct, &addrs[0], addDaysIST(istToday(time.Now()), 1), 1)
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	chainDeliver(t, w, pack.OrderID)
+	if code, body := apply(d, "PGAAA1"); code != 200 {
+		t.Fatalf("a family that only had the free pack: %d %s", code, body)
+	}
+
+	// B's own link survives B becoming a paying customer: re-apply is 200.
+	ordB, err := w.svc.createOrder(ctx, b.Hex(), orderInput{
+		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Qty: 1, Price: 35}},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow", Lane: "morning",
+	})
+	if err != nil {
+		t.Fatalf("order B: %v", err)
+	}
+	chainDeliver(t, w, ordB.OrderID)
+	if code, body := apply(b, "PGAAA1"); code != 200 {
+		t.Fatalf("re-applying the linked code: %d %s", code, body)
+	}
+	if n, _ := w.db.Collection(collReferrals).CountDocuments(ctx, bson.D{}); n != 2 {
+		t.Fatalf("referral links: %d want 2 (B<-A, D<-A)", n)
+	}
+}

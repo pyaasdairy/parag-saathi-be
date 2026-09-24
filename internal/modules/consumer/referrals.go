@@ -294,9 +294,30 @@ func referralResult(ref *referral) applyReferralResult {
 	}
 }
 
+func errReferralNotEligible(msg string) *apiError {
+	return errUnprocessable("REFERRAL_NOT_ELIGIBLE", msg)
+}
+
+// hasPaidDelivery reports whether the consumer already had a delivered order
+// with a positive total that was not a Welcome Litre promotional pack.
+func (r *repository) hasPaidDelivery(ctx context.Context, consumerID primitive.ObjectID) (bool, error) {
+	n, err := r.orders.CountDocuments(ctx, bson.D{
+		{Key: "user_id", Value: consumerID.Hex()},
+		{Key: "status", Value: "delivered"},
+		{Key: "total", Value: bson.D{{Key: "$gt", Value: 0}}},
+		{Key: "offer_pack", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$gt", Value: 0}}}}},
+	}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, errInternal("order history lookup failed")
+	}
+	return n > 0, nil
+}
+
 // applyReferral links the caller (the referee) to the code's owner once.
 // Idempotent on the same code; a different code after a link is refused; a
-// member cannot use their own code; an unknown code is a 404.
+// member cannot use their own code; an unknown code is a 404; a caller who
+// is not a new family (already had a paid delivery, or was referred by the
+// caller's own referee) is refused with 422 REFERRAL_NOT_ELIGIBLE.
 func (s *service) applyReferral(ctx context.Context, refereeID primitive.ObjectID, rawCode string) (*applyReferralResult, error) {
 	code := normalizeReferralCode(rawCode)
 	if code == "" {
@@ -326,6 +347,19 @@ func (s *service) applyReferral(ctx context.Context, refereeID primitive.ObjectI
 			return &out, nil
 		}
 		return nil, errConflict("ALREADY_REFERRED", "A friend's code is already on this account.")
+	}
+	// A code brings a NEW family: a caller the code's owner referred cannot
+	// refer them back (each side collected Rs 200), and an account that
+	// already had a paid delivery is a customer the programme did not bring.
+	if back, err := s.repo.findReferralByReferee(ctx, referrer.ID); err != nil {
+		return nil, err
+	} else if back != nil && back.ReferrerID == refereeID {
+		return nil, errReferralNotEligible("You invited this family, so their code cannot be used on your account.")
+	}
+	if paid, err := s.repo.hasPaidDelivery(ctx, refereeID); err != nil {
+		return nil, err
+	} else if paid {
+		return nil, errReferralNotEligible("A friend's code works only before your first paid delivery.")
 	}
 	ref := &referral{
 		ID: primitive.NewObjectID(), ReferrerID: referrer.ID, RefereeID: refereeID, Code: code,
