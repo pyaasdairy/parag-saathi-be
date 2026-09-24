@@ -535,6 +535,26 @@ func (r *repository) listUnlockedSubOrdersFor(ctx context.Context, subID, throug
 	return out, nil
 }
 
+// listUnlockedSubOrdersFrom is listUnlockedSubOrders for ONE subscription and
+// every day from fromDay on: the previews a member change can still reach
+// (syncPlanPreviews).
+func (r *repository) listUnlockedSubOrdersFrom(ctx context.Context, subID, fromDay string) ([]order, error) {
+	cur, err := r.orders.Find(ctx, bson.D{
+		{Key: "subscription_id", Value: subID},
+		{Key: "scheduled_for", Value: bson.D{{Key: "$gte", Value: fromDay}}},
+		{Key: "status", Value: "placed"},
+		{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+	}, options.Find().SetLimit(100))
+	if err != nil {
+		return nil, errInternal("scheduled orders scan failed")
+	}
+	out := []order{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("scheduled orders decode failed")
+	}
+	return out, nil
+}
+
 // listMemberDayPreviews is listUnlockedSubOrders for ONE member's day: the
 // previews the noon lock decides together (lockConsumerDay).
 func (r *repository) listMemberDayPreviews(ctx context.Context, userID, day string) ([]order, error) {
@@ -838,6 +858,9 @@ func (s *service) setSubscriptionStatusAt(ctx context.Context, consumerID primit
 	if err != nil {
 		return nil, err
 	}
+	// The store's Upcoming list and the member's Orders show the change on
+	// their next poll, not at the next 15-minute tick.
+	updated = s.syncPlanPreviews(ctx, updated, now)
 	// CRM subscription.modified (C-03 reads change in paused/quantity_reduced).
 	s.emitCRMEvent(ctx, "subscription.modified", consumerID, map[string]any{
 		"subscription_id": subID, "change": crmSubscriptionChange(action), "scope_key": subID + ":" + action,
@@ -920,6 +943,8 @@ func (s *service) patchSubscriptionAt(ctx context.Context, consumerID primitive.
 	if err != nil {
 		return nil, err
 	}
+	// The edit reaches the still-editable previews at once (syncPlanPreviews).
+	updated = s.syncPlanPreviews(ctx, updated, now)
 	// CRM: the quantity before the edit (cur), so C-03 can tell a reduction
 	// from an increase.
 	if in.Qty != nil && crmEnabled() && cur.Qty != updated.Qty {
@@ -1138,14 +1163,16 @@ func (s *service) insertSubscriptionOrder(ctx context.Context, sub *subscription
 }
 
 // cancelScheduledSubOrder cancels a still-unlocked preview (worker path only —
-// guarded so a locked or already-cancelled order is never touched).
-func (s *service) cancelScheduledSubOrder(ctx context.Context, o *order) {
-	_, _ = s.repo.updateOrder(ctx, o.OrderID, o.UserID,
+// guarded so a locked or already-cancelled order is never touched). Reports
+// whether this call cancelled it.
+func (s *service) cancelScheduledSubOrder(ctx context.Context, o *order) bool {
+	_, err := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
 		bson.D{{Key: "status", Value: "cancelled"}},
 		bson.D{
 			{Key: "status", Value: "placed"},
 			{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
 		})
+	return err == nil
 }
 
 // refreshSubOrder re-derives a preview's line from the LIVE subscription, so a
@@ -1544,6 +1571,65 @@ func (s *service) lockPreviewsBeforeChange(ctx context.Context, sub *subscriptio
 	for _, md := range subMemberDays(due) {
 		s.lockConsumerDay(ctx, md.userID, md.day, now)
 	}
+}
+
+// syncPlanPreviews brings ONE plan's still-editable previews (every day from
+// the first editable one) into line with the plan as it now stands, in the
+// member's own write path (patch, pause, resume, cancel), so the store's
+// Upcoming list and the member's Orders show the change on their next poll
+// instead of at the next 15-minute tick (R4(i), 24 Sep). It is the sweep's
+// RECONCILE and PREVIEW for this one plan, with the same guarded,
+// idempotent steps, so it can race a tick or a replica harmlessly:
+//
+//   - a preview the plan no longer delivers (paused, cancelled, a vacation,
+//     a moved start) is cancelled and its day released, so a resume before
+//     that day's cut-off schedules it again;
+//   - a preview it still delivers takes the plan's current line (qty,
+//     price, pack size);
+//   - an active plan then previews its first editable day if it has none
+//     (a resume, or a day that became due).
+//
+// Days past their cut-off are never touched here: lockPreviewsBeforeChange
+// decided them before the change was written. Best-effort: a failure is
+// logged and the next tick reconciles; it never fails the member's request.
+// Returns the plan as stored after the sync.
+func (s *service) syncPlanPreviews(ctx context.Context, sub *subscription, now time.Time) *subscription {
+	if sub == nil {
+		return sub
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	defer cancel()
+	previews, err := s.repo.listUnlockedSubOrdersFrom(ctx, sub.SubscriptionID, firstEditableDay(now))
+	if err != nil {
+		s.log.WarnContext(ctx, "subscription change: preview sync failed - the next tick reconciles",
+			"subscription", sub.SubscriptionID, "err", err)
+		return sub
+	}
+	released := false
+	for i := range previews {
+		o := &previews[i]
+		if !subscriptionDueOn(sub, o.ScheduledFor) {
+			if s.cancelScheduledSubOrder(ctx, o) {
+				s.repo.unclaimSubscriptionDay(ctx, o.SubscriptionID, o.ScheduledFor)
+				released = true
+			}
+			continue
+		}
+		s.refreshSubOrder(ctx, o, sub)
+	}
+	reread := func() {
+		if fresh, ferr := s.repo.findSubscriptionByID(ctx, sub.SubscriptionID); ferr == nil && fresh != nil {
+			sub = fresh
+		}
+	}
+	if released {
+		reread() // the released days are open again for the preview below
+	}
+	if sub.Status == "active" {
+		s.sweepOneSubscription(ctx, sub, now)
+		reread()
+	}
+	return sub
 }
 
 // sweepOneSubscription runs the per-subscription half of the sweep (steps 3
