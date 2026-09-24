@@ -598,19 +598,34 @@ func (s *service) cancelOrderAt(ctx context.Context, userID, orderID string, now
 	return o, nil
 }
 
+// errAlreadyReviewedMessage is ALREADY_REVIEWED's message: what the app shows
+// when a second, different rating is sent for an order already rated.
+const errAlreadyReviewedMessage = "You have already rated this order."
+
 func (s *service) reviewOrder(ctx context.Context, userID, orderID string, rating int, comment string) (*order, error) {
 	if rating < 1 || rating > 5 {
 		return nil, errBadRequest("rating must be 1–5")
 	}
-	// Only a DELIVERED order can be reviewed.
+	// Only a DELIVERED order can be reviewed, and only once: the review: null
+	// guard (missing or null) lets the first review win atomically, even
+	// against a concurrent second one.
 	o, err := s.repo.updateOrder(ctx, orderID, userID,
 		bson.D{
-			{Key: "review", Value: orderReview{Rating: rating, Comment: comment, CreatedAt: time.Now().UTC()}},
+			{Key: "review", Value: orderReview{Rating: rating, Comment: comment, CreatedAt: s.now().UTC()}},
 			{Key: "can_review", Value: false},
 		},
-		bson.D{{Key: "status", Value: "delivered"}},
+		bson.D{{Key: "status", Value: "delivered"}, {Key: "review", Value: nil}},
 	)
 	if err != nil {
+		// Already rated. The same rating and comment again is the app
+		// retrying after a timeout: answer the stored review (nothing is
+		// emitted twice). A different one never replaces the first.
+		if cur, ferr := s.repo.findOrder(ctx, orderID, userID); ferr == nil && cur.Review != nil {
+			if cur.Review.Rating == rating && cur.Review.Comment == comment {
+				return cur, nil
+			}
+			return nil, errConflict("ALREADY_REVIEWED", errAlreadyReviewedMessage)
+		}
 		return nil, err
 	}
 	// CRM (contract C6, inert unless CRM_ENABLED): rating.submitted. Best-effort.
