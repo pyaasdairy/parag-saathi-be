@@ -1048,3 +1048,84 @@ the report files in `docs/handoff-2026-09-24-reports/`.
   matrix, fixes per dead row, unnamed topics, structural gaps)
 - `docs/handoff-2026-09-24-reports/00..11-*.json` (raw stage reports and reviewer verdicts
   the `(source: NN)` tags point at; agent prose, kept verbatim as evidence)
+
+---
+
+## 10. Instant hours and the closing alert (added 24 Sep, after the stop)
+
+Founder decision: no "the manager must press Save once" and no silent 24 h. At closing time
+the store manager is asked to extend instant or let it close. Backend `integration/delivery`
+`f1ebfc5`, `7ba129b`, `eee3474`, `6070032`; Saathi `integration/delivery` `620a0e8` (lib seam
+only).
+
+**Rules now in force** (`geofence.go` `instantWindow`, `instant_hours.go`, `instant_alerts.go`):
+
+- Hours that were never saved (`instant_close_min` 0) are the 07:00-22:00 IST the Zone tab
+  shows, on `/serviceability`, in the `POST /orders` guard (422 `INSTANT_CLOSED`) and in the
+  console. Saved hours are unchanged. Open all day = save 00:00-24:00 (`0` / `1440`); any
+  script that saved `0` / `0` to mean "all day" must now save `0` / `1440`.
+- `INSTANT_TEST_OPEN` keeps its interaction: with a zone drawn it widens instant and the hours
+  still gate it; with no zone drawn it is not hours-gated.
+- `POST /consumer/stores/{storeId}/zone/instant/extend {minutes: 30|60|120}` (STORE_MANAGER,
+  own store, 403 otherwise): open until the later of now / tonight's close / the current
+  extension, plus the minutes, never past 02:00 IST. 422 `INSTANT_PAUSED`,
+  `INSTANT_NOT_CONFIGURED` (no zone or no instant radius), `EXTEND_TOO_LATE`,
+  `INVALID_EXTENSION`.
+- `POST .../zone/instant/close-now`: shut until the next opening time, extension cleared,
+  `instant_paused` untouched, so it reopens by itself. Extend and close-now replace each other;
+  the zone PUT never touches either. Both answer the GET `/zone` shape, which gains
+  `instantOpenNow`, `instantClosesAt`, `instantExtendedUntil`, `instantClosedUntil` (+ snake).
+- The pause switch still means "until I turn it back on". `/serviceability` now labels a
+  paused lane "when the store turns it back on" (it used to promise "tomorrow at 7:00 AM").
+- Alerts: a one-minute worker writes to the store's ACTIVE STORE_MANAGERs only, into the inbox
+  Saathi's bell polls (`GET /notifications/me`, every 45 s while the app is open), on the
+  STORE_LOW_STOCK model. `STORE_INSTANT_CLOSING` 15 min before the close (again before an
+  extended close); `STORE_INSTANT_CLOSED` at the close if not extended (within the hour).
+  Params: `headline`, `message`, `store`, `store_id`, `window_close`, `window_reopen`. Never
+  for a paused lane, no instant radius, a close-now, or 00:00-24:00. Exactly once per
+  (store, kind, close) via the unique index on `store_instant_alerts`, across instances and
+  restarts. In-app only: the Saathi app has no phone push, so a manager whose app is closed
+  sees it on opening the app.
+
+**Behaviour table** (a store with unsaved hours or saved 07:00-22:00; times IST; the consumer
+app is `pyaas-consumer` as shipped, whose `lib/instantHours.ts` adds its own 06:00-23:00 floor):
+
+| Time | Consumer app shows | Store manager gets |
+|---|---|---|
+| 23:00-05:59 | "Instant opens at 6:00 AM" (the app's own floor; the backend opens at 07:00) | nothing |
+| 06:00-06:59 | "Instant resumes today at 7:00 AM" | nothing |
+| 07:00-21:44 | Instant offered | nothing |
+| 21:45 | Instant offered | "Instant delivery closes at 10:00 PM" + "Keep instant open tonight: extend by 30 min, 1 h or 2 h from the Zone tab, or let it close. Orders already placed are not affected." |
+| 22:00, no action | "Instant resumes tomorrow at 7:00 AM"; an instant order is refused (422 `INSTANT_CLOSED`); morning unaffected | "Instant delivery is now closed" + "It reopens at 7:00 AM." |
+| Extend 1 h at 21:50 | Instant offered until 23:00, then "Instant resumes tomorrow at 7:00 AM" | no 22:00 "now closed"; "closes at 11:00 PM" at 22:45; "now closed" at 23:00 |
+| Extend past 23:00 (up to 02:00) | Hidden from 23:00 by the app's floor ("Instant opens at 6:00 AM") although the backend still accepts instant orders | "closes at" 15 min before the extended close, "now closed" at it |
+| Close now at 21:00 | "Instant resumes tomorrow at 7:00 AM" from 21:00; back at 07:00 by itself | nothing that night (they closed it) |
+| Pause switch on | "Instant resumes when the store turns it back on"; shut past 07:00 until switched off | nothing |
+| Saved 00:00-24:00 | Instant offered whenever the app's floor is open | nothing |
+
+**Kushagra UI follow-up (Saathi; nothing on screen changed):**
+
+1. `lib/screens/notifications_screen.dart` `_render`: add `STORE_INSTANT_CLOSING` and
+   `STORE_INSTANT_CLOSED` (title `p['headline']`, body `p['message']`). Until then they fall to
+   the default branch: the raw key as the title and the params in key order as the body
+   ("headline: ...", then "message: ...", two lines).
+2. Same file, the row's `onTap` (today it only marks read): for `STORE_INSTANT_*` open the
+   store console on the Zone tab (`store_home.dart` `ModuleShell`, tab index 2; ModuleShell
+   has no initial-tab parameter yet), or offer Extend 30 min / 1 h / 2 h and Close now in the
+   row via `ZoneApi.extendInstant(p['store_id'], m)` / `ZoneApi.closeInstantNow(p['store_id'])`.
+3. `lib/screens/store/zone_tab.dart`, "Instant delivery hours" card, beside the "Close instant
+   now" switch: the one-tap buttons (`ZoneApi.extendInstant` 30/60/120, `ZoneApi.closeInstantNow`),
+   `_zone = returned zone` after the call, the state from `instantOpenNow` / `instantClosesAt`
+   / `instantExtendedUntil` / `instantClosedUntil` (UTC, show in IST), and the `ApiException`
+   message on 422.
+4. Same card, the switch subtitle "Instant is shut until you turn this off or the next opening
+   time" is false (the pause holds until turned off): "Instant is shut until you turn this off".
+
+**Consumer app follow-up (not Saathi):** the `lib/instantHours.ts` floor (06:00-23:00,
+`EXPO_PUBLIC_INSTANT_OPEN_HOUR` / `_CLOSE_HOUR`) disagrees with the backend default: 00:00-06:00
+says 6:00 AM for a lane that opens at 7:00, and an extension past 23:00 never shows. Set the
+open hour to 7 and let a backend `instant: true` pass the close floor (or move it to 2).
+
+Verify: `go test ./internal/modules/consumer/ -run 'TestInstant|TestOrderGuard' -count=1 -v`
+(Mongo on 27017, fixed IST clock, no wall-clock dependence); Saathi `flutter test
+test/zone_api_test.dart`.
