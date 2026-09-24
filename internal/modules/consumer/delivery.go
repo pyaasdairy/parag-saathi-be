@@ -537,16 +537,38 @@ func (r *repository) storeGeo(ctx context.Context, storeID string) (geoPt, bool)
 // nearestStore returns the closest active STORE org id to a point (or the first
 // store if the point has no geo). One integration seam for many stores later.
 func (r *repository) nearestStore(ctx context.Context, at *geoPt) (string, geoPt, error) {
+	stores, err := r.activeStoreGeos(ctx)
+	if err != nil {
+		return "", geoPt{}, err
+	}
+	return rankNearestStore(stores, at)
+}
+
+// storeGeoRow is one active STORE org unit's id and centre.
+type storeGeoRow struct {
+	ID  primitive.ObjectID `bson:"_id"`
+	Lat float64            `bson:"geo_lat"`
+	Lng float64            `bson:"geo_lng"`
+}
+
+// activeStoreGeos reads every active STORE org unit once, so a caller that
+// routes many orders (the store's /upcoming) ranks them all in memory.
+func (r *repository) activeStoreGeos(ctx context.Context) ([]storeGeoRow, error) {
 	cur, err := r.orgUnits.Find(ctx, bson.D{{Key: "type", Value: "STORE"}, {Key: "active", Value: true}})
 	if err != nil {
-		return "", geoPt{}, errInternal("store lookup failed")
+		return nil, errInternal("store lookup failed")
 	}
-	var stores []struct {
-		ID  primitive.ObjectID `bson:"_id"`
-		Lat float64            `bson:"geo_lat"`
-		Lng float64            `bson:"geo_lng"`
-	}
+	var stores []storeGeoRow
 	if err := cur.All(ctx, &stores); err != nil || len(stores) == 0 {
+		return nil, errNotFound("no serving store")
+	}
+	return stores, nil
+}
+
+// rankNearestStore is nearestStore's choice over stores already read. Pure,
+// and it never modifies stores (the slice is shared across a whole listing).
+func rankNearestStore(stores []storeGeoRow, at *geoPt) (string, geoPt, error) {
+	if len(stores) == 0 {
 		return "", geoPt{}, errNotFound("no serving store")
 	}
 	// A store whose coordinates were never set reads as (0,0) — Null Island, off
@@ -566,7 +588,7 @@ func (r *repository) nearestStore(ctx context.Context, at *geoPt) (string, geoPt
 	// same state ("never go dark", geofence.go). Ordering would stay on while
 	// fulfilment went silent, which is far worse than one odd distance number.
 	// So with no usable store we still route to one and say so loudly.
-	usable := stores[:0]
+	usable := make([]storeGeoRow, 0, len(stores))
 	for _, s := range stores {
 		if geoSane(s.Lat, s.Lng) {
 			usable = append(usable, s)

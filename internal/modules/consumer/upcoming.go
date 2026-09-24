@@ -78,16 +78,41 @@ func (r *repository) scheduledOneOffOrders(ctx context.Context, day string) ([]o
 // orderRoutesToStore answers whether createDeliveryForOrder would put this
 // order's task on storeID: the nearest store to the order's pin, or the
 // fallback store when the order carries none (nearestStore never refuses).
-func (s *service) orderRoutesToStore(ctx context.Context, o *order, storeID string) bool {
+// The stores are read once per listing (activeStoreGeos), not per order.
+func orderRoutesToStore(stores []storeGeoRow, o *order, storeID string) bool {
 	var at *geoPt
 	if o.Geo != nil {
 		at = &geoPt{Lat: o.Geo.Lat, Lng: o.Geo.Lng}
 	}
-	id, _, err := s.repo.nearestStore(ctx, at)
+	id, _, err := rankNearestStore(stores, at)
 	if err != nil && !errors.Is(err, errNoStoreGeo) {
 		return false
 	}
 	return id == storeID
+}
+
+// orderIDsWithTasks returns which of the given orders already have a
+// delivery task, in one query.
+func (r *repository) orderIDsWithTasks(ctx context.Context, orderIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(orderIDs) == 0 {
+		return out, nil
+	}
+	cur, err := r.deliveries.Find(ctx, bson.D{{Key: "order_id", Value: bson.D{{Key: "$in", Value: orderIDs}}}},
+		options.Find().SetProjection(bson.D{{Key: "order_id", Value: 1}}))
+	if err != nil {
+		return nil, errInternal("delivery lookup failed")
+	}
+	var rows []struct {
+		OrderID string `bson:"order_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, errInternal("delivery lookup failed")
+	}
+	for _, d := range rows {
+		out[d.OrderID] = true
+	}
+	return out, nil
 }
 
 func (s *service) upcomingRowFor(ctx context.Context, o *order, day, source string) upcomingRow {
@@ -126,16 +151,32 @@ func (s *service) storeUpcoming(ctx context.Context, actor auth.Actor, storeID s
 		return nil, err
 	}
 	rows := []upcomingRow{}
+	// The console polls this every 12 s: the stores are read once and the
+	// existing tasks with one query, not two queries per preview.
+	stores, serr := s.repo.activeStoreGeos(ctx)
+	if serr != nil {
+		return rows, nil // no serving store: nothing routes here
+	}
+	ids := make([]string, 0, len(previews)+len(scheduled))
+	for _, batch := range [][]order{previews, scheduled} {
+		for i := range batch {
+			ids = append(ids, batch[i].OrderID)
+		}
+	}
+	tasked, terr := s.repo.orderIDsWithTasks(ctx, ids)
+	if terr != nil {
+		return nil, terr
+	}
 	for _, batch := range []struct {
 		orders []order
 		source string
 	}{{previews, upcomingSourceSubscription}, {scheduled, upcomingSourceScheduled}} {
 		for i := range batch.orders {
 			o := &batch.orders[i]
-			if d, _ := s.repo.findDeliveryByOrder(ctx, o.OrderID); d != nil {
+			if tasked[o.OrderID] {
 				continue // already a task: the orders console owns it
 			}
-			if !s.orderRoutesToStore(ctx, o, storeID) {
+			if !orderRoutesToStore(stores, o, storeID) {
 				continue
 			}
 			rows = append(rows, s.upcomingRowFor(ctx, o, tomorrow, batch.source))
