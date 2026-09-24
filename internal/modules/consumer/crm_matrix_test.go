@@ -173,7 +173,8 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 		"A-05": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			cid := member(0)
 			stagePlan(cid, "sub_mx_a05", "active")
-			return cid, map[string]any{"subscription_id": "sub_mx_a05", "first_cycle_amount": float64(70), "scope_key": "sub_mx_a05"}
+			return cid, map[string]any{"subscription_id": "sub_mx_a05", "first_cycle_amount": float64(70), "scope_key": "sub_mx_a05",
+				"start_label": "tomorrow"}
 		}, crmMatrixInbox},
 		"B-03": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			return member(0), map[string]any{"payment_order_id": "order_mx_b03", "payment_id": "pay_mx_b03", "amount": float64(500),
@@ -211,6 +212,13 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 			cid := member(0)
 			return cid, map[string]any{"order_id": stageOrder(cid, "morning", "delivered"), "offer_pack": int32(0), "promotional_only": false, "labelled_product": label}
 		}, crmMatrixInbox},
+		// The noon lock skipped tomorrow for want of funds (skipSubPreview).
+		"D-07": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
+			day := istDay(time.Now().Add(24 * time.Hour))
+			return member(0), map[string]any{"subscription_id": "sub_mx_d07", "day": day, "reason": orderCancelledByWalletShort,
+				"shortfall": float64(70), "resume_label": crmDayLabel(addDaysIST(day, 1), time.Now()), "tomorrow_blocked": true,
+				"scope_key": "day_skipped:" + day}
+		}, crmMatrixInbox},
 		"D-09": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			cid := member(0)
 			return cid, map[string]any{"order_id": stageOrder(cid, "morning", "cancelled"), "labelled_product": label, "reason": "customer not at home"}
@@ -244,11 +252,11 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 		// with the payloads unlockFoundingFarm and joinFoundingFamily write.
 		"FF-01": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			return member(0), map[string]any{"farm_id": "mx-farm", "farm": "Matrix Farm", "farmer": "Harsh Singh",
-				"line": int32(4), "togo": int32(0), "unlocked_packs": ""}
+				"line": int32(4), "togo": int32(0), "unlocked_packs": "", "first_delivery_label": "tomorrow"}
 		}, crmMatrixInbox},
 		"FF-02": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			return member(0), map[string]any{"farm_id": "mx-farm", "farm": "Matrix Farm", "farmer": "Harsh Singh",
-				"line": int32(4), "togo": int32(0), "unlocked_packs": ""}
+				"line": int32(4), "togo": int32(0), "unlocked_packs": "", "first_delivery_label": "tomorrow"}
 		}, crmMatrixInbox},
 		"FF-03": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			return member(0), map[string]any{"farm_id": "mx-farm", "farm": "Matrix Farm", "farmer": "Harsh Singh",

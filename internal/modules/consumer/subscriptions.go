@@ -703,6 +703,8 @@ func (s *service) createSubscriptionAt(ctx context.Context, consumerID primitive
 		if wv, werr := s.wallet(ctx, consumerID); werr == nil && wv.Available < cycle {
 			s.emitCRMEvent(ctx, "subscription.created_unpaid", consumerID, map[string]any{
 				"subscription_id": sub.SubscriptionID, "first_cycle_amount": cycle, "scope_key": sub.SubscriptionID,
+				// A-05's [DATE] as the plan stands now; re-worded when it fires.
+				"start_label": crmSubscriptionStartLabel(sub, now),
 			})
 		}
 	}
@@ -1369,7 +1371,7 @@ func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now t
 			avail = round2(avail - cost)
 			continue
 		}
-		s.skipSubPreview(ctx, c.o, round2(cost-avail), now)
+		s.skipSubPreview(ctx, c.o, c.sub, round2(cost-avail), now)
 	}
 	return locked
 }
@@ -1435,8 +1437,14 @@ func (s *service) lockSubOrder(ctx context.Context, o *order, trialFree bool, no
 // cancelled by "wallet_short" (guarded on a still-unlocked, placed preview,
 // so it can never race a lock into two outcomes), the day claim KEPT so the
 // day is never previewed again, no task, no money. subscription.day_skipped
-// tells the CRM (D-07). Returns whether this call closed it.
-func (s *service) skipSubPreview(ctx context.Context, o *order, shortfall float64, now time.Time) bool {
+// tells the CRM (D-07): the next morning the plan delivers (resume_label, the
+// message's [DATE]), and whether the member is to be told "no delivery
+// tomorrow" at all (tomorrow_blocked: the day IS tomorrow as the lock sees it,
+// not a day a catch-up reached after an outage, and no free Welcome Litre
+// pack still arrives that morning - CH-03). One message per member and day
+// (scope_key), however many of their plans were skipped. Returns whether
+// this call closed it.
+func (s *service) skipSubPreview(ctx context.Context, o *order, sub *subscription, shortfall float64, now time.Time) bool {
 	if _, err := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
 		bson.D{
 			{Key: "status", Value: "cancelled"},
@@ -1451,13 +1459,60 @@ func (s *service) skipSubPreview(ctx context.Context, o *order, shortfall float6
 	}
 	s.log.InfoContext(ctx, "noon lock: day skipped - the wallet at 12:00 did not cover it",
 		"subscription", o.SubscriptionID, "day", o.ScheduledFor, "shortfall", shortfall)
-	if cid, err := primitive.ObjectIDFromHex(o.UserID); err == nil {
+	if cid, err := primitive.ObjectIDFromHex(o.UserID); err == nil && crmEnabled() {
+		day := o.ScheduledFor
 		s.emitCRMEvent(ctx, "subscription.day_skipped", cid, map[string]any{
-			"subscription_id": o.SubscriptionID, "day": o.ScheduledFor,
+			"subscription_id": o.SubscriptionID, "day": day,
 			"reason": orderCancelledByWalletShort, "shortfall": shortfall,
+			"resume_label":     crmDayLabel(subscriptionResumeDay(sub, day), now),
+			// A plan paused or cancelled after the cut-off (the day was decided
+			// as previewed) has no morning to resume: nothing to tell.
+			"tomorrow_blocked": sub != nil && sub.Status == "active" &&
+				day == istDay(now.Add(24*time.Hour)) && !s.freePackDue(ctx, o.UserID, day),
+			"scope_key":        "day_skipped:" + day,
 		})
 	}
 	return true
+}
+
+// noonLockDecided reports whether the noon lock has decided the latest day
+// past its cut-off at now (tomorrow, from noon): no preview for it is still
+// waiting to be locked or skipped. A read error answers false; the caller
+// asks again on its next tick.
+func (s *service) noonLockDecided(ctx context.Context, now time.Time) bool {
+	n, err := s.repo.orders.CountDocuments(ctx, bson.D{
+		{Key: "subscription_id", Value: bson.D{{Key: "$gt", Value: ""}}},
+		{Key: "scheduled_for", Value: lockedThroughDay(now)},
+		{Key: "status", Value: "placed"},
+		{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+	}, options.Count().SetLimit(1))
+	return err == nil && n == 0
+}
+
+// subscriptionResumeDay is the first morning after a skipped day that the
+// plan delivers: the day after for a daily plan, its next cadence day
+// otherwise (a vacation skipped over). Its order locks at 12 noon the day
+// before it, never earlier than 12 noon the day after the skip, so "recharge
+// by 12 noon tomorrow and your milk resumes <day>" holds for every cadence.
+func subscriptionResumeDay(sub *subscription, skipped string) string {
+	for i := 1; sub != nil && i <= 21; i++ {
+		if d := addDaysIST(skipped, i); subscriptionDueOn(sub, d) {
+			return d
+		}
+	}
+	return addDaysIST(skipped, 1)
+}
+
+// freePackDue reports a live Welcome Litre pack order the member still gets
+// on day: that morning is not "no delivery".
+func (s *service) freePackDue(ctx context.Context, userID, day string) bool {
+	n, err := s.repo.orders.CountDocuments(ctx, bson.D{
+		{Key: "user_id", Value: userID},
+		{Key: "offer_pack", Value: bson.D{{Key: "$gt", Value: 0}}},
+		{Key: "delivery_date", Value: day},
+		{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+	}, options.Count().SetLimit(1))
+	return err == nil && n > 0
 }
 
 // lockPreviewsBeforeChange runs the LOCK for every day of this plan whose

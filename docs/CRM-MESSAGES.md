@@ -3,7 +3,9 @@
 Every message the CRM engine can send, as of `integration/delivery` on 24 Sep 2026
 (after the CRM completion stage: `8edd9e1` .. `81e2ff6`, then human_call, the matrix
 test and the inbox refs, and the merge of `feature/founding-referrals`, which adds
-FF-01 .. FF-03). The source of truth is `internal/modules/consumer/crm_triggers.json`;
+FF-01 .. FF-03), plus the noon rules of 24 Sep afternoon (`feature/noon-rules`: D-07
+wired to the noon lock's skipped day, B-02 held until the lock has decided and not
+sent beside D-07, A-05 and FF-01 naming the real day). The source of truth is `internal/modules/consumer/crm_triggers.json`;
 this file is written from it by hand, so when the two disagree the JSON wins and this
 file is out of date. How the engine works: `docs/HANDOFF-CODEV-2026-09-24.md` section 4.
 The per-trigger audit that led here: `docs/CRM-AUDIT-2026-09-24.md`.
@@ -53,16 +55,16 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 - **Body** is the English template rendered with realistic values. Every template also
   has Hindi (roman, and Devanagari where written); the inbox stores both.
 
-## 1. Live messages (35)
+## 1. Live messages (36)
 
 | id | topic / schedule | when (IST) | channels | env to leave the building | status today | body (EN) |
 |---|---|---|---|---|---|---|
 | A-01 | `user.registered` | 2 h after a new account is created by OTP sign-in, if the member still has not started (no order that is not cancelled, no recharge, no plan) | push, then whatsapp, then sms | push; or WA A-01; or DLT A-01 | INBOX-ONLY | Welcome to Pyaas! Fresh milk is 2 taps away — recharge your Wallet & place your first order. Help: 96672 60050. |
 | A-02 | `order.delivered` | on delivery, when the member's first-ever delivered order is a Quick Pyaas (instant) order | whatsapp, then sms | WA A-02; or DLT A-02 | INBOX-ONLY | Delivered! Thanks for trying Full Cream Milk - Parag Gold 500ml — delivered by PYAAS. Reorder anytime in the app. |
 | A-03 | `subscription.activated` | when the member creates a plan in the app (not the Welcome Litre plan, which W-01 announces) | whatsapp | WA A-03 | INBOX-ONLY | Your morning milk starts tomorrow, delivered by 7 am. Pause/resume anytime — changes before 12 noon apply from the next morning. Keep your Wallet topped up so it never stops. |
-| A-05 | `subscription.created_unpaid` | 2 h after an app plan is created with a wallet that cannot cover its first day; skipped if the member topped up meanwhile or the plan is no longer active | whatsapp, then sms | WA A-05; or DLT A-05 | INBOX-ONLY | One step left — recharge your Wallet to start tomorrow's delivery. |
+| A-05 | `subscription.created_unpaid` | 2 h after an app plan is created with a wallet that cannot cover its first day; skipped if the member topped up meanwhile or the plan is no longer active. [DATE] is the morning the plan starts as seen when the message is SENT (a tomorrow the noon lock skipped in those two hours is not offered) | whatsapp, then sms | WA A-05; or DLT A-05 (both need the new wording registered) | INBOX-ONLY | One step left — recharge your Wallet and your morning milk starts tomorrow. / after noon: … starts 8 Oct. |
 | B-01 | `0 9 * * *` (code) | first tick after 09:00, when the wallet covers under 4 days of the member's daily plans; at most once in 7 days; not during a live Welcome Litre journey | whatsapp, +push, then sms | WA B-01; push; or DLT B-01 | INBOX-ONLY | Your Wallet is running low. Recharge to keep your morning milk coming. |
-| B-02 | config says `0 17 * * *`; code runs at 12:00 | first tick after 12:00 on day D, when the plans due on D+2 (whose order locks at 12 noon on D+1, the day the copy names) cost more than the wallet will hold once D+1's locked delivery is paid; every day it stays short | sms, +whatsapp | DLT B-02; WA B-02 | INBOX-ONLY (SMS refused: no DLT id) | Low balance — recharge by 12 noon tomorrow to receive your delivery. (Owner, 24 Sep: the copy stays, the horizon was fixed.) |
+| B-02 | `0 12 * * *` (code: right after the noon lock) | first tick after 12:00 on day D once the noon lock has decided D+1 (no D+1 preview still undecided; from 13:00 regardless), when the plans due on D+2 (whose order locks at 12 noon on D+1, the day the copy names) cost more than the wallet will hold once D+1's locked delivery is paid; every day it stays short; NOT to a member D-07 told at that noon that D+1 was skipped (one clear message) | sms, +whatsapp | DLT B-02; WA B-02 | INBOX-ONLY (SMS refused: no DLT id) | Low balance — recharge by 12 noon tomorrow to receive your delivery. (Owner, 24 Sep: the copy stays, the horizon was fixed.) |
 | B-03 | `payment.failed` | 10 min after a Razorpay top-up payment fails (webhook, once per payment), skipped if a retry paid that same order meanwhile; or an AutoPay mandate charge finds the wallet short (once per mandate per day) | sms, +whatsapp | DLT B-03; WA B-03 | INBOX-ONLY | Your recharge didn't go through. Try again or use another method — no money was deducted. |
 | B-06 | `wallet.credited` | every wallet credit, once per ledger ref, after the money is in: top-up (app verify, Razorpay webhook, reconcile sweep, dev top-up), refund, rider undo (refundable wording); promo credit and the referral reward (Pyaas-credit wording) | whatsapp, then sms | WA B-06; or DLT B-06 | INBOX-ONLY | ₹500 added to your Wallet (recharge). Refundable. Ready for your next order. / promo: ₹75 Pyaas credit added (Welcome credit). Usable on orders; not refundable in cash. Valid 30 days. |
 | C-03 | `subscription.modified` | 1 h after the member pauses a plan or reduces its quantity; skipped if the plan was resumed or the quantity restored meanwhile | whatsapp | WA C-03 | INBOX-ONLY | We noticed a change. Everything okay with your deliveries? Reply here or we can call. |
@@ -71,6 +73,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 | D-03 | `delivery.delayed` | a task on the road is 5 min past its window end (detector on the worker tick, once per task) | push, +whatsapp | push; WA D-03 | INBOX-ONLY | Running a little late — new ETA about 7:52 am. Sorry for the wait. |
 | D-05 | `order.line_cancelled` | the store removes a line from an order before delivery | whatsapp, +sms | WA D-05; DLT D-05 | INBOX-ONLY | Full Cream Milk - Parag Gold 500ml — delivered by PYAAS is unavailable today; Rs35 has been taken off your bill and nothing is charged for it. Sorry! |
 | D-06 | `order.delivered` | an order is delivered; never for a free promo pack (W-02 / W-05 own those) | push, then whatsapp, then sms | push; or WA D-06; or DLT D-06 | INBOX-ONLY | Delivered ✅ Full Cream Milk - Parag Gold 500ml — delivered by PYAAS. Enjoy! Tap to rate. |
+| D-07 | `subscription.day_skipped` | the noon lock (12:00:05 on D) skips D+1 because the wallet as it stood at 12:00:00 did not cover it; once per member and day however many plans were skipped; not for a day a free Welcome Litre pack still arrives (CH-03 day 0), not for a day that is not tomorrow (a catch-up after an outage), not for a plan paused or cancelled after the cut-off. [DATE] is the next morning the plan delivers after the skipped one | sms, +whatsapp, +push | DLT D-07; WA D-07; push (all need the new wording registered) | INBOX-ONLY | No delivery tomorrow - your wallet was short at 12 noon. Recharge by 12 noon tomorrow and your milk resumes 8 Oct. |
 | D-09 | `order.failed` | 15 min after the rider marks the task not delivered, or the store cancels it (the rider's undo window); skipped if the order is live again by then (undo or reassign); also when the sweep closes a locked morning order whose day passed undelivered (from noon the day after; [REASON] "the delivery day passed without a delivery") | push, then whatsapp, then sms | push; or WA D-09; or DLT D-09 | INBOX-ONLY | Not delivered - Full Cream Milk - Parag Gold 500ml — delivered by PYAAS could not reach you (customer not at home). Nothing has been charged for it. Tap to order again, or call 96672 60050. |
 | E-01 | `rating.submitted` | the member rates an order 3 or lower | whatsapp | WA E-01 | INBOX-ONLY | Sorry we missed the mark. What went wrong? We'll make it right. |
 | E-02 | `complaint.created` | every new complaint (a retried ref sends nothing) | whatsapp, then sms | WA E-02; or DLT E-02 | INBOX-ONLY | Got it — we're on it. You'll hear back within 24 hours with a fix. |
@@ -89,11 +92,11 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 | W-08 | `serviceability.checked` | a signed-in member's address is out of zone (self-enrol refused, or the waitlist join with a session); once per member ever | whatsapp, then sms | WA W-08; or DLT W-08 | INBOX-ONLY | We don't deliver to your area yet. We've noted your pincode and we'll tell you the day we do — that's the only message you'll get from us. |
 | W-09 | `abuse_flag_raised` (internal) | a second Welcome Litre enrolment at an address already enrolled | admin_console | none | OPERATOR | (operator bell: "address_hash match — second offer at the same address (review, do not auto-reject)") |
 | W-10 | `0 18 * * *` (internal) | first tick after 18:00: free packs issued vs enrolments that day | admin_console, +email | none (email not built) | OPERATOR (bell only on a variance) | (operator bell: "packs issued N vs consumers created M — variance V") |
-| FF-01 | `founding.farm_unlocked` | the join that fills a Founding Family farm unlocks it: every waiting member of that farm | push, then whatsapp, then sms | push; or WA FF-01; or DLT FF-01 | INBOX-ONLY | Gonard Dairy is unlocked! Whole Farm Milk from Harsh Singh and the full PYAAS range are open for you. First delivery tomorrow by 7 AM. |
+| FF-01 | `founding.farm_unlocked` | the join that fills a Founding Family farm unlocks it: every waiting member of that farm. [DATE] is the first morning an order placed then reaches: tomorrow before 12 noon, the day after from noon | push, then whatsapp, then sms | push; or WA FF-01; or DLT FF-01 | INBOX-ONLY | Gonard Dairy is unlocked! Whole Farm Milk from Harsh Singh and the full PYAAS range are open for you. First delivery tomorrow by 7 AM. / after noon: … First delivery 8 Oct by 7 AM. |
 | FF-02 | `founding.member_active` | with FF-01, for each waiting member who turns Active at that unlock | push, then whatsapp, then sms | push; or WA FF-02; or DLT FF-02 | INBOX-ONLY | You are in. Your Founding Family price is on at Gonard Dairy: Rs 2 off every litre of PYAAS milk and free delivery, every morning. Stop any month in Me > Founding Family. |
 | FF-03 | `founding.seat_waiting` | a Rs 99 join takes a seat on a farm still filling | push, then whatsapp, then sms | push; or WA FF-03; or DLT FF-03 | INBOX-ONLY | Your seat at Gonard Dairy is held: you are #12 in line. 53 more homes and it unlocks. Share your link with your society group. |
 
-## 2. Awaiting a product event (22) and the alias
+## 2. Awaiting a product event (21) and the alias
 
 These keep their copy and routing in the config; the engine never evaluates them. Remove
 an entry from `meta.awaiting_event` only together with the emitter or runner that makes
@@ -112,7 +115,6 @@ it real (the matrix test then needs its scenario).
 | C-06 | `0 12 * * *` | ai_call | ai_call is not a transport; no high_value segment |
 | C-07 | `delivery.miss_detected` | whatsapp | no miss detector: a failed task emits order.failed (D-09), a late one delivery.delayed (D-03) |
 | D-04 | `order.substitution_proposed` | whatsapp, then push | no substitution flow: the store adjust is reduce-only |
-| D-07 | `0 12 * * *` | sms, +whatsapp | the template carries an unrendered alternative-text block; B-02 covers the unfunded cause |
 | D-08 | `route.changed` | whatsapp, +sms | zones carry no effective date and their edits emit no event |
 | E-03 | `delivery.late_confirmed` | whatsapp | no lateness confirmation and no production grant path for the Rs20 apology credit |
 | F-01 .. F-09 | schedules | ai_call | ai_call is not a transport (F-02 also needs a server cart; F-05 a high_value segment) |

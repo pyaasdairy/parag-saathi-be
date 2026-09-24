@@ -33,7 +33,6 @@
    "C-06": "ai_call is not a transport; no high_value segment computation",
    "C-07": "no miss detector: a task that fails emits order.failed (D-09); a task that is late emits delivery.delayed (D-03)",
    "D-04": "no substitution flow: the store adjust is reduce-only, there is no swap and no YES/NO reply handling",
-   "D-07": "the template carries an unrendered alternative-text block ([Recharge by 12 noon today to resume / Resumes [DATE]]); B-02 covers the unfunded cause",
    "D-08": "zones carry no effective date and their edits emit no event",
    "E-03": "no lateness confirmation and no production grant path for the Rs20 apology credit",
    "F-01": "ai_call is not a transport",
@@ -294,8 +293,9 @@
   "T-A05": {
    "dlt_category": "service_implicit",
    "cta": "recharge",
-   "en": "One step left — recharge your Wallet to start tomorrow's delivery.",
-   "hi": "Bas ek kadam — Wallet recharge karein aur kal se delivery shuru."
+   "en": "One step left — recharge your Wallet and your morning milk starts [DATE].",
+   "hi": "Bas ek kadam — Wallet recharge karein, aapki subah ki milk [DATE] se shuru.",
+   "note": "DATE is the morning the plan really starts, read when the message is sent (the noon lock: a plan made after noon, or whose tomorrow was skipped at noon, starts the day after tomorrow or later). Owner 24 Sep: server copy that says tomorrow must name the real day. Re-register with DLT / Meta before mapping."
   },
   "T-A06": {
    "dlt_category": "service_implicit",
@@ -413,8 +413,9 @@
    "dlt_category": "service_implicit",
    "cta": "recharge_or_resume",
    "correction": "C-06",
-   "en": "No delivery tomorrow — [REASON]. [Recharge by 12 noon today to resume / Resumes [DATE]].",
-   "hi": "Kal delivery nahi — [KARAN]. [Aaj 12 baje tak recharge karein / [DATE] se shuru]."
+   "en": "No delivery tomorrow - your wallet was short at 12 noon. Recharge by 12 noon tomorrow and your milk resumes [DATE].",
+   "hi": "Kal delivery nahi - 12 baje aapke Wallet mein balance kam tha. Kal 12 baje tak recharge karein, milk [DATE] se phir shuru.",
+   "note": "Owner 24 Sep: sent when the noon lock skips tomorrow for want of funds (subscription.day_skipped). DATE is the next morning the plan delivers after the skipped one (the day after tomorrow for a daily plan), whose order locks at 12 noon tomorrow or later, so the recharge deadline is always true. Re-register with DLT / Meta before mapping."
   },
   "T-D08": {
    "dlt_category": "service_implicit",
@@ -559,9 +560,9 @@
   "T-FF01": {
    "dlt_category": "service_implicit",
    "cta": "open_shop",
-   "en": "[FARM] is unlocked! Whole Farm Milk from [FARMER] and the full PYAAS range are open for you. First delivery tomorrow by 7 AM.",
-   "hi": "[FARM] unlock ho gaya! [FARMER] ka Whole Farm Milk aur poori PYAAS range ab aapke liye khuli hai. Pehli delivery kal subah 7 baje tak.",
-   "note": "pyaas-app-spec.md section 6, farm unlocks. Supply source is pyaas_own_brand, so the farm tokens are allowed (claims_freeze extension_ch12)."
+   "en": "[FARM] is unlocked! Whole Farm Milk from [FARMER] and the full PYAAS range are open for you. First delivery [DATE] by 7 AM.",
+   "hi": "[FARM] unlock ho gaya! [FARMER] ka Whole Farm Milk aur poori PYAAS range ab aapke liye khuli hai. Pehli delivery [DATE] subah 7 baje tak.",
+   "note": "pyaas-app-spec.md section 6, farm unlocks. Supply source is pyaas_own_brand, so the farm tokens are allowed (claims_freeze extension_ch12). DATE is the first morning still open to orders at the unlock (tomorrow before 12 noon, the day after from noon; owner 24 Sep)."
   },
   "T-FF02": {
    "dlt_category": "service_implicit",
@@ -831,7 +832,7 @@
    "name": "Insufficient for tomorrow at cut-off",
    "phase": 1,
    "kind": "scheduled",
-   "schedule": "0 17 * * *",
+   "schedule": "0 12 * * *",
    "conditions": [
     "subscription.active == true",
     "wallet.spendable_balance < day_after_tomorrow.order_value"
@@ -854,7 +855,7 @@
     "critical_exempt_from_daily_cap": true
    },
    "success_metric": "save_rate_delivery_retained",
-   "note": "RE-TIMED for the 12:00 cut-off. Fires at 17:00 on D-2, telling the customer to recharge by 12:00 noon on D-1 for delivery on D. The playbook assumed an evening cut-off and put this the night before delivery; with a noon lock that would be too late. Evening send is retained deliberately — personal admin happens in the evening.",
+   "note": "RE-TIMED for the 12:00 cut-off. Fires right after the 12:00 lock on D-2 has decided D-1 (the first scheduler tick once no preview for D-1 is still undecided, at the latest 13:00), telling the customer to recharge by 12:00 noon on D-1 for delivery on D. Not sent to a member D-07 told at the same noon that D-1 was skipped (one clear message). The playbook assumed an evening cut-off; the earlier 17:00 re-time was replaced by the lock itself (owner, 24 Sep).",
    "corrections": [
     "CH-03"
    ],
@@ -1430,10 +1431,10 @@
    "section": "D",
    "name": "Morning delivery will be skipped",
    "phase": 1,
-   "kind": "scheduled",
-   "schedule": "0 12 * * *",
+   "kind": "event",
+   "event": "subscription.day_skipped",
+   "delay": "PT0S",
    "conditions": [
-    "subscription.active == true",
     "tomorrow.delivery_blocked == true"
    ],
    "segments": [
@@ -1444,7 +1445,8 @@
    "delivery": {
     "primary": "sms",
     "parallel": [
-     "whatsapp"
+     "whatsapp",
+     "push"
     ],
     "fallback": []
    },
@@ -1457,7 +1459,7 @@
     "C-06",
     "CH-03"
    ],
-   "note": "Fires AT the 12:00 cut-off on D-1 for delivery on D — 19 hours notice. Retain a separate 07:00 run ONLY for causes arising after the cut-off (vehicle failure, area disruption), condition: blocked_reason_arose_after_cutoff == true.",
+   "note": "Fires AT the 12:00 cut-off on D-1 for delivery on D — 19 hours notice. Owner 24 Sep: wired to subscription.day_skipped, which the noon lock emits when the wallet as it stood at 12:00 does not cover tomorrow (lockConsumerDay); one message per member and day (scope day_skipped:D). tomorrow.delivery_blocked is false for a day a free Welcome Litre pack still arrives (CH-03 day 0) and for a day that is not tomorrow (a catch-up after an outage), so neither is told. B-02 is not sent to a member this message reached at the same noon. SMS only with a DLT id mapped; push in parallel once enabled. Retain a separate 07:00 run ONLY for causes arising after the cut-off (vehicle failure, area disruption), condition: blocked_reason_arose_after_cutoff == true (not built).",
    "ch03_verification": {
     "day0_campaign_subscriber_zero_balance_free_pack_due": "MUST NOT FIRE — one entitled free delivery is cover",
     "day1_noon_not_recharged": "MUST FIRE — the next day is genuinely unfunded",

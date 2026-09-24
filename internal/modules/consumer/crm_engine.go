@@ -1072,8 +1072,12 @@ func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm st
 	// TERMS §5.3: "your wallet needs enough balance by 12 NOON for the next
 	// morning's delivery. If it does not, WE TELL YOU" — so the shortfall
 	// notice fires right after noon, not at five o'clock, one full day before
-	// the cut-off it names (crmSweepTomorrowShortfall).
-	if hm >= "12:00" {
+	// the cut-off it names (crmSweepTomorrowShortfall). Right AFTER the noon
+	// lock, not before it: the sweep must know whether the lock skipped
+	// tomorrow (D-07 then speaks instead), so the day's sweep is claimed only
+	// once no preview for tomorrow is still undecided, and from 13:00 in any
+	// case (a lock that cannot run must not silence B-02 for the day).
+	if hm >= "12:00" && (hm >= "13:00" || s.noonLockDecided(ctx, now)) {
 		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-02-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
 			s.crmSweepTomorrowShortfall(ctx, now)
 		}
@@ -1157,8 +1161,31 @@ func (s *service) crmSweepTomorrowShortfall(ctx context.Context, now time.Time) 
 		if s.crmInLiveWelcomeJourney(ctx, cid) {
 			continue
 		}
+		// One clear message (owner, 24 Sep): a member the noon lock just told
+		// "no delivery tomorrow - recharge by 12 noon tomorrow" (D-07) is not
+		// also sent B-02's "recharge by 12 noon tomorrow" at the same noon.
+		if s.crmSkipNoticeFor(ctx, cid, lockedThroughDay(now)) {
+			continue
+		}
 		s.crmDispatchAt(ctx, "B-02", cid, nil, now)
 	}
+}
+
+// crmSkipNoticeFor reports whether D-07 speaks to this member about day:
+// the noon lock skipped it and said so (a subscription.day_skipped event
+// whose tomorrow_blocked holds, the D-07 condition), and D-07 is not
+// switched off.
+func (s *service) crmSkipNoticeFor(ctx context.Context, consumerID primitive.ObjectID, day string) bool {
+	if s.deps.Flags != nil && s.crmTriggerKilled(ctx, "D-07") {
+		return false
+	}
+	n, err := s.repo.accounts.Database().Collection(collCRMEvents).CountDocuments(ctx, bson.D{
+		{Key: "topic", Value: "subscription.day_skipped"},
+		{Key: "consumer_id", Value: consumerID},
+		{Key: "payload.day", Value: day},
+		{Key: "payload.tomorrow_blocked", Value: true},
+	}, options.Count().SetLimit(1))
+	return err == nil && n > 0
 }
 
 // crmPlanCostOn is what the LOCK will ask the wallet for one plan's delivery
