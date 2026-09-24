@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -871,9 +872,12 @@ const addressReplayRadiusM = 5.0
 // sameAddressReplay reports whether a new address describes one the member
 // already holds: the same label (trimmed, case-insensitive), the same
 // structured door (a different flat in the same tower shares the pin, so the
-// door must match), and either both pins within addressReplayRadiusM or, with
-// no pin on either side, the same text. A pin on one side only is a
-// different capture and never matches.
+// door must match), and either both pins within addressReplayRadiusM and the
+// same address lines (punctuation and spacing aside), or, with no pin on
+// either side, the same text. A pin on one side only is a different capture
+// and never matches. The pin narrows the text match, it never replaces it:
+// outside a society the flat lives only in line1, and the app always sends
+// the label "Home", so two flats of one building differ in line1 alone.
 func sameAddressReplay(have, in *address) bool {
 	norm := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
 	if norm(have.Label) != norm(in.Label) || !sameDoor(have, in) {
@@ -883,12 +887,26 @@ func sameAddressReplay(have, in *address) bool {
 	inPin := in.Lat != nil && in.Lng != nil
 	switch {
 	case havePin && inPin:
-		return haversineM(geoPt{Lat: *have.Lat, Lng: *have.Lng}, geoPt{Lat: *in.Lat, Lng: *in.Lng}) <= addressReplayRadiusM
+		return addressLineKey(have.Line1) == addressLineKey(in.Line1) && addressLineKey(have.Line2) == addressLineKey(in.Line2) &&
+			haversineM(geoPt{Lat: *have.Lat, Lng: *have.Lng}, geoPt{Lat: *in.Lat, Lng: *in.Lng}) <= addressReplayRadiusM
 	case !havePin && !inPin:
 		return norm(have.Line1) == norm(in.Line1) && norm(have.Line2) == norm(in.Line2) &&
 			norm(have.City) == norm(in.City) && norm(have.Pincode) == norm(in.Pincode)
 	}
 	return false
+}
+
+// addressLineKey is an address line with only its letters and digits kept,
+// lower-cased: "P4-805, Chandra Panorama" and "P4 805 Chandra Panorama" are the
+// same line, "Flat 3, Shanti Apartments" and "Flat 7, Shanti Apartments" are not.
+func addressLineKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (s *service) makeDefault(ctx context.Context, consumerID, addrID primitive.ObjectID) (*address, error) {

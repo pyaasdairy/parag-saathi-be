@@ -106,3 +106,39 @@ func TestAddressCreateReplayReturnsTheStoredRow(t *testing.T) {
 		t.Fatal("a different flat at the same pin was folded into the first")
 	}
 }
+
+// R1-07: the app always sends label "Home", and outside a society the flat
+// lives only in line1. Pins within 5 m used to be enough, so a second flat in
+// the same building (or a member correcting their flat number) came back as
+// the OLD row and the new door was silently discarded.
+func TestAddressCreateDifferentFlatAtTheSamePinIsKept(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000008502", 0)
+	clearAddresses(t, w, cid)
+	lat, lng := 26.7800, 81.0200
+	mk := func(line1 string, lt float64) *address {
+		t.Helper()
+		ad, err := w.svc.createAddress(ctx, cid, addressInput{Label: "Home", Line1: line1, Line2: "Gomti Nagar", City: "Lucknow", Pincode: "226010", IsDefault: true, Lat: &lt, Lng: &lng})
+		if err != nil {
+			t.Fatalf("createAddress %q: %v", line1, err)
+		}
+		return ad
+	}
+	first := mk("Flat 3, Shanti Apartments", lat)
+	second := mk("Flat 7, Shanti Apartments", lat+0.00002) // ~2 m away
+	if second.ID == first.ID || second.Line1 != "Flat 7, Shanti Apartments" {
+		t.Fatalf("a different flat was folded into the first: got %s %q, first %s", second.ID.Hex(), second.Line1, first.ID.Hex())
+	}
+	list, err := w.svc.listAddresses(ctx, cid)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("addresses after two flats: %d %v", len(list), err)
+	}
+	// The genuine replay (same text, punctuation aside, pin re-dropped) still
+	// returns the stored row.
+	again := mk("flat 7 shanti apartments", lat+0.00001)
+	if again.ID != second.ID {
+		t.Fatalf("a replay of flat 7 created a new row: %s want %s", again.ID.Hex(), second.ID.Hex())
+	}
+}
