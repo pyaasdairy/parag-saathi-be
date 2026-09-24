@@ -27,18 +27,30 @@ func TestInstantWindow_Hours(t *testing.T) {
 }
 
 func TestInstantWindow_PausedAndNoHours(t *testing.T) {
-	// Manual "close now" during open hours → shut, resumes at the next open (tomorrow 7AM).
+	// The manager's pause ("Close instant now" in the Zone tab) holds until they
+	// turn it off: it does NOT end at the next opening time, so the label names no
+	// time (the consumer app reads "Instant resumes when the store turns it back on").
 	zp := zone{InstantOpenMin: 420, InstantCloseMin: 1320, InstantPaused: true}
-	if open, label, _ := instantWindow(zp, istAt(10, 0)); open || label != "tomorrow at 7:00 AM" {
-		t.Fatalf("paused@10:00 should be closed, resume tomorrow 7AM; got open=%v label=%q", open, label)
+	for _, at := range []time.Time{istAt(10, 0), istAt(23, 0), istAt(7, 0)} {
+		if open, label, resumesAt := instantWindow(zp, at); open || label != pausedResumesLabel || resumesAt != "" {
+			t.Fatalf("paused@%s: open=%v label=%q at=%q", at.Format("15:04"), open, label, resumesAt)
+		}
+	}
+	if pausedResumesLabel != "when the store turns it back on" {
+		t.Fatalf("paused label: %q", pausedResumesLabel)
 	}
 	// No hours saved (close==0) → the 07:00-22:00 the console shows, so 03:00 is shut.
 	if open, label, _ := instantWindow(zone{}, istAt(3, 0)); open || label != "today at 7:00 AM" {
 		t.Fatalf("no-hours zone@03:00 should be closed, resume today 7AM; got open=%v label=%q", open, label)
 	}
-	// No hours + paused → closed, default resume 07:00 IST.
-	if open, label, _ := instantWindow(zone{InstantPaused: true}, istAt(3, 0)); open || label != "today at 7:00 AM" {
-		t.Fatalf("no-hours paused@03:00 should resume today 7AM; got open=%v label=%q", open, label)
+	// No hours + paused → closed until the manager turns it back on.
+	if open, label, _ := instantWindow(zone{InstantPaused: true}, istAt(3, 0)); open || label != pausedResumesLabel {
+		t.Fatalf("no-hours paused@03:00: open=%v label=%q", open, label)
+	}
+	// An extension never reopens a paused lane.
+	ext := istAt(23, 0)
+	if open, _, _ := instantWindow(zone{InstantPaused: true, InstantExtendedUntil: &ext}, istAt(22, 30)); open {
+		t.Fatalf("paused + extension should stay closed")
 	}
 }
 

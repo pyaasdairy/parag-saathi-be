@@ -404,6 +404,12 @@ func effCloseMin(z *zone) int {
 	return z.InstantCloseMin
 }
 
+// pausedResumesLabel is the "resumes …" answer for a store whose manager paused
+// instant ("Close instant now" in the Zone tab). The pause holds until they
+// switch it off, so the label names no time; the consumer app reads it as
+// "Instant resumes when the store turns it back on".
+const pausedResumesLabel = "when the store turns it back on"
+
 // instantWindow decides whether a store's INSTANT lane is open right now (IST) and,
 // when shut, a human "resumes …" label + the RFC3339 resume moment. The hours are
 // the ones the store console shows (effOpenMin/effCloseMin): a zone that never
@@ -427,6 +433,10 @@ func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt st
 	extended := z.InstantExtendedUntil != nil && now.Before(*z.InstantExtendedUntil)
 	if !z.InstantPaused && !closedNow && (withinHours || extended) {
 		return true, "", ""
+	}
+	if z.InstantPaused {
+		// The pause does not end at the next opening time: name no time.
+		return false, pausedResumesLabel, ""
 	}
 	// Next opening moment in IST (today if we are before today's open, else
 	// tomorrow); after a close-now, the first opening at or after its end.

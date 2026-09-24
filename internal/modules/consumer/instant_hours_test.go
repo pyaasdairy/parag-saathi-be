@@ -176,3 +176,29 @@ func TestInstantHoursKeepTheInstantTestOpenInteraction(t *testing.T) {
 		t.Fatalf("flag off, 5 km, 22:01: %+v %v", sv, err)
 	}
 }
+
+// ── 4) the paused label tells the truth ────────────────────────────────────
+//
+// The manager's pause holds until they switch it off; it does not end at the
+// next opening time. /serviceability used to tell the shopper "Instant resumes
+// tomorrow at 7:00 AM" for a paused store, which stayed shut at 7:00.
+
+func TestInstantHoursPausedLabelNamesNoTime(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000, InstantPaused: true})
+	ctx := context.Background()
+	p1 := pointAtBearing(guardCenter, 1000, 270)
+	for _, at := range []time.Time{ihAt(10, 0), ihAt(23, 0), ihAt(24+7, 0), ihAt(24+7, 5)} {
+		sv, err := w.svc.serviceabilityAt(ctx, p1.Lat, p1.Lng, "", at)
+		if err != nil || sv.Instant || !sv.InstantClosed || sv.InstantResumesLabel != "when the store turns it back on" || sv.InstantResumesAt != "" {
+			t.Fatalf("paused at %s: %+v %v", at.In(istZone).Format("15:04"), sv, err)
+		}
+	}
+	// Closed by the hours (not paused), the label still names the opening time.
+	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000})
+	if sv, err := w.svc.serviceabilityAt(ctx, p1.Lat, p1.Lng, "", ihAt(23, 0)); err != nil || sv.InstantResumesLabel != "tomorrow at 7:00 AM" {
+		t.Fatalf("closed by the hours at 23:00: %+v %v", sv, err)
+	}
+}
