@@ -330,6 +330,63 @@ func TestWalletLockReservesTheMembersOneOffMorningOrder(t *testing.T) {
 	}
 }
 
+// setTrialCounts moves a member's 2+2 welcome trial to the given delivered
+// counts (2 paid, 0 free = the next delivered day is free).
+func setTrialCounts(t *testing.T, w *chainWorld, cid primitive.ObjectID, paid, free int) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := w.svc.repo.getOrCreateTrial(ctx, cid); err != nil {
+		t.Fatalf("trial: %v", err)
+	}
+	if _, err := w.db.Collection(collConsumerTrials).UpdateOne(ctx, bson.D{{Key: "consumer_id", Value: cid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "delivered_paid", Value: paid}, {Key: "delivered_free", Value: free},
+			{Key: "phase", Value: trialPhaseFor(paid, free)}}}}); err != nil {
+		t.Fatalf("set trial: %v", err)
+	}
+}
+
+// Decision 9 (24 Sep): the lock asks the wallet for what the morning will
+// really take at the door. A 2+2 free trial day takes Rs 0, so an empty
+// wallet never skips it; the phase is read at the lock (the day before's
+// delivery may have opened the free window after the preview was made) and
+// the order's display flag follows. A paid trial day still needs funds.
+func TestWalletLockAFreeTrialDayNeedsNoFunds(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1 := addDaysIST(D, 1)
+	long := istDayAt(addDaysIST(D, -3), 9, 0)
+
+	freeDay := w.customer(t, "9000012801", 0)
+	paidDay := w.customer(t, "9000012802", 0)
+	both := w.customer(t, "9000012803", 29) // a free gold day, then Rs 29 of taaza
+	freeSub := walletLockPlan(t, w, freeDay, "gold-500ml", 2, D1, long)
+	paidSub := walletLockPlan(t, w, paidDay, "gold-500ml", 2, D1, long)
+	goldSub := walletLockPlan(t, w, both, "gold-500ml", 2, D1, long)
+	taazaSub := walletLockPlan(t, w, both, "taaza-500ml", 1, D1, istDayAt(addDaysIST(D, -2), 9, 0))
+	setTrialCounts(t, w, paidDay, 1, 0) // the next delivered day is the 2nd paid one
+
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0)) // previews made in the paid phase
+	if o := liveSubOrder(t, w, freeSub.SubscriptionID, D1); o == nil || o.TrialFree {
+		t.Fatalf("setup: the preview is made before the free window opens: %+v", o)
+	}
+	// D's morning delivery was the 2nd paid day: the free window is open.
+	setTrialCounts(t, w, freeDay, 2, 0)
+	setTrialCounts(t, w, both, 2, 0)
+
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 5))
+	if o := assertLocked(t, w, freeSub, D1); !o.TrialFree {
+		t.Fatalf("the locked free day must read as free: %+v", o)
+	}
+	assertSkipped(t, w, paidSub, D1)
+	assertLocked(t, w, goldSub, D1)
+	assertLocked(t, w, taazaSub, D1) // the free gold day reserved nothing
+	if cash := w.cash(t, freeDay); cash != 0 {
+		t.Fatalf("locking moved money: %v", cash)
+	}
+}
+
 // Server down over the lock: the catch-up of a day that was never previewed
 // decides on the same noon wallet.
 func TestCatchUpUsesTheNoonWallet(t *testing.T) {

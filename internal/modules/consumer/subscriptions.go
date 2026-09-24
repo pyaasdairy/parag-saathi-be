@@ -1268,7 +1268,9 @@ func subMemberDays(previews []order) []subMemberDay {
 //     day).
 //  2. Funded, oldest plan first, from the wallet as it stood at 12:00:00
 //     (walletAsOf: identical at 12:00:05 and 12:14:59), less what the member
-//     already owes that day (orders already locked, one-off morning orders).
+//     already owes that day (orders already locked, one-off morning orders),
+//     each at what the door will take (lockCharge: a 2+2 free trial day is
+//     Rs 0, so it never needs funds).
 //  3. Covered: locked, with its store task. Not covered: closed at once as a
 //     skipped day (skipSubPreview), never retried on later ticks, so a
 //     top-up after noon cannot mint a late task; the plan stays active and
@@ -1344,14 +1346,22 @@ func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now t
 		return 0
 	}
 	for i := range committed {
-		avail -= committed[i].Total
+		avail -= lockCharge(&committed[i], committed[i].TrialFree)
 	}
 	avail = round2(avail)
+	freeDay := false // only a trial line reads the trial (and only then creates its row)
+	for _, c := range cands {
+		if orderIsTrialLine(c.o) {
+			freeDay = s.trialFreeDayNow(ctx, cid)
+			break
+		}
+	}
 	locked := 0
 	for _, c := range cands {
-		cost := round2(c.o.Total)
+		free := freeDay && orderIsTrialLine(c.o)
+		cost := round2(lockCharge(c.o, free))
 		if avail >= cost {
-			if s.lockSubOrder(ctx, c.o, now) {
+			if s.lockSubOrder(ctx, c.o, free, now) {
 				locked++
 			}
 			// Reserved whether or not this call won the lock: a replica that
@@ -1364,11 +1374,52 @@ func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now t
 	return locked
 }
 
+// lockCharge is what the lock asks the wallet for one morning order: what
+// the door will really take (decision 9 of 24 Sep, the expected charge, not
+// the sticker). A 2+2 free trial day takes Rs 0 at delivery
+// (trialChargeFor), so an empty wallet never skips it; anything else takes
+// its total.
+func lockCharge(o *order, trialFree bool) float64 {
+	if trialFree {
+		return 0
+	}
+	return o.Total
+}
+
+// orderIsTrialLine reports a subscription morning order on the trial SKU:
+// the only order the 2+2 trial prices at delivery (a one-off order of the
+// same milk never is).
+func orderIsTrialLine(o *order) bool {
+	if o.SubscriptionID == "" {
+		return false
+	}
+	for _, it := range o.Items {
+		if isTrialProduct(it.ProductID) {
+			return true
+		}
+	}
+	return false
+}
+
+// trialFreeDayNow reports whether the member's next delivered trial day is a
+// free one, read at the lock (the day before's delivery may have opened the
+// window since the preview was made). Peeking never advances the trial.
+func (s *service) trialFreeDayNow(ctx context.Context, consumerID primitive.ObjectID) bool {
+	t, err := s.repo.getOrCreateTrial(ctx, consumerID)
+	return err == nil && trialPhaseFor(t.DeliveredPaid, t.DeliveredFree) == trialPhaseFree
+}
+
 // lockSubOrder locks one funded preview: the guarded stamp (placed, never
 // locked - a replica that got there first owns it), then the store task.
-func (s *service) lockSubOrder(ctx context.Context, o *order, now time.Time) bool {
+// trialFree is the display flag as the lock read the trial (a preview made
+// before the free window opened reads free once it is).
+func (s *service) lockSubOrder(ctx context.Context, o *order, trialFree bool, now time.Time) bool {
+	set := bson.D{{Key: "sub_locked_at", Value: now.UTC().Format(time.RFC3339)}}
+	if orderIsTrialLine(o) {
+		set = append(set, bson.E{Key: "trial_free", Value: trialFree})
+	}
 	upd, uerr := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
-		bson.D{{Key: "sub_locked_at", Value: now.UTC().Format(time.RFC3339)}},
+		set,
 		bson.D{
 			{Key: "status", Value: "placed"},
 			{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
