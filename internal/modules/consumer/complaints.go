@@ -327,28 +327,32 @@ func (h *handler) listComplaints(w http.ResponseWriter, r *http.Request) {
 }
 
 // -- HTTP (Saathi operator queue, /consumer/ops/complaints) -------------------
+//
+// Saathi's wire format, like every route in the operator group (and like the
+// group's own auth refusals): {data} on success, {error:{code,message}} on
+// failure, which is the only shape the Saathi ApiClient reads.
 
 func (h *handler) opsListComplaints(w http.ResponseWriter, r *http.Request) {
 	list, err := h.svc.listAllComplaints(r.Context(), r.URL.Query().Get("status"))
 	if err != nil {
-		writeErr(w, err)
+		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	httpx.JSON(w, http.StatusOK, list)
 }
 
 func (h *handler) opsUpdateComplaint(w http.ResponseWriter, r *http.Request) {
 	var in complaintUpdateInput
 	if err := decode(r, &in); err != nil {
-		writeErr(w, err)
+		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
 	c, err := h.svc.updateComplaint(r.Context(), chi.URLParam(r, "ref"), in)
 	if err != nil {
-		writeErr(w, err)
+		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, c)
+	httpx.JSON(w, http.StatusOK, c)
 }
 
 // -- HTTP (admin CRM, /consumer/admin/crm/complaints) -------------------------
