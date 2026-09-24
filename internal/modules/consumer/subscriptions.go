@@ -1293,6 +1293,15 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 // (orderCancelledByDelivery) so a rider's undo can never resurrect it.
 const orderCancelledByMissed = "missed"
 
+// The words a missed close writes where people read them: the task's
+// failure reason (the rider and store consoles print it after "Reported:")
+// and the order.failed reason D-09 renders as [REASON] ("could not reach you
+// (...)"). cancelled_by keeps the machine value above for the code.
+const (
+	missedTaskFailureReason = "Missed: the delivery day passed without a delivery"
+	missedCustomerReason    = "the delivery day passed without a delivery"
+)
+
 // subscriptionOpenStatuses are the order statuses between placement and a
 // delivery outcome - what a missed order can still be sitting at.
 var subscriptionOpenStatuses = bson.A{"placed", "confirmed", "preparing", "assigned", "out_for_delivery"}
@@ -1322,8 +1331,8 @@ func (r *repository) listStaleLockedSubOrders(ctx context.Context, cutoff string
 // "placed" forever: the app's active filter hid it while the server, the
 // day index and the store queue all treated it as live. It becomes
 // cancelled (the one terminal status the app draws besides delivered), its
-// task fails with reason missed, order.failed is emitted with reason
-// "missed" so the member is told, and no money moves. Yesterday's orders
+// task fails with missedTaskFailureReason, order.failed is emitted with
+// missedCustomerReason so the member is told in words, and no money moves. Yesterday's orders
 // are closed from noon (the morning is left for a late delivered mark);
 // older ones on any tick. An order a rider is still out with gets until the
 // day after: failing the task under the rider refused their late delivered
@@ -1361,13 +1370,13 @@ func (s *service) closeMissedSubscriptionOrders(ctx context.Context, now time.Ti
 		closed++
 		if task != nil && task.Status != "FAILED" {
 			_, _ = s.repo.updateDelivery(ctx, task.ID,
-				bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: "missed"}},
+				bson.D{{Key: "status", Value: "FAILED"}, {Key: "failure_reason", Value: missedTaskFailureReason}},
 				bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"DELIVERED", "FAILED"}}}}})
 		}
 		if crmEnabled() {
 			if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
 				s.emitCRMEvent(ctx, "order.failed", cid, map[string]any{
-					"order_id": o.OrderID, "labelled_product": crmLabelledProductOf(o), "reason": "missed",
+					"order_id": o.OrderID, "labelled_product": crmLabelledProductOf(o), "reason": missedCustomerReason,
 				})
 			}
 		}

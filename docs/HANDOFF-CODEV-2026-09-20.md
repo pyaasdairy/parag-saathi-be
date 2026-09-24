@@ -601,8 +601,10 @@ Welcome Litre plan) covers every variant of its product. The app's own guard key
 The sweep's new MISSED step (`closeMissedSubscriptionOrders`) closes a locked
 morning order whose delivery day passed with no delivery task or a task never
 completed: status `cancelled` (the one terminal status the app draws besides
-`delivered`), `cancelled_by: missed`, the task `FAILED` with reason `missed`,
-`order.failed` emitted with `reason: "missed"`, no money moved. Yesterday's orders
+`delivered`), `cancelled_by: missed`, the task `FAILED` with reason "Missed: the
+delivery day passed without a delivery", `order.failed` emitted with reason "the
+delivery day passed without a delivery" (D-09's [REASON]; it said "(missed)" before
+R4-10), no money moved. Yesterday's orders
 close from noon (the morning is left for a late delivered mark); older ones on any
 tick. A task already `DELIVERED` is never touched (the order sync owns it), and one
 still `OUT_FOR_DELIVERY` gets until the day after its delivery day.

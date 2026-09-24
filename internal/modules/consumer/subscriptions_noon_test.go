@@ -392,7 +392,7 @@ func TestDuplicateSubscriptionRefused(t *testing.T) {
 
 // A locked morning order whose delivery day passed with no delivery is
 // closed by the sweep: cancelled (the terminal status the app draws), the
-// task failed with reason missed, order.failed emitted with reason missed,
+// task failed and order.failed emitted, each with the missed reason in words,
 // no money moved; a delivered one and a still-current one are untouched.
 func TestMissedLockedOrdersAreClosedBySweep(t *testing.T) {
 	w, done := newChainWorld(t)
@@ -455,7 +455,7 @@ func TestMissedLockedOrdersAreClosedBySweep(t *testing.T) {
 	if o := w.orderByID(t, d.OrderID); o.Status != "placed" {
 		t.Fatalf("today's order was touched: %s", o.Status)
 	}
-	if task := chainTaskFor(t, w, a.OrderID); task.Status != "FAILED" || task.FailureReason != "missed" {
+	if task := chainTaskFor(t, w, a.OrderID); task.Status != "FAILED" || task.FailureReason != missedTaskFailureReason {
 		t.Fatalf("task a: %s %q", task.Status, task.FailureReason)
 	}
 	for _, id := range []string{a.OrderID, b.OrderID} {
@@ -463,7 +463,7 @@ func TestMissedLockedOrdersAreClosedBySweep(t *testing.T) {
 		if len(evs) != 1 {
 			t.Fatalf("order.failed for %s: %d want 1", id, len(evs))
 		}
-		if p, _ := evs[0]["payload"].(bson.M); p["reason"] != "missed" {
+		if p, _ := evs[0]["payload"].(bson.M); p["reason"] != missedCustomerReason {
 			t.Fatalf("reason: %v", p)
 		}
 	}

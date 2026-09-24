@@ -125,6 +125,58 @@ func TestCRMD09DeliveryFailedReachesTheMember(t *testing.T) {
 	}
 }
 
+// R4-10: a locked morning order whose day passed with no delivery is closed
+// by the sweep's missed step. It used to write the machine token "missed" as
+// the task's failure reason (the rider app prints it as "Reported: missed"
+// for a task the rider never reported) and as the order.failed reason, so
+// D-09 told the member "could not reach you (missed)". Both now say what
+// happened in words.
+func TestCRMD09MissedClosureSaysWhatHappened(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+	cid := w.customer(t, "9000007603", 500)
+	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: D1})
+	if err != nil {
+		t.Fatalf("createSubscription: %v", err)
+	}
+	chainBackdateSubscription(t, w, sub, istDayAt(addDaysIST(D, -2), 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 11, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 15)) // D+1 locks, its task is minted
+	o := liveSubOrder(t, w, sub.SubscriptionID, D1)
+	if o == nil || o.SubLockedAt == "" {
+		t.Fatalf("setup: D+1 must be locked: %+v", o)
+	}
+	// Nobody delivers or reports it; the noon after, the sweep closes it.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D2, 12, 30))
+	if got := w.orderByID(t, o.OrderID); got.Status != "cancelled" || got.CancelledBy != orderCancelledByMissed {
+		t.Fatalf("setup: the missed order must close: %s by %q", got.Status, got.CancelledBy)
+	}
+	if task := chainTaskFor(t, w, o.OrderID); task.Status != "FAILED" || task.FailureReason != missedTaskFailureReason {
+		t.Errorf("task after the missed close: %s %q, want FAILED %q", task.Status, task.FailureReason, missedTaskFailureReason)
+	}
+	w.svc.crmProcessEvents(ctx)
+	w.svc.crmFireDueSchedules(ctx, time.Now().Add(riderUndoWindow+time.Minute))
+	cur, err := w.db.Collection(collConsumerInbox).Find(ctx, bson.D{{Key: "consumer_id", Value: cid}, {Key: "trigger_id", Value: "D-09"}})
+	if err != nil {
+		t.Fatalf("inbox: %v", err)
+	}
+	var rows []struct {
+		BodyEN string `bson:"body_en"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		t.Fatalf("inbox decode: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("D-09 rows for the missed order: %d, want 1", len(rows))
+	}
+	if b := rows[0].BodyEN; strings.Contains(b, "(missed)") || !strings.Contains(b, "("+missedCustomerReason+")") {
+		t.Fatalf("D-09 for a missed day must say what happened, not a machine token: %q", b)
+	}
+}
+
 // R1-04: a rider who mis-taps "not delivered" can undo it for 15 minutes,
 // which walks the order back to out_for_delivery. D-09 used to go out on the
 // next worker tick, so the member read "Not delivered ... call support" next
