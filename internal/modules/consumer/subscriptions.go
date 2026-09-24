@@ -563,6 +563,9 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 			"subscription_id": sub.SubscriptionID, "product_id": sub.ProductID, "qty": sub.Qty,
 			"frequency": sub.Frequency, "start_date": sub.StartDate,
 			"start_label": crmSubscriptionStartLabel(sub, now),
+			// A-03 is per_subscription: each plan is its own claim scope, so
+			// two plans started on one day are both announced.
+			"scope_key": sub.SubscriptionID,
 		})
 		cycle := round2(sub.UnitPrice*float64(sub.Qty)) + subscriptionDeliveryFee
 		if wv, werr := s.wallet(ctx, consumerID); werr == nil && wv.Available < cycle {
