@@ -466,11 +466,31 @@ func (s *service) assignRider(ctx context.Context, actor auth.Actor, storeID, de
 	if !contains(riders, riderPartyID) {
 		return nil, errBadRequest("rider is not assigned to this store")
 	}
+	// A FAILED task is reassignable only when the delivery side failed it (a
+	// rider's not-delivered marking or the store's own cancel). A task failed
+	// because the CUSTOMER cancelled the order stays failed: sending a rider
+	// would deliver, and charge for, an order the member called off.
+	if d.Status == "FAILED" {
+		parent, perr := s.repo.findOrderAnyUser(ctx, d.OrderID)
+		if perr != nil {
+			return nil, perr
+		}
+		if parent.Status == "cancelled" && parent.CancelledBy != orderCancelledByDelivery {
+			return nil, errConflict("ORDER_CANCELLED", "the customer cancelled this order; it cannot be reassigned")
+		}
+	}
 	now := time.Now().UTC()
-	return s.repo.updateDelivery(ctx, deliveryID,
+	upd, err := s.repo.updateDelivery(ctx, deliveryID,
 		bson.D{{Key: "rider_party_id", Value: riderPartyID}, {Key: "status", Value: "ASSIGNED"}, {Key: "assigned_at", Value: now.Format(time.RFC3339)}},
 		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"ASSIGNED", "FAILED"}}}}},
 	)
+	if err != nil {
+		return nil, err
+	}
+	if d.Status == "FAILED" {
+		s.syncOrderReassigned(ctx, upd) // the member sees the order live again
+	}
+	return upd, nil
 }
 
 // ── Store manager order surgery (damage at handover) ────────────────────────
@@ -1015,8 +1035,14 @@ func (s *service) syncOrderOutForDelivery(ctx context.Context, d *delivery) {
 	if d.LastKnownGeo != nil {
 		rd.CurrentLat, rd.CurrentLng = &d.LastKnownGeo.Lat, &d.LastKnownGeo.Lng
 	}
-	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
+	// Guarded: a pickup never resurrects an order that is already delivered or
+	// cancelled (a customer's cancel must stay a cancel; the door then refuses
+	// the delivery as ORDER_CANCELLED and no money moves).
+	res, err := s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}, orderLiveGuard},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "out_for_delivery"}, {Key: "rider_id", Value: d.RiderPartyID}, {Key: "riders", Value: rd}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+	if err == nil && res.MatchedCount == 0 {
+		return // nothing live to dispatch: no order.dispatched either
+	}
 	// CRM (contract C6, inert unless CRM_ENABLED): order.dispatched. Best-effort.
 	// promotional_only rides along so D-02's condition can read it (a free
 	// pack out for delivery sends no D-02).
@@ -1066,8 +1092,9 @@ func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 // that is what the order becomes; no status the deployed app cannot draw is
 // invented. Guarded: a delivered or already-cancelled order is never touched,
 // and only an order this call actually flipped emits order.failed (contract
-// C6; the emit is inert unless CRM_ENABLED). A later re-assign of the FAILED
-// task walks the order forward again through the normal pickup sync.
+// C6; the emit is inert unless CRM_ENABLED). A store reassign of the FAILED
+// task walks the order back to live (syncOrderReassigned), and so does the
+// rider's undo (syncOrderFailedUndone); the pickup sync never does.
 func (s *service) syncOrderFailed(ctx context.Context, d *delivery, reason string) {
 	// cancelled_by marks that the TASK cancelled this order, so a rider's undo
 	// of the FAILED marking can walk it back; a customer's own cancel never
@@ -1106,8 +1133,31 @@ func (s *service) syncOrderFailedUndone(ctx context.Context, d *delivery) {
 func (s *service) syncOrderAssigned(ctx context.Context, d *delivery) {
 	name, phone := s.repo.riderName(ctx, d.RiderPartyID)
 	rd := &rider{ID: d.RiderPartyID, FullName: name, Phone: phone}
-	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}},
+	_, _ = s.repo.orders.UpdateOne(ctx, bson.D{{Key: "order_id", Value: d.OrderID}, orderLiveGuard},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "assigned"}, {Key: "rider_id", Value: d.RiderPartyID}, {Key: "riders", Value: rd}, {Key: "updated_at", Value: time.Now().UTC()}}}})
+}
+
+// orderLiveGuard is the filter clause every forward sync carries: a task
+// moving forward never rewrites an order that is already delivered or
+// cancelled. The only ways back from cancelled are the explicit walk-backs
+// (syncOrderReassigned, syncOrderFailedUndone), and both require the TASK to
+// have cancelled it.
+var orderLiveGuard = bson.E{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"delivered", "cancelled"}}}}
+
+// syncOrderReassigned walks an order the task cancelled (a rider's FAILED
+// marking or a store cancel) back to live when the store manager reassigns
+// that task, so the member sees it coming again and the redelivery is not
+// refused as ORDER_CANCELLED. Keyed on cancelled_by, like the rider's undo:
+// a customer's own cancel is never walked back.
+func (s *service) syncOrderReassigned(ctx context.Context, d *delivery) {
+	name, phone := s.repo.riderName(ctx, d.RiderPartyID)
+	rd := &rider{ID: d.RiderPartyID, FullName: name, Phone: phone}
+	_, _ = s.repo.orders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: d.OrderID}, {Key: "status", Value: "cancelled"}, {Key: "cancelled_by", Value: orderCancelledByDelivery}},
+		bson.D{
+			{Key: "$set", Value: bson.D{{Key: "status", Value: "assigned"}, {Key: "rider_id", Value: d.RiderPartyID}, {Key: "riders", Value: rd}, {Key: "updated_at", Value: time.Now().UTC()}}},
+			{Key: "$unset", Value: bson.D{{Key: "cancelled_by", Value: ""}}},
+		})
 }
 
 // syncOrderFindingRider drops the order back to placed (finding a rider) when a
