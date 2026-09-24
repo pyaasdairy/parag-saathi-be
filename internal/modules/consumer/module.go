@@ -441,9 +441,10 @@ func Register(r chi.Router, d *deps.Deps) {
 				sm.Put("/stores/{storeId}/zone", h.putZone)
 				// Tonight-only instant overrides at closing time (instant_hours.go):
 				// keep instant open 30/60/120 min longer, or close it until the
-				// next opening time without the persistent pause.
+				// next opening time without the persistent pause (reopen undoes that).
 				sm.Post("/stores/{storeId}/zone/instant/extend", h.extendInstant)
 				sm.Post("/stores/{storeId}/zone/instant/close-now", h.closeInstantNow)
+				sm.Post("/stores/{storeId}/zone/instant/reopen", h.reopenInstant)
 			})
 
 			// Where riders collect stock before a round. Both consoles read it;

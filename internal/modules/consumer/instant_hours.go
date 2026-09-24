@@ -24,6 +24,7 @@ import (
 //     window opened. It simply expires at the stored moment.
 //   - CLOSE NOW (POST .../zone/instant/close-now): instant shuts until the next
 //     opening time and reopens by itself; the persistent pause is not touched.
+//     REOPEN (POST .../zone/instant/reopen) undoes it at once.
 //
 // Either one replaces the other (the manager's latest word wins). The Zone
 // tab's Save (PUT) never touches them. The closing alert that asks the manager
@@ -152,6 +153,25 @@ func (r *repository) setInstantOverride(ctx context.Context, storeID string, ext
 	return &out, nil
 }
 
+// clearInstantClose removes a close-now (instant_closed_until) and nothing
+// else. Returns the stored zone.
+func (r *repository) clearInstantClose(ctx context.Context, storeID, by string, now time.Time) (*zone, error) {
+	update := bson.D{
+		{Key: "$set", Value: bson.D{{Key: "updated_by", Value: by}, {Key: "updated_at", Value: now.UTC()}}},
+		{Key: "$unset", Value: bson.D{{Key: "instant_closed_until", Value: ""}}},
+	}
+	var out zone
+	err := r.storeZones.FindOneAndUpdate(ctx, bson.D{{Key: "store_id", Value: storeID}}, update,
+		options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&out)
+	if isNoDocs(err) {
+		return nil, errUnprocessable("INSTANT_NOT_CONFIGURED", "this store has no instant delivery area yet; draw it on the Zone tab first")
+	}
+	if err != nil {
+		return nil, errInternal("instant reopen save failed")
+	}
+	return &out, nil
+}
+
 // ── service ─────────────────────────────────────────────────────────────────
 
 // instantZoneFor loads the manager's own zone and refuses a store with no
@@ -205,6 +225,24 @@ func (s *service) closeInstantNow(ctx context.Context, actor auth.Actor, storeID
 	return s.repo.setInstantOverride(ctx, storeID, nil, &until, actor.PartyID, now)
 }
 
+// reopenInstant undoes a close-now: instant follows its hours (and any
+// extension) again at once. Tonight's close is not moved, and after the hours
+// it stays shut (extend opens past them). The persistent pause is refused as
+// extend refuses it: it holds until the manager switches it off.
+func (s *service) reopenInstant(ctx context.Context, actor auth.Actor, storeID string, now time.Time) (*zone, error) {
+	z, err := s.instantZoneFor(ctx, actor, storeID)
+	if err != nil {
+		return nil, err
+	}
+	if z.InstantPaused {
+		return nil, errUnprocessable("INSTANT_PAUSED", "instant is switched off for this store; turn it back on in the Zone tab first")
+	}
+	if z.InstantClosedUntil == nil {
+		return z, nil // nothing to undo
+	}
+	return s.repo.clearInstantClose(ctx, storeID, actor.PartyID, now)
+}
+
 // ── handlers ────────────────────────────────────────────────────────────────
 
 // extendInstant — POST /consumer/stores/{storeId}/zone/instant/extend
@@ -236,6 +274,21 @@ func (h *handler) closeInstantNow(w http.ResponseWriter, r *http.Request) {
 	storeID := chi.URLParam(r, "storeId")
 	now := h.svc.now()
 	z, err := h.svc.closeInstantNow(r.Context(), actor, storeID, now)
+	if err != nil {
+		httpx.Error(w, r, toHTTPErr(err))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, zoneViewAt(z, storeID, now))
+}
+
+// reopenInstant — POST /consumer/stores/{storeId}/zone/instant/reopen
+// (STORE_MANAGER, own store): undoes a close-now. Answers the zone in the
+// GET /zone shape.
+func (h *handler) reopenInstant(w http.ResponseWriter, r *http.Request) {
+	actor, _ := operatorActor(r)
+	storeID := chi.URLParam(r, "storeId")
+	now := h.svc.now()
+	z, err := h.svc.reopenInstant(r.Context(), actor, storeID, now)
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return

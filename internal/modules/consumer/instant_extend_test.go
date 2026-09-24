@@ -5,8 +5,9 @@ package consumer
 //
 //	POST /consumer/stores/{storeId}/zone/instant/extend    {minutes: 30|60|120}
 //	POST /consumer/stores/{storeId}/zone/instant/close-now
+//	POST /consumer/stores/{storeId}/zone/instant/reopen    (undoes a close-now)
 //
-// Both answer the zone in the GET /zone shape. An extension runs from the
+// All answer the zone in the GET /zone shape. An extension runs from the
 // later of now, tonight's closing time and the current extension, never past
 // 02:00 IST; close-now shuts instant until the next opening time without the
 // persistent pause, so it reopens by itself. Fixed IST clock throughout.
@@ -16,6 +17,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +29,8 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 )
 
-// ihOp calls extend ("extend", body {minutes}) or close-now ("close-now") as
+// ihOp calls extend ("extend", body {minutes}), close-now ("close-now") or
+// reopen ("reopen") as
 // the given operator, on the service clock, and returns the status plus the
 // {data} or {error} object.
 func ihOp(t *testing.T, w *chainWorld, actor auth.Actor, storeID, op string, minutes int) (int, map[string]any) {
@@ -49,6 +52,8 @@ func ihOp(t *testing.T, w *chainWorld, actor auth.Actor, storeID, op string, min
 		h.extendInstant(rec, req)
 	case "close-now":
 		h.closeInstantNow(rec, req)
+	case "reopen":
+		h.reopenInstant(rec, req)
 	default:
 		t.Fatalf("unknown op %q", op)
 	}
@@ -316,6 +321,101 @@ func TestInstantCloseNowReopensAtTheNextOpeningTime(t *testing.T) {
 	}
 	if z := ihStoredZone(t, w, store); z.InstantExtendedUntil == nil || !z.InstantExtendedUntil.Equal(ihAt(72+22, 30)) {
 		t.Fatalf("a Save dropped tonight's extension: %v", z.InstantExtendedUntil)
+	}
+}
+
+// ── reopen undoes a close-now ──────────────────────────────────────────────
+//
+// Before: close-now had no undo. After a daytime close-now (10:00) instant
+// stayed shut until 07:00 the next day: switching the Zone tab's pause off
+// did nothing (close-now never sets it), and extend reopened it only by also
+// moving tonight's close. Reopen clears the close-now alone.
+
+func TestInstantReopenUndoesACloseNow(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000}) // 07:00-22:00
+	store := w.storeID.Hex()
+	p1 := pointAtBearing(guardCenter, 1000, 90)
+	cid := w.customer(t, "9000008401", 0)
+
+	ihClock(w, ihAt(10, 0))
+	if code, v := ihOp(t, w, w.mgr, store, "close-now", 0); code != http.StatusOK || v["instantClosedUntil"] != ihUTC(ihAt(24+7, 0)) {
+		t.Fatalf("close-now at 10:00: %d %v", code, v)
+	}
+	if sv := ihInstantAt(t, w, ihAt(10, 30)); sv.Instant {
+		t.Fatalf("10:30 after close-now: %+v", sv)
+	}
+	ihClock(w, ihAt(11, 0))
+	code, v := ihOp(t, w, w.mgr, store, "reopen", 0)
+	if code != http.StatusOK || v["instantOpenNow"] != true || v["instant_open_now"] != true || v["instantClosedUntil"] != nil ||
+		v["instant_closed_until"] != nil || v["instantExtendedUntil"] != nil || v["instantPaused"] != false {
+		t.Fatalf("reopen at 11:00: %d %v", code, v)
+	}
+	// Tonight's close is not moved.
+	if v["instantClosesAt"] != ihUTC(ihAt(22, 0)) {
+		t.Fatalf("reopen moved tonight's close: %v", v["instantClosesAt"])
+	}
+	if z := ihStoredZone(t, w, store); z.InstantClosedUntil != nil || z.InstantExtendedUntil != nil || z.InstantPaused {
+		t.Fatalf("stored after reopen: closed %v extended %v paused %v", z.InstantClosedUntil, z.InstantExtendedUntil, z.InstantPaused)
+	}
+	if sv := ihInstantAt(t, w, ihAt(11, 0)); !sv.Instant || sv.InstantClosed {
+		t.Fatalf("11:00 after reopen: %+v", sv)
+	}
+	if code, out := ihPost(t, w, cid, "instant", p1); code != http.StatusCreated {
+		t.Fatalf("instant order at 11:00 after reopen: %d %v", code, out)
+	}
+	if sv := ihInstantAt(t, w, ihAt(22, 1)); sv.Instant {
+		t.Fatalf("22:01: the hours still close it: %+v", sv)
+	}
+
+	// After the hours have closed, reopen only cancels the close-now: the
+	// hours still hold (extend is what opens past them).
+	ihClock(w, ihAt(24+21, 0))
+	ihOp(t, w, w.mgr, store, "close-now", 0)
+	ihClock(w, ihAt(24+23, 0))
+	if code, v := ihOp(t, w, w.mgr, store, "reopen", 0); code != http.StatusOK || v["instantOpenNow"] != false || v["instantClosedUntil"] != nil {
+		t.Fatalf("reopen at 23:00: %d %v", code, v)
+	}
+	if sv := ihInstantAt(t, w, ihAt(24+23, 0)); sv.Instant || sv.InstantResumesLabel != "tomorrow at 7:00 AM" {
+		t.Fatalf("23:00 after reopen: %+v", sv)
+	}
+
+	// Nothing to undo: 200 and the zone as it is. An extension survives it.
+	ihClock(w, ihAt(48+21, 50))
+	if code, v := ihOp(t, w, w.mgr, store, "extend", 60); code != http.StatusOK || v["instantExtendedUntil"] != ihUTC(ihAt(48+23, 0)) {
+		t.Fatalf("extend: %d %v", code, v)
+	}
+	if code, v := ihOp(t, w, w.mgr, store, "reopen", 0); code != http.StatusOK || v["instantExtendedUntil"] != ihUTC(ihAt(48+23, 0)) || v["instantOpenNow"] != true {
+		t.Fatalf("reopen with nothing to undo: %d %v", code, v)
+	}
+
+	// Refusals: another store's manager, the pause (it holds until switched
+	// off), a store with no instant lane.
+	_, mgrB := ihSecondStore(t, w)
+	if code, e := ihOp(t, w, mgrB, store, "reopen", 0); code != http.StatusForbidden || e["code"] != "FORBIDDEN" {
+		t.Fatalf("manager B reopens A: %d %v", code, e)
+	}
+	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000, InstantPaused: true})
+	if code, e := ihOp(t, w, w.mgr, store, "reopen", 0); code != http.StatusUnprocessableEntity || e["code"] != "INSTANT_PAUSED" {
+		t.Fatalf("reopen while paused: %d %v", code, e)
+	}
+	ihZone(t, w, zone{StandardRadiusM: 8000})
+	if code, e := ihOp(t, w, w.mgr, store, "reopen", 0); code != http.StatusUnprocessableEntity || e["code"] != "INSTANT_NOT_CONFIGURED" {
+		t.Fatalf("reopen with no instant lane: %d %v", code, e)
+	}
+
+	// Mounted beside extend and close-now, in the STORE_MANAGER group.
+	src, err := os.ReadFile("module.go")
+	if err != nil {
+		t.Fatalf("read module.go: %v", err)
+	}
+	s := string(src)
+	i := strings.Index(s, `sm.Post("/stores/{storeId}/zone/instant/close-now", h.closeInstantNow)`)
+	j := strings.Index(s, `sm.Post("/stores/{storeId}/zone/instant/reopen", h.reopenInstant)`)
+	if i < 0 || j < 0 || j < i || strings.Contains(s[i:j], "})") {
+		t.Fatalf("the reopen route is not mounted beside close-now in the STORE_MANAGER group")
 	}
 }
 
