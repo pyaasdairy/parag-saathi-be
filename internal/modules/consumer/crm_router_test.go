@@ -104,7 +104,9 @@ func TestCRMEventParamsShapes(t *testing.T) {
 	}
 	o := &order{Total: 70, Items: []orderItem{{Name: "Parag Gold", Variant: "500ml"}}}
 	p = crmEventParams("complaint.created", map[string]any{"complaint_id": "cmp_1", "ref": "PYS-1", "category": "missing", "order_id": "ord_1"}, o)
-	if p["REF"] != "PYS-1" || p["COMPLAINT_ID"] != "cmp_1" || p["SLA"] != crmComplaintSLA || p["AMOUNT"] != "70" || p["LABELLED_PRODUCT"] != "Parag Gold 500ml"+crmLabelledSuffix {
+	// [AMOUNT] is never the order's total (E2E-01): the event context adds
+	// what the member paid for the goods, from the ledger.
+	if p["REF"] != "PYS-1" || p["COMPLAINT_ID"] != "cmp_1" || p["SLA"] != crmComplaintSLA || p["AMOUNT"] != "" || p["LABELLED_PRODUCT"] != "Parag Gold 500ml"+crmLabelledSuffix {
 		t.Fatalf("complaint.created params: %v", p)
 	}
 	p = crmEventParams("complaint.created", map[string]any{"complaint_id": "cmp_2", "ref": "PYS-2", "category": "app"}, nil)

@@ -9,6 +9,14 @@ import (
 	"testing"
 )
 
+// crmFactTokens are the tokens crmEventCtx.params fills from a fact, not the
+// payload, keyed by the template branch whose condition guarantees them:
+// T-E04 is chosen only when complaint.refundable_amount > 0, and exactly
+// then [AMOUNT] is set (crmComplaintRefundable).
+var crmFactTokens = map[string]map[string]string{
+	"T-E04": {"AMOUNT": "139"},
+}
+
 func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	cfg := crmConfigLoad()
 	label := "Parag Gold Full Cream 500ml" + crmLabelledSuffix
@@ -60,19 +68,31 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		if !emitted {
 			continue // dead config: the backend emits no such topic
 		}
-		params := crmEventParams(tr.Event, payload, o)
-		for k, v := range std {
-			if _, taken := params[k]; !taken {
+		// A conditional template ({"if","then","else"}) must resolve on both
+		// branches; the branch its condition selects may add a token the
+		// router fills from a fact rather than the payload.
+		branches := []string{tr.Template.String()}
+		if tr.Template.If != "" {
+			branches = append(branches, tr.Template.Else)
+		}
+		for _, tplID := range branches {
+			params := crmEventParams(tr.Event, payload, o)
+			for k, v := range std {
+				if _, taken := params[k]; !taken {
+					params[k] = v
+				}
+			}
+			for k, v := range crmFactTokens[tplID] {
 				params[k] = v
 			}
-		}
-		tpl, ok := cfg.Templates[tr.Template.String()]
-		if !ok {
-			t.Errorf("%s names template %s which does not exist", id, tr.Template.String())
-			continue
-		}
-		if tok, ok := crmTemplateResolvable(tpl, params); !ok {
-			t.Errorf("%s (%s) template %s carries [%s], which the router cannot fill", id, tr.Event, tr.Template.String(), tok)
+			tpl, ok := cfg.Templates[tplID]
+			if !ok {
+				t.Errorf("%s names template %s which does not exist", id, tplID)
+				continue
+			}
+			if tok, ok := crmTemplateResolvable(tpl, params); !ok {
+				t.Errorf("%s (%s) template %s carries [%s], which the router cannot fill", id, tr.Event, tplID, tok)
+			}
 		}
 		routed[id] = true
 	}
@@ -123,7 +143,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	if err := json.Unmarshal(embeddedCRMConfig, &meta); err != nil {
 		t.Fatalf("embedded config: %v", err)
 	}
-	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 58 || len(meta.Templates) != 50 {
+	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 58 || len(meta.Templates) != 51 {
 		t.Fatalf("meta.trigger_count=%d triggers=%d templates=%d", meta.Meta.TriggerCount, len(meta.Triggers), len(meta.Templates))
 	}
 }

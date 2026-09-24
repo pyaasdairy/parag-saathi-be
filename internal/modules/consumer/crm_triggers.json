@@ -452,7 +452,15 @@
    "dlt_category": "service_implicit",
    "cta": "choose_fix",
    "en": "Sorry! We'll redeliver [LABELLED_PRODUCT] or refund ₹[AMOUNT] to your Wallet — your choice.",
-   "hi": "Maaf kijiye! [LABELLED_PRODUCT] dobara bhejein ya ₹[AMOUNT] Wallet mein — aap batayein."
+   "hi": "Maaf kijiye! [LABELLED_PRODUCT] dobara bhejein ya ₹[AMOUNT] Wallet mein — aap batayein.",
+   "note": "[AMOUNT] is what the member paid for the goods of the order (the delivery debit, or the cash a rider collected), never the delivery fee; sent only when that is above zero (E-04's template condition)."
+  },
+  "T-E04-REDELIVER": {
+   "dlt_category": "service_implicit",
+   "cta": "choose_fix",
+   "en": "Sorry! We'll redeliver [LABELLED_PRODUCT]. Nothing has been charged for it.",
+   "hi": "Maaf kijiye! [LABELLED_PRODUCT] hum dobara bhejenge. Iske liye koi shulk nahi laga.",
+   "note": "E-04 when nothing was paid for the order (not delivered yet, cash not taken, a free day, or a debit the rider's undo gave back): there is no money to offer back, so redelivery only."
   },
   "T-E06": {
    "dlt_category": "service_implicit",
@@ -1650,7 +1658,11 @@
     ],
     "fallback": []
    },
-   "template": "T-E04",
+   "template": {
+    "if": "complaint.refundable_amount > 0",
+    "then": "T-E04",
+    "else": "T-E04-REDELIVER"
+   },
    "frequency_cap": {
     "per_complaint": 1
    },

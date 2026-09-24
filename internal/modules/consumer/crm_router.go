@@ -174,6 +174,11 @@ type crmEventCtx struct {
 	off     *consumerOffer
 	offDone bool
 	prm     map[string]string
+	// refund is what a complaint's order may offer back (refundable), read
+	// once: the template condition and [AMOUNT] must agree.
+	refund     float64
+	refundErr  error
+	refundDone bool
 }
 
 func (e *crmEventCtx) order() *order {
@@ -195,10 +200,17 @@ func (e *crmEventCtx) params() map[string]string {
 		return e.prm
 	}
 	var o *order
-	if e.ev.Topic == "complaint.created" { // [AMOUNT] and the label come from the order
+	if e.ev.Topic == "complaint.created" { // the label comes from the order
 		o = e.order()
 	}
 	p := crmEventParams(e.ev.Topic, e.ev.Payload, o)
+	if e.ev.Topic == "complaint.created" {
+		// [AMOUNT] is what the member paid for the goods, never the order's
+		// total: absent when nothing was paid (E-04 then offers redelivery).
+		if amt, err := e.refundable(); err == nil && amt > 0 {
+			p["AMOUNT"] = crmRupees(amt)
+		}
+	}
 	for k, v := range e.s.crmStandardParams(e.ctx, e.ev.ConsumerID) {
 		if _, taken := p[k]; !taken {
 			p[k] = v
@@ -248,6 +260,8 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 			return v, nil
 		}
 		return nil, fmt.Errorf("payload carries no category")
+	case "complaint.refundable_amount":
+		return e.refundable()
 	case "new_eta_known":
 		if v, ok := p["new_eta_known"].(bool); ok {
 			return v, nil
@@ -356,6 +370,71 @@ func (e *crmEventCtx) offer() *consumerOffer {
 		}
 	}
 	return e.off
+}
+
+// refundable is crmComplaintRefundable for the order this complaint names,
+// resolved at most once.
+func (e *crmEventCtx) refundable() (float64, error) {
+	if !e.refundDone {
+		e.refundDone = true
+		e.refund, e.refundErr = e.s.crmComplaintRefundable(e.ctx, e.ev.ConsumerID, e.order())
+	}
+	return e.refund, e.refundErr
+}
+
+// crmComplaintRefundable is what E-04 may offer to refund for the order a
+// complaint names: the money the member actually paid for it - the wallet
+// debit on delivery:<order_id>, or for cash on delivery the amount a rider
+// recorded as collected (else the bill, once the order is delivered) - less
+// the delivery and monsoon fees. The fee is only returned when the whole
+// order is refunded, which is the operator's call on the human_call E-04
+// queues alongside. The complaint names no line, so this is the goods of the
+// whole order. 0 when nothing was paid: not delivered yet, a cash order not
+// yet handed over, a free trial day or pack, a debit the rider's undo gave
+// back, or an order that is not the member's own.
+func (s *service) crmComplaintRefundable(ctx context.Context, consumerID primitive.ObjectID, o *order) (float64, error) {
+	if o == nil || o.UserID != consumerID.Hex() || o.Total <= 0 {
+		return 0, nil
+	}
+	paid := 0.0
+	if o.PaymentMethod == "wallet" || o.PaymentMethod == "prepaid" {
+		var row walletTxn
+		err := s.repo.walletTxns.FindOne(ctx, bson.D{
+			{Key: "consumer_id", Value: consumerID},
+			{Key: "ref_id", Value: "delivery:" + o.OrderID},
+			{Key: "type", Value: "DEBIT"},
+			{Key: "status", Value: "SUCCESS"},
+		}).Decode(&row)
+		switch {
+		case err == nil:
+			paid = row.Amount
+		case !isNoDocs(err):
+			return 0, fmt.Errorf("delivery debit lookup: %w", err)
+		}
+	} else if o.Status == "delivered" {
+		paid = o.Total // cash on delivery: the rider takes the bill at the door
+		task, err := s.repo.findDeliveryByOrder(ctx, o.OrderID)
+		if err != nil {
+			return 0, err
+		}
+		if task != nil {
+			var due riderCashDoc
+			err := s.repo.riderColl(collRiderCash).FindOne(ctx, bson.D{
+				{Key: "cash_id", Value: riderCashIDFor(task.ID)}, {Key: "status", Value: "COLLECTED"},
+			}).Decode(&due)
+			switch {
+			case err == nil && due.CollectedAmount > 0:
+				paid = due.CollectedAmount
+			case err != nil && !isNoDocs(err):
+				return 0, fmt.Errorf("cash due lookup: %w", err)
+			}
+		}
+	}
+	goods := round2(paid - o.DeliveryFee - o.MonsoonFee)
+	if goods < 0 {
+		return 0, nil
+	}
+	return goods, nil
 }
 
 // crmCondition is one parsed line of a trigger's conditions. Shapes: a
@@ -542,8 +621,8 @@ func crmRupees(v float64) string {
 
 // crmEventParams builds the UPPERCASE template params for one lifecycle
 // topic from its payload (contract C6). o is the order behind order_id when
-// the caller looked it up (complaint.created needs it for [AMOUNT] and the
-// label); nil otherwise. ORDER_ID and COMPLAINT_ID ride along for push data.
+// the caller looked it up (complaint.created needs it for the label); nil
+// otherwise. ORDER_ID and COMPLAINT_ID ride along for push data.
 func crmEventParams(topic string, payload map[string]any, o *order) map[string]string {
 	str := func(k string) string {
 		v, _ := payload[k].(string)
@@ -585,10 +664,9 @@ func crmEventParams(topic string, payload map[string]any, o *order) map[string]s
 			p["RESOLUTION"] = v
 		}
 		if topic == "complaint.created" {
+			// [AMOUNT] is not the order's total: crmEventCtx.params adds what
+			// the member paid for the goods (crmComplaintRefundable).
 			p["SLA"] = crmComplaintSLA
-			if o != nil {
-				p["AMOUNT"] = crmRupees(o.Total)
-			}
 		}
 	case "rating.submitted":
 		if n, ok := crmPayloadNumber(payload["rating"]); ok {
