@@ -155,6 +155,19 @@ func Register(r chi.Router, d *deps.Deps) {
 			log.Info("legacy task items backfilled with product_id and variant", "tasks", n)
 		}
 	}()
+	// Complaints filed by release/26.07.03 carry no complaint_id; stamp the
+	// id they already answer to (cmp_ + the _id hex, complaints.go). Reads
+	// and by-id lookups derive the same id without it, so this is idempotent,
+	// non-fatal and changes no id anyone has seen.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if n, err := repo.backfillLegacyComplaintIDs(ctx); err != nil {
+			log.Warn("legacy complaint id backfill failed (continuing)", "err", err)
+		} else if n > 0 {
+			log.Info("legacy complaints backfilled with complaint_id", "complaints", n)
+		}
+	}()
 	go svc.crmWorker(context.Background())
 	// Instant closing alert (instant_alerts.go): a one-minute tick asks each
 	// store's managers, 15 minutes before instant closes, to extend it or let

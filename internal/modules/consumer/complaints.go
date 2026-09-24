@@ -92,7 +92,60 @@ type complaint struct {
 func newComplaintID() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
-	return "cmp_" + hex.EncodeToString(b)
+	return legacyComplaintIDPrefix + hex.EncodeToString(b)
+}
+
+// legacyComplaintIDPrefix starts every complaint id, new and derived.
+const legacyComplaintIDPrefix = "cmp_"
+
+// UnmarshalBSON decodes a stored complaint and gives a row without a
+// complaint_id (missing or "") its derived id, so every read path (the
+// member's list, the idempotent re-file, the Saathi queue, the admin CRM, the
+// operator's answer and the CRM events it emits) serves a non-empty id the
+// by-id lookups resolve (complaintIDFilter), before and after the backfill.
+func (c *complaint) UnmarshalBSON(data []byte) error {
+	type stored complaint // no methods: decodes the fields without recursing
+	if err := bson.Unmarshal(data, (*stored)(c)); err != nil {
+		return err
+	}
+	if c.ID == "" && !c.MongoID.IsZero() {
+		c.ID = legacyComplaintID(c.MongoID)
+	}
+	return nil
+}
+
+// complaintIDFilter selects the row an operator names by its complaint id.
+// A derived id (cmp_ + a canonical 24-hex _id) also names the legacy row it
+// was derived from while that row has no complaint_id of its own: a row the
+// boot backfill has not stamped yet (or one an older instance filed during a
+// rolling deploy). A row with its own id answers to that id only.
+func complaintIDFilter(id string) bson.D {
+	byID := bson.D{{Key: "complaint_id", Value: id}}
+	hexPart, ok := strings.CutPrefix(id, legacyComplaintIDPrefix)
+	if !ok || len(hexPart) != 24 {
+		return byID
+	}
+	oid, err := primitive.ObjectIDFromHex(hexPart)
+	if err != nil || oid.Hex() != hexPart {
+		return byID
+	}
+	return bson.D{{Key: "$or", Value: bson.A{
+		byID,
+		bson.D{
+			{Key: "_id", Value: oid},
+			{Key: "complaint_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+		},
+	}}}
+}
+
+// legacyComplaintID is the id of a row filed before complaint ids existed:
+// release/26.07.03 stored complaints with an ObjectID _id and NO
+// complaint_id. It is derived from the _id, so it is unique and stable, it
+// has the cmp_ form every operator path routes by id (updateComplaint), and
+// it cannot collide with a new id (cmp_ + 12 hex, this one is cmp_ + 24).
+// The boot backfill stamps this same value, so the id never changes.
+func legacyComplaintID(id primitive.ObjectID) string {
+	return legacyComplaintIDPrefix + id.Hex()
 }
 
 func (r *repository) complaints() *mongo.Collection {
@@ -111,6 +164,29 @@ func (r *repository) ensureComplaintIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "status", Value: 1}, {Key: "created_at", Value: -1}}},
 	})
 	return err
+}
+
+// backfillLegacyComplaintIDs stamps complaint_id on every row that has none
+// (missing or ""), the rows release/26.07.03 filed before complaint ids
+// existed, with legacyComplaintID(_id): the id those rows already answer to
+// on every read, so no id changes. Idempotent (a stamped row no longer
+// matches) and run non-fatally at boot (module.go). Returns the rows stamped.
+func (r *repository) backfillLegacyComplaintIDs(ctx context.Context) (int64, error) {
+	res, err := r.complaints().UpdateMany(ctx,
+		bson.D{
+			{Key: "complaint_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+			{Key: "_id", Value: bson.D{{Key: "$type", Value: "objectId"}}},
+		},
+		mongo.Pipeline{bson.D{{Key: "$set", Value: bson.D{
+			{Key: "complaint_id", Value: bson.D{{Key: "$concat", Value: bson.A{
+				legacyComplaintIDPrefix, bson.D{{Key: "$toString", Value: "$_id"}},
+			}}}},
+		}}}},
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.ModifiedCount, nil
 }
 
 type complaintInput struct {
@@ -266,8 +342,8 @@ func (s *service) answerComplaint(ctx context.Context, filter bson.D, in complai
 // whichever row comes first: the resolution is read by the member verbatim.
 func (s *service) updateComplaint(ctx context.Context, ref string, in complaintUpdateInput) (*complaint, error) {
 	ref = strings.TrimSpace(ref)
-	if strings.HasPrefix(ref, "cmp_") {
-		return s.answerComplaint(ctx, bson.D{{Key: "complaint_id", Value: ref}}, in)
+	if strings.HasPrefix(ref, legacyComplaintIDPrefix) {
+		return s.answerComplaint(ctx, complaintIDFilter(ref), in)
 	}
 	ref = strings.ToUpper(ref)
 	if ref == "" {
@@ -405,7 +481,7 @@ func (h *handler) crmUpdateComplaint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, err := h.svc.answerComplaint(r.Context(),
-		bson.D{{Key: "complaint_id", Value: chi.URLParam(r, "complaintId")}}, in)
+		complaintIDFilter(strings.TrimSpace(chi.URLParam(r, "complaintId"))), in)
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
