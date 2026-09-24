@@ -454,8 +454,12 @@ type crmDispatchRow struct {
 	// Intended is the trigger's configured primary channel, recorded at
 	// claim time so the operator log shows what SHOULD have carried the
 	// message next to what did (Channel).
-	Intended  string    `bson:"intended,omitempty"`
-	CreatedAt time.Time `bson:"created_at"`
+	Intended string `bson:"intended,omitempty"`
+	// ChannelErrors are the channels that tried and failed (a provider
+	// rejection, an unknown outcome): what did NOT carry the message, and
+	// why. Absent when every attempted channel delivered.
+	ChannelErrors []crmChannelError `bson:"channel_errors,omitempty"`
+	CreatedAt     time.Time         `bson:"created_at"`
 }
 
 func (r *repository) crmDispatchCol() *mongo.Collection {
@@ -520,9 +524,17 @@ func (s *service) crmClaimDispatchScoped(ctx context.Context, t crmTrigger, cons
 }
 
 func (s *service) crmFinishDispatch(ctx context.Context, row *crmDispatchRow, status, guard, channel string) {
-	_, _ = s.repo.crmDispatchCol().UpdateByID(ctx, row.ID, bson.D{{Key: "$set", Value: bson.D{
-		{Key: "status", Value: status}, {Key: "guard", Value: guard}, {Key: "channel", Value: channel},
-	}}})
+	s.crmFinishDispatchWith(ctx, row, status, guard, channel, nil)
+}
+
+// crmFinishDispatchWith is crmFinishDispatch that also records the channels
+// that failed (channel_errors); none means the row keeps its old shape.
+func (s *service) crmFinishDispatchWith(ctx context.Context, row *crmDispatchRow, status, guard, channel string, failed []crmChannelError) {
+	set := bson.D{{Key: "status", Value: status}, {Key: "guard", Value: guard}, {Key: "channel", Value: channel}}
+	if len(failed) > 0 {
+		set = append(set, bson.E{Key: "channel_errors", Value: failed})
+	}
+	_, _ = s.repo.crmDispatchCol().UpdateByID(ctx, row.ID, bson.D{{Key: "$set", Value: set}})
 }
 
 func (s *service) crmCountDispatched(ctx context.Context, consumerID primitive.ObjectID, category, day, excludeTrigger string) int {
@@ -717,6 +729,7 @@ func (s *service) crmDispatchWith(ctx context.Context, triggerID string, consume
 	// stay byte-identical; the SUPPRESSED G9 row below is the audit record.)
 	ch := crmInboxRefs(opts.Payload)
 	delivered := make([]string, 0, 3)
+	var failed []crmChannelError
 	// A trigger a person answers (crmHumanOnly, E-05) has no template and
 	// must never auto-respond, so it writes no inbox row.
 	if !crmHumanOnly(t) {
@@ -756,15 +769,16 @@ func (s *service) crmDispatchWith(ctx context.Context, triggerID string, consume
 			if phone, err := s.crmDeliveryPhone(ctx, consumerID); err != nil {
 				s.log.Warn("crm: no deliverable phone for external channels", "trigger", t.ID, "consumer", consumerID.Hex(), "err", err)
 			} else {
-				delivered = append(delivered, crmDeliverExternal(ctx, s.log, phone, t, tpl, std, ext)...)
+				ok, bad := crmDeliverExternalReport(ctx, s.log, phone, t, tpl, std, ext)
+				delivered, failed = append(delivered, ok...), bad
 			}
 		}
 	}
 	if len(delivered) == 0 {
-		s.crmFinishDispatch(ctx, row, "SUPPRESSED", "G9_channel_availability", ch.Name())
+		s.crmFinishDispatchWith(ctx, row, "SUPPRESSED", "G9_channel_availability", ch.Name(), failed)
 		return "SUPPRESSED", "G9_channel_availability"
 	}
-	s.crmFinishDispatch(ctx, row, "SENT", "", strings.Join(delivered, "+"))
+	s.crmFinishDispatchWith(ctx, row, "SENT", "", strings.Join(delivered, "+"), failed)
 	return "SENT", ""
 }
 

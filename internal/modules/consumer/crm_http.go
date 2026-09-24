@@ -409,11 +409,15 @@ func (h *handler) crmDispatchLog(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, d := range rows {
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"trigger_id": d.TriggerID, "ist_day": d.ISTDay, "category": d.Category,
 			"template": d.Template, "status": d.Status, "guard": d.Guard,
 			"channel": d.Channel, "intended": d.Intended, "at": d.CreatedAt,
-		})
+		}
+		if len(d.ChannelErrors) > 0 {
+			row["channel_errors"] = d.ChannelErrors // additive: only when a channel failed
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

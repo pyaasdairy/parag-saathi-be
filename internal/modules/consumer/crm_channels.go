@@ -89,6 +89,25 @@ var errCRMTransient = errors.New("transient transport failure")
 
 func crmIsTransient(err error) bool { return errors.Is(err, errCRMTransient) }
 
+// errCRMNoRecipient marks a channel that has nobody to reach for this member
+// (push with no registered device): not a provider failure, so the chain
+// moves on as for any definitive miss, but it is neither logged as an error
+// nor recorded on the dispatch row.
+var errCRMNoRecipient = errors.New("no recipient on this channel")
+
+// crmChannelErrorMax bounds a recorded error (a provider body can be long).
+const crmChannelErrorMax = 300
+
+// crmChannelError is one channel that did not carry a dispatch, as recorded
+// on its dispatch row (channel_errors).
+type crmChannelError struct {
+	Channel   string `bson:"channel"   json:"channel"`
+	Role      string `bson:"role"      json:"role"` // primary | fallback | parallel
+	Template  string `bson:"template"  json:"template,omitempty"`
+	Error     string `bson:"error"     json:"error"`
+	Transient bool   `bson:"transient" json:"transient"`
+}
+
 // ── Delivery routing config (the trigger JSON's `delivery` block) ───────────
 
 // crmDelivery is a trigger's channel routing: one primary (with ordered
@@ -352,7 +371,21 @@ func (s *service) crmTransports() map[string]crmTransport {
 // parallel channels best-effort, never triggering fallback. Channels not in
 // the transports map (unshipped kinds, disabled keys) are skipped silently.
 func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t crmTrigger, tpl crmTemplate, params map[string]string, transports map[string]crmTransport) []string {
+	delivered, _ := crmDeliverExternalReport(ctx, log, phone, t, tpl, params, transports)
+	return delivered
+}
+
+// crmDeliverExternalReport is crmDeliverExternal that also reports every
+// channel that tried and failed (CRM caveat 4, owner 24 Sep): a provider
+// rejection, a transport failure with an unknown outcome, or content the
+// channel could not render. Each one is logged at ERROR with the trigger and
+// template and returned for the dispatch row (channel_errors); none of them
+// is ever in delivered, so the row never claims a message that did not go.
+// A channel that is unavailable (keys, mapping, category) or has nobody to
+// reach (errCRMNoRecipient) is not a failure and stays a Warn line.
+func crmDeliverExternalReport(ctx context.Context, log *slog.Logger, phone string, t crmTrigger, tpl crmTemplate, params map[string]string, transports map[string]crmTransport) ([]string, []crmChannelError) {
 	var delivered []string
+	var failed []crmChannelError
 	done := map[string]bool{}
 	attempt := func(name, role string) (ok, transient bool) {
 		if done[name] {
@@ -382,8 +415,22 @@ func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t c
 			return false, false
 		}
 		if err := tr.deliver(ctx, phone, t, tpl, params); err != nil {
+			if errors.Is(err, errCRMNoRecipient) {
+				if log != nil {
+					log.Warn("crm: channel has no recipient", "trigger", t.ID, "channel", name, "role", role, "reason", err.Error())
+				}
+				return false, false
+			}
+			msg := err.Error()
+			if len(msg) > crmChannelErrorMax {
+				msg = msg[:crmChannelErrorMax]
+			}
+			failed = append(failed, crmChannelError{
+				Channel: name, Role: role, Template: t.Template.String(), Error: msg, Transient: crmIsTransient(err),
+			})
 			if log != nil {
-				log.Warn("crm: channel send failed", "trigger", t.ID, "channel", name, "role", role, "transient", crmIsTransient(err), "err", err)
+				log.ErrorContext(ctx, "crm: channel send failed", "trigger", t.ID, "template", t.Template.String(),
+					"channel", name, "role", role, "transient", crmIsTransient(err), "err", err)
 			}
 			return false, crmIsTransient(err)
 		}
@@ -404,7 +451,7 @@ func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t c
 	for _, p := range t.Delivery.Parallel {
 		attempt(p, "parallel")
 	}
-	return delivered
+	return delivered, failed
 }
 
 // ── SMS — MSG91 Flow API (DLT-registered campaign templates) ────────────────
