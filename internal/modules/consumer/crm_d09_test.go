@@ -82,7 +82,7 @@ func TestCRMD09DeliveryFailedReachesTheMember(t *testing.T) {
 	bodies := map[string]bool{}
 	for _, r := range rows {
 		bodies[r.BodyEN] = true
-		if !strings.Contains(r.BodyEN, "Milk gold-500ml 500ml"+crmLabelledSuffix) || !strings.Contains(r.BodyEN, "Nothing has been charged for it.") ||
+		if !strings.Contains(r.BodyEN, "Milk gold-500ml 500ml x2"+crmLabelledSuffix) || !strings.Contains(r.BodyEN, "Nothing has been charged for it.") ||
 			!strings.Contains(r.BodyEN, "96672 60050") || strings.Contains(r.BodyEN, "[") {
 			t.Fatalf("D-09 body_en = %q", r.BodyEN)
 		}

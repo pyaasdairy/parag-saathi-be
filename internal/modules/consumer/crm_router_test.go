@@ -222,7 +222,7 @@ func TestCRMGenericRouterOrdinaryOrderVsPack(t *testing.T) {
 		bson.D{{Key: "consumer_id", Value: cid}, {Key: "trigger_id", Value: "D-06"}}).Decode(&row); err != nil {
 		t.Fatalf("D-06 inbox row: %v", err)
 	}
-	if want := "Delivered ✅ Milk gold-500ml 500ml" + crmLabelledSuffix + ". Enjoy! Tap to rate."; row.BodyEN != want {
+	if want := "Delivered ✅ Milk gold-500ml 500ml x2" + crmLabelledSuffix + ". Enjoy! Tap to rate."; row.BodyEN != want {
 		t.Fatalf("D-06 body_en = %q, want %q", row.BodyEN, want)
 	}
 

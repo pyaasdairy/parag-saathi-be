@@ -9,23 +9,106 @@ package consumer
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-// crmLabelledProductOf renders the C-01 supply-source label from an order's
-// first line: name, then the variant when the line carries one ("Parag Gold
-// Full Cream Milk 500ml"). The order's own name field is never changed; the
-// Saathi store screen matches stock by that exact name.
+// crmLabelledProductOf renders the C-01 supply-source label for an order's
+// lines: the product name, then each pack size with its count ("Full Cream
+// Milk - Parag Gold 500ml x2 + 1L x1"). Lines of one product (same name) are
+// grouped and one size on two lines is summed; a single pack keeps the plain
+// "name size" label; an order of several products names the first and counts
+// the rest ("... 500ml x2 + 1 more"). Only the first line used to be named,
+// so a 500ml x2 + 1L x1 order was confirmed as "500ml". The order's own name
+// field is never changed; the Saathi store screen matches stock by that
+// exact name.
 func crmLabelledProductOf(o *order) string {
-	name := "500 ml Parag Full Cream"
-	if o != nil && len(o.Items) > 0 && o.Items[0].Name != "" {
-		name = o.Items[0].Name
-		if v := strings.TrimSpace(o.Items[0].Variant); v != "" {
-			name += " " + v
+	type pack struct {
+		size string
+		qty  int
+	}
+	type product struct {
+		name  string
+		packs []pack
+	}
+	var products []*product
+	byName := map[string]*product{}
+	units := 0
+	if o != nil && len(o.Items) > 0 && strings.TrimSpace(o.Items[0].Name) != "" {
+		for _, it := range o.Items {
+			name := strings.TrimSpace(it.Name)
+			if name == "" {
+				continue
+			}
+			qty := it.Qty
+			if qty < 1 {
+				qty = 1
+			}
+			units += qty
+			p := byName[name]
+			if p == nil {
+				p = &product{name: name}
+				byName[name] = p
+				products = append(products, p)
+			}
+			size := strings.TrimSpace(it.Variant)
+			merged := false
+			for i := range p.packs {
+				if p.packs[i].size == size {
+					p.packs[i].qty += qty
+					merged = true
+					break
+				}
+			}
+			if !merged {
+				p.packs = append(p.packs, pack{size: size, qty: qty})
+			}
 		}
 	}
-	return name + crmLabelledSuffix
+	if len(products) == 0 {
+		return "500 ml Parag Full Cream" + crmLabelledSuffix
+	}
+	first := products[0]
+	parts := make([]string, 0, len(first.packs))
+	for _, pk := range first.packs {
+		s := pk.size
+		if units > 1 { // a count only when the order holds more than one pack
+			s = strings.TrimSpace(s + " x" + strconv.Itoa(pk.qty))
+		}
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	label := first.name
+	if len(parts) > 0 {
+		label += " " + strings.Join(parts, " + ")
+	}
+	if more := len(products) - 1; more > 0 {
+		label += " + " + strconv.Itoa(more) + " more"
+	}
+	return label + crmLabelledSuffix
+}
+
+// crmDLTVarMax is DLT's limit on one template variable ({#var#}).
+const crmDLTVarMax = 30
+
+// crmSMSVar fits one flow variable to what DLT accepts. Only the product
+// label can outgrow it (every line, the C-01 suffix); it is cut on a word
+// and never mid-token, and every other variable is sent as resolved.
+func crmSMSVar(name, v string) string {
+	if !strings.EqualFold(name, "LABELLED_PRODUCT") || utf8.RuneCountInString(v) <= crmDLTVarMax {
+		return v
+	}
+	r := []rune(v)[:crmDLTVarMax+1]
+	cut := string(r[:crmDLTVarMax])
+	if r[crmDLTVarMax] != ' ' { // the cut fell inside a word: drop that word
+		if i := strings.LastIndex(cut, " "); i > 0 {
+			cut = cut[:i]
+		}
+	}
+	return strings.TrimRight(cut, " +-—,")
 }
 
 // crmOrderETA words the [ETA] token for order.confirmed: an instant order

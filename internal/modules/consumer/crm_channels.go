@@ -442,7 +442,7 @@ func (c *smsChannel) deliver(ctx context.Context, phone string, t crmTrigger, tp
 		if crmHasDevanagari(values[i]) {
 			return fmt.Errorf("sms: variable %s carries Devanagari — SMS is roman-only", n)
 		}
-		rec[strings.ToLower(n)] = values[i]
+		rec[strings.ToLower(n)] = crmSMSVar(n, values[i])
 	}
 	// The DLT-approved body names its OWN variables, and those names need not
 	// match our template's tokens: the registered Welcome Litre bodies declare

@@ -79,7 +79,7 @@ func TestCRMLifecycleEmitsContractC6(t *testing.T) {
 	if p["order_id"] != ord.OrderID || p["promotional_only"] != false {
 		t.Fatalf("order.confirmed payload: %+v", p)
 	}
-	if p["labelled_product"] != "Milk gold-500ml 500ml"+crmLabelledSuffix {
+	if p["labelled_product"] != "Milk gold-500ml 500ml x2"+crmLabelledSuffix {
 		t.Fatalf("labelled_product must carry name + variant: %v", p["labelled_product"])
 	}
 	// A morning order that names no day is dated with the first open morning
@@ -138,7 +138,7 @@ func TestCRMLifecycleEmitsContractC6(t *testing.T) {
 	if p["order_id"] != ord.OrderID || p["promotional_only"] != false || crmPayloadInt(p["offer_pack"]) != 0 {
 		t.Fatalf("order.delivered payload: %+v", p)
 	}
-	if p["labelled_product"] != "Milk gold-500ml 500ml"+crmLabelledSuffix {
+	if p["labelled_product"] != "Milk gold-500ml 500ml x2"+crmLabelledSuffix {
 		t.Fatalf("order.delivered labelled_product: %v", p["labelled_product"])
 	}
 
