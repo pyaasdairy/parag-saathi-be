@@ -1036,7 +1036,7 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 		}
 	}
 	// Wallet-health nudges for the WHOLE base (not just Welcome Litre):
-	// B-01 low balance at 09:00, B-02 insufficient-for-tomorrow at 17:00.
+	// B-01 low balance at 09:00, B-02 short for the next open cut-off at 12:00.
 	s.crmWalletHealthSweep(ctx, now, hm)
 
 	// 18:00 — W-10 reconciliation stop-loss (one row per day via the claim).
@@ -1051,9 +1051,12 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 //
 //	B-01 (09:00 IST, service_implicit): days-of-cover below 4 → "Wallet is
 //	     running low" — at most once per 7 days per customer (per_cycle).
-//	B-02 (17:00 IST, service_implicit, critical): spendable balance cannot
-//	     cover TOMORROW's subscription day → "recharge by 12 noon tomorrow" —
-//	     once per day, every day it stays true (critical_exempt_from_daily_cap).
+//	B-02 (12:00 IST, service_implicit, critical): the balance left once
+//	     tomorrow's locked delivery is paid cannot cover the DAY AFTER
+//	     tomorrow's plan day, whose order locks at 12 noon tomorrow (the
+//	     config's day_after_tomorrow.order_value) → "recharge by 12 noon
+//	     tomorrow" — once per day, every day it stays true
+//	     (critical_exempt_from_daily_cap).
 //
 // Households inside a LIVE Welcome Litre journey (pack 2 locked/pending) are
 // excluded — W-03a/W-06 own their recharge messaging until the offer settles.
@@ -1068,8 +1071,8 @@ func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm st
 	}
 	// TERMS §5.3: "your wallet needs enough balance by 12 NOON for the next
 	// morning's delivery. If it does not, WE TELL YOU" — so the shortfall
-	// notice fires right after noon, not at five o'clock. (Billing itself still
-	// locks after midnight — we promise noon and over-deliver.)
+	// notice fires right after noon, not at five o'clock, one full day before
+	// the cut-off it names (crmSweepTomorrowShortfall).
 	if hm >= "12:00" {
 		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-02-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
 			s.crmSweepTomorrowShortfall(ctx, now)
@@ -1128,24 +1131,27 @@ func (s *service) crmSweepWalletCover(ctx context.Context, now time.Time) {
 	}
 }
 
-// B-02: tomorrow's due subscription day costs more than the spendable balance
-// → the critical cut-off alert. The (trigger, consumer, IST-day) dispatch
-// claim caps it at one per day; it re-fires each further day the shortfall
-// persists — that is the spec's critical_exempt_from_daily_cap.
+// B-02: the critical cut-off alert, "recharge by 12 noon tomorrow to receive
+// your delivery". Under the noon lock the delivery whose order locks at
+// 12:00 tomorrow is the day AFTER tomorrow (firstEditableDay: tomorrow's
+// locked at 12:00 today), so that is the day judged, and against the wallet
+// as that lock will see it: after the deliveries due before it (tomorrow's
+// locked order, and a preview that will still lock) have been paid for. The
+// (trigger, consumer, IST-day) dispatch claim caps it at one per day; it
+// re-fires each further day the shortfall persists — that is the spec's
+// critical_exempt_from_daily_cap.
 func (s *service) crmSweepTomorrowShortfall(ctx context.Context, now time.Time) {
-	tomorrow := istDay(now.Add(24 * time.Hour))
+	day := firstEditableDay(now)
 	for cid, subs := range s.crmSubsByConsumer(ctx) {
 		cost := 0.0
 		for i := range subs {
-			if subscriptionDueOn(&subs[i], tomorrow) {
-				cost += subs[i].UnitPrice*float64(subs[i].Qty) + subscriptionDeliveryFee
-			}
+			cost += s.crmPlanCostOn(ctx, &subs[i], day)
 		}
 		if cost <= 0 {
 			continue
 		}
 		wv, err := s.wallet(ctx, cid)
-		if err != nil || wv.Available >= cost {
+		if err != nil || s.crmSpendableAtLock(ctx, cid, wv.Available, lockedThroughDay(now)) >= cost {
 			continue
 		}
 		if s.crmInLiveWelcomeJourney(ctx, cid) {
@@ -1153,6 +1159,67 @@ func (s *service) crmSweepTomorrowShortfall(ctx context.Context, now time.Time) 
 		}
 		s.crmDispatchAt(ctx, "B-02", cid, nil, now)
 	}
+}
+
+// crmPlanCostOn is what the LOCK will ask the wallet for one plan's delivery
+// on day: the order already previewed for that day, else the plan's line at
+// the price the morning order bills; 0 when the plan does not deliver that
+// day (off cadence, on vacation, or a day the member skipped).
+func (s *service) crmPlanCostOn(ctx context.Context, sub *subscription, day string) float64 {
+	if !subscriptionDueOn(sub, day) {
+		return 0
+	}
+	if live, err := s.repo.findLiveSubscriptionOrder(ctx, sub.SubscriptionID, day); err == nil && live != nil {
+		return live.Total
+	}
+	if sub.claimed(day) {
+		return 0 // claimed with no live order: the member skipped this day
+	}
+	return round2(s.subscriptionLinePrice(ctx, sub)*float64(sub.Qty)) + subscriptionDeliveryFee
+}
+
+// crmSpendableAtLock is the wallet a later cut-off's LOCK will see: what is
+// spendable now, less every order due on or before through that is paid for
+// first. Money moves at delivery, so a locked order (and an instant or dated
+// one-off on its way) still sits in the balance until its morning. A preview
+// that has not locked yet counts only while the balance can still lock it,
+// the LOCK step's own wallet floor. A read error leaves the balance as it is.
+func (s *service) crmSpendableAtLock(ctx context.Context, consumerID primitive.ObjectID, available float64, through string) float64 {
+	cur, err := s.repo.orders.Find(ctx, bson.D{
+		{Key: "user_id", Value: consumerID.Hex()},
+		{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"placed", "confirmed", "assigned", "out_for_delivery"}}}},
+		{Key: "payment_method", Value: bson.D{{Key: "$in", Value: bson.A{"wallet", "prepaid"}}}},
+		{Key: "$or", Value: bson.A{
+			bson.D{{Key: "delivery_date", Value: bson.D{{Key: "$lte", Value: through}}}},
+			bson.D{{Key: "delivery_date", Value: bson.D{{Key: "$exists", Value: false}}}},
+		}},
+	}, options.Find().SetSort(bson.D{{Key: "delivery_date", Value: 1}}).SetLimit(200))
+	if err != nil {
+		return available
+	}
+	var live []order
+	if cur.All(ctx, &live) != nil {
+		return available
+	}
+	charge := func(o *order) float64 {
+		if o.TrialFree {
+			return 0 // a free trial day debits nothing at the door
+		}
+		return o.Total
+	}
+	preview := func(o *order) bool { return o.SubscriptionID != "" && o.SubLockedAt == "" }
+	left := available
+	for i := range live {
+		if !preview(&live[i]) {
+			left -= charge(&live[i])
+		}
+	}
+	for i := range live {
+		if preview(&live[i]) && left >= live[i].Total {
+			left -= charge(&live[i])
+		}
+	}
+	return left
 }
 
 func (s *service) crmCountTriggerSentSince(ctx context.Context, consumerID primitive.ObjectID, triggerID string, since time.Time) int {
