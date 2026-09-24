@@ -116,6 +116,41 @@ func TestInstantWindow_SavedHoursUnchanged(t *testing.T) {
 	}
 }
 
+// After a close-now, "resumes …" names the moment instant really comes back:
+// the close-now's end when the hours are open then, else the first opening
+// after it. Before: the label was worked out from the next opening after NOW,
+// so hours moved earlier than the close-now's end named a day-off opening
+// ("tomorrow at 6:00 AM" at 06:30 when instant reopens at 07:00 today).
+func TestInstantWindow_CloseNowResumesWhenItEnds(t *testing.T) {
+	jul := func(day, h, m int) time.Time { return time.Date(2026, 7, day, h, m, 0, 0, istZone) }
+	until := jul(31, 7, 0) // close-now at 21:00 on the 30th, hours 07:00-22:00: shut until 07:00 on the 31st
+	wire := until.UTC().Format(time.RFC3339)
+	for _, c := range []struct {
+		name  string
+		open  int
+		at    time.Time
+		label string
+		when  string
+	}{
+		{"hours unchanged, that night", 420, jul(30, 21, 30), "tomorrow at 7:00 AM", wire},
+		{"hours unchanged, small hours", 420, jul(31, 6, 30), "today at 7:00 AM", wire},
+		{"opening moved to 06:00, that night", 360, jul(30, 23, 0), "tomorrow at 7:00 AM", wire},
+		{"opening moved to 06:00, at 06:30", 360, jul(31, 6, 30), "today at 7:00 AM", wire},
+		{"opening moved to 08:00, at 06:30", 480, jul(31, 6, 30), "today at 8:00 AM", jul(31, 8, 0).UTC().Format(time.RFC3339)},
+	} {
+		z := zone{InstantOpenMin: c.open, InstantCloseMin: 1320, InstantClosedUntil: &until}
+		open, label, at := instantWindow(z, c.at)
+		if open || label != c.label || at != c.when {
+			t.Fatalf("%s: open=%v label=%q at=%q, want closed %q at %q", c.name, open, label, at, c.label, c.when)
+		}
+	}
+	// And it does come back at that moment.
+	z := zone{InstantOpenMin: 360, InstantCloseMin: 1320, InstantClosedUntil: &until}
+	if open, _, _ := instantWindow(z, until); !open {
+		t.Fatalf("07:00 on the 31st, hours 06:00-22:00: the close-now has ended, instant is open")
+	}
+}
+
 func TestEffHours(t *testing.T) {
 	if effOpenMin(&zone{}) != 420 || effCloseMin(&zone{}) != 1320 {
 		t.Fatalf("unconfigured zone should default to 07:00–22:00 (420–1320)")

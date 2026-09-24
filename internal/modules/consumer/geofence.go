@@ -404,6 +404,20 @@ func effCloseMin(z *zone) int {
 	return z.InstantCloseMin
 }
 
+// withinInstantHours reports whether the IST wall-clock minute of t falls
+// inside the zone's instant hours (overnight windows wrap past midnight; open
+// == close, or 00:00-24:00, is all day).
+func withinInstantHours(z *zone, t time.Time) bool {
+	tIST := t.In(istZone)
+	cur := tIST.Hour()*60 + tIST.Minute()
+	openMin, closeMin := effOpenMin(z), effCloseMin(z)
+	if openMin < closeMin {
+		return cur >= openMin && cur < closeMin
+	}
+	// overnight window (opens in the evening, closes after midnight)
+	return cur >= openMin || cur < closeMin
+}
+
 // pausedResumesLabel is the "resumes …" answer for a store whose manager paused
 // instant ("Close instant now" in the Zone tab). The pause holds until they
 // switch it off, so the label names no time; the consumer app reads it as
@@ -421,14 +435,7 @@ const pausedResumesLabel = "when the store turns it back on"
 // InstantClosedUntil. The persistent pause beats both.
 func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt string) {
 	nowIST := now.In(istZone)
-	cur := nowIST.Hour()*60 + nowIST.Minute()
-	openMin, closeMin := effOpenMin(&z), effCloseMin(&z)
-	var withinHours bool
-	if openMin < closeMin {
-		withinHours = cur >= openMin && cur < closeMin
-	} else { // overnight window (opens in the evening, closes after midnight)
-		withinHours = cur >= openMin || cur < closeMin
-	}
+	withinHours := withinInstantHours(&z, now)
 	closedNow := z.InstantClosedUntil != nil && now.Before(*z.InstantClosedUntil)
 	extended := z.InstantExtendedUntil != nil && now.Before(*z.InstantExtendedUntil)
 	if !z.InstantPaused && !closedNow && (withinHours || extended) {
@@ -439,10 +446,16 @@ func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt st
 		return false, pausedResumesLabel, ""
 	}
 	// Next opening moment in IST (today if we are before today's open, else
-	// tomorrow); after a close-now, the first opening at or after its end.
+	// tomorrow). After a close-now, instant comes back when it ends if the
+	// hours are open then (they may have moved since), else at the first
+	// opening after it.
 	next := nextInstantOpening(&z, now)
-	if closedNow && z.InstantClosedUntil.After(next) {
-		next = nextInstantOpening(&z, z.InstantClosedUntil.Add(-time.Nanosecond))
+	if closedNow {
+		next = *z.InstantClosedUntil
+		if !withinInstantHours(&z, next) {
+			next = nextInstantOpening(&z, next)
+		}
+		next = next.In(istZone)
 	}
 	day := "today"
 	if next.YearDay() != nowIST.YearDay() || next.Year() != nowIST.Year() {
