@@ -593,6 +593,22 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 	want := map[string]int{}
 	for _, c := range changes {
 		want[adjustKey(c.ProductID, c.Name, c.Variant)] = c.Qty
+		// A bare name (the deployed Saathi build sends only {name, qty}) must
+		// name ONE pack size: Gold 500 ml and Gold 1 L share a product name,
+		// and the bare-name fallback below would rewrite both lines and
+		// re-bill the member. Refuse rather than guess; nothing changes.
+		if strings.TrimSpace(c.ProductID) != "" || strings.TrimSpace(c.Variant) != "" {
+			continue
+		}
+		sizes := map[string]bool{}
+		for _, it := range o.Items {
+			if adjustKey("", it.Name, "") == adjustKey("", c.Name, "") {
+				sizes[strings.TrimSpace(it.ProductID)+"|"+strings.ToLower(strings.TrimSpace(it.Variant))] = true
+			}
+		}
+		if len(sizes) > 1 {
+			return nil, errConflict("AMBIGUOUS_LINE", "Two pack sizes share this name. Update Saathi to change one of them.")
+		}
 	}
 	newItems := make([]orderItem, 0, len(o.Items))
 	var removed []orderItem // lines taken off entirely: D-05 tells the member
