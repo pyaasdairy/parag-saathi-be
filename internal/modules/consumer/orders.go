@@ -472,6 +472,35 @@ func (s *service) getOrder(ctx context.Context, userID, orderID string) (*order,
 }
 
 func (s *service) cancelOrder(ctx context.Context, userID, orderID string) (*order, error) {
+	return s.cancelOrderAt(ctx, userID, orderID, time.Now())
+}
+
+// errOrderLockedMessage is ORDER_LOCKED's message (G7): the words the apps
+// show when a member's cancel comes after the noon cut-off.
+const errOrderLockedMessage = "Orders lock at 12 noon the day before delivery, so this one can no longer be cancelled."
+
+// memberCancelLocked reports whether a member's cancel of o comes too late
+// at now (G7, owner, 24 Sep): a MORNING order (one-off or subscription) is
+// fixed from 12:00 IST the day before its delivery day - the store has
+// procured for it, the noon lock has funded the member's day with it
+// reserved - so from then, and on the day itself, the member can no longer
+// cancel it. Only the cancellable statuses are judged (anything else keeps
+// its own error). The instant lane and an undated legacy morning order have
+// no cut-off. Store, rider and operator cancels never come through here.
+func memberCancelLocked(o *order, now time.Time) bool {
+	if o == nil || o.Lane == "instant" || (o.Status != "placed" && o.Status != "confirmed") {
+		return false
+	}
+	day := orderDeliveryDate(o)
+	return day != "" && day <= lockedThroughDay(now)
+}
+
+// cancelOrderAt is the member's cancel at an explicit moment.
+func (s *service) cancelOrderAt(ctx context.Context, userID, orderID string, now time.Time) (*order, error) {
+	// G7: a morning order past its noon cut-off stays as it is.
+	if cur, ferr := s.repo.findOrder(ctx, orderID, userID); ferr == nil && memberCancelLocked(cur, now) {
+		return nil, errConflict("ORDER_LOCKED", errOrderLockedMessage)
+	}
 	// Guard: only placed/confirmed orders may cancel — the $in precondition makes
 	// this atomic (no cancelling an order that just went out for delivery).
 	o, err := s.repo.updateOrder(ctx, orderID, userID,

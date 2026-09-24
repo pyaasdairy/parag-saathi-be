@@ -137,7 +137,7 @@ func TestCRMPack2AttachFollowsTheNoonRule(t *testing.T) {
 	if prev == nil {
 		t.Fatalf("(b) no preview for tomorrow")
 	}
-	if _, err := w.svc.cancelOrder(ctx, skipCID.Hex(), prev.OrderID); err != nil {
+	if _, err := w.svc.cancelOrderAt(ctx, skipCID.Hex(), prev.OrderID, istDayAt(D, 9, 45)); err != nil {
 		t.Fatalf("(b) cancel: %v", err)
 	}
 	if ok, err := w.svc.crmTryAttachPack2At(ctx, skipCID, istDayAt(D, 10, 0)); err != nil || ok || packsFor(skipCID, D1) != 0 {

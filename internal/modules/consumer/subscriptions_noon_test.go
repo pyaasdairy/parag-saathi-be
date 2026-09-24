@@ -670,7 +670,7 @@ func TestNextDeliveryDateFollowsTheLiveOrders(t *testing.T) {
 	}
 	// (b) the member cancels tomorrow's preview directly at 10:00.
 	prev := liveSubOrder(t, w, skipped.SubscriptionID, D1)
-	if _, err := w.svc.cancelOrder(ctx, skippedCID.Hex(), prev.OrderID); err != nil {
+	if _, err := w.svc.cancelOrderAt(ctx, skippedCID.Hex(), prev.OrderID, istDayAt(D, 10, 0)); err != nil {
 		t.Fatalf("cancel preview: %v", err)
 	}
 	if nd := next(skipped, istDayAt(D, 10, 20)); nd != D2 {
