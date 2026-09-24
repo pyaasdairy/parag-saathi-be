@@ -534,16 +534,20 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 	if _, aerr := s.subscriptionAddress(ctx, consumerID); aerr != nil {
 		return nil, aerr
 	}
-	name := in.Name
+	// The catalogue's name first, the client's only as a fallback (the
+	// createOrder rule): the app posts its product id as the name while its
+	// catalogue is still loading, and that id then printed on every morning
+	// order, task and rider row. The size is the one billed (lineVariant).
+	name := priceIx.nameFor(in.ProductID)
 	if name == "" {
-		name = priceIx.nameFor(in.ProductID)
+		name = in.Name
 	}
 	if name == "" {
 		name = in.ProductID
 	}
 	sub := &subscription{
 		MongoID: primitive.NewObjectID(), SubscriptionID: newSubscriptionID(), ConsumerID: consumerID,
-		ProductID: in.ProductID, Name: name, Variant: in.Variant, Qty: in.Qty, UnitPrice: round2(unitPrice),
+		ProductID: in.ProductID, Name: name, Variant: priceIx.lineVariant(in.ProductID, in.Variant), Qty: in.Qty, UnitPrice: round2(unitPrice),
 		Frequency: in.Frequency, DeliverySlot: in.DeliverySlot, Status: "active", StartDate: start,
 		Vacations: in.Vacations, CreatedAt: now, UpdatedAt: now,
 	}

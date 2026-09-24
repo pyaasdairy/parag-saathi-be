@@ -132,6 +132,31 @@ func (ix *catalogPriceIndex) variantFor(productID string) string {
 	return seedVariantFor(productID)
 }
 
+// lineVariant is the pack size a stored order or plan line carries: the size
+// that priceFor billed, never a label the client merely typed.
+//   - A label that is one of the SKU's own priced variants chose the price:
+//     kept as sent.
+//   - Otherwise the SKU's known size (variantFor) wins over the client's
+//     label, except that the same size in another spelling ("500 ML") is kept
+//     as sent; an empty label gets the size.
+//   - A SKU no catalogue can size keeps the client's label, as before.
+func (ix *catalogPriceIndex) lineVariant(productID, clientVariant string) string {
+	v := strings.TrimSpace(clientVariant)
+	if v != "" {
+		if _, priced := ix.variants[productID][variantKey(v)]; priced {
+			return clientVariant
+		}
+	}
+	size := ix.variantFor(productID)
+	if size == "" {
+		return clientVariant
+	}
+	if v != "" && strings.ReplaceAll(variantKey(v), " ", "") == strings.ReplaceAll(variantKey(size), " ", "") {
+		return clientVariant
+	}
+	return size
+}
+
 var (
 	seedVariantsOnce sync.Once
 	seedVariants     map[string]string

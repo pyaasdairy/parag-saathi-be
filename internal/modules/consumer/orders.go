@@ -309,7 +309,9 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 		units += it.Qty
 		subtotal += price * float64(it.Qty)
 		items = append(items, orderItem{
-			ID: newItemID(), ProductID: it.ProductID, Name: name, Variant: it.Variant, Price: round2(price), Qty: it.Qty,
+			// The size billed, not the client's label (a "1L" pill on a 500 ml
+			// price packed the wrong crate); the name stays verbatim.
+			ID: newItemID(), ProductID: it.ProductID, Name: name, Variant: priceIx.lineVariant(it.ProductID, it.Variant), Price: round2(price), Qty: it.Qty,
 		})
 	}
 	if units > maxItemsPerOrder {
