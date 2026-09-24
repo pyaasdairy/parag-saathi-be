@@ -64,9 +64,10 @@ func TestDoorstepPrefsReachTheDeliveryTask(t *testing.T) {
 	// The subscription lane resolves the same way (the worker sets no prefs on
 	// the order itself), and an order-level pref still wins per field.
 	//
-	// The sweep runs at 09:00 on a fixed day, never on the wall clock: from
+	// The sweep runs at 04:00 on a fixed day, never on the wall clock: from
 	// 12:00 IST the catch-up also locks tomorrow, so a sweep at the real time
-	// placed two orders and this test failed every afternoon.
+	// placed two orders and this test failed every afternoon; and from the
+	// day's 05:00 route start the catch-up leaves the day alone.
 	const D = "2026-10-06"
 	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
 		ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D,
@@ -78,7 +79,7 @@ func TestDoorstepPrefsReachTheDeliveryTask(t *testing.T) {
 	// the sweep (noon rule); a plan created just now would start on the first
 	// editable day instead.
 	chainBackdateSubscription(t, w, sub, istDayAt(addDaysIST(D, -2), 9, 0))
-	if placed := w.svc.sweepOneSubscription(ctx, sub, istDayAt(D, 9, 0)); placed != 1 {
+	if placed := w.svc.sweepOneSubscription(ctx, sub, istDayAt(D, 4, 0)); placed != 1 {
 		t.Fatalf("subscription order not placed: %d", placed)
 	}
 	var subOrder order
