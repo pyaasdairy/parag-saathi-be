@@ -880,9 +880,9 @@ func (s *service) stopFoundingFamily(ctx context.Context, consumerID primitive.O
 // billFoundingMembers charges every active member whose bill day has come.
 // Each (member, bill day) is one ledger ref, so a repeated tick or a second
 // replica can never charge a month twice. A short wallet is retried on every
-// tick, but counted once per IST day (last_attempt_date): the membership
-// stops on the FoundingBillRetries-th distinct short day, with the perks
-// ending the day before the missed bill.
+// tick, but counted once per IST day (last_attempt_date): after
+// FoundingBillRetries whole short days the membership stops on the next
+// short tick, with the perks ending the day before the missed bill.
 func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (billed, stopped int) {
 	today := istToday(now)
 	due, err := s.repo.listMembersDueForBilling(ctx, today)
@@ -910,11 +910,16 @@ func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (bille
 			// one even when two replicas tick in the same hour.
 			guard := bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate},
 				{Key: "last_attempt_date", Value: bson.D{{Key: "$ne", Value: today}}}}
-			if attempts >= s.deps.Cfg.FoundingBillRetries() {
+			// Stop only once the last retry DAY has ended: the first short
+			// tick of the day after it. Stopping on the first tick of the
+			// last day (00:30 on a 15-minute worker) left the member no
+			// daytime on it, and as little as 25 h in all when the first
+			// attempt fell late on the bill day.
+			if m.BillAttempts >= s.deps.Cfg.FoundingBillRetries() {
 				if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
 					bson.D{{Key: "status", Value: memberStopped}, {Key: "stopped_at", Value: now.UTC()},
 						{Key: "stop_reason", Value: "wallet_short"}, {Key: "perks_until", Value: addDaysIST(m.NextBillDate, -1)},
-						{Key: "bill_attempts", Value: attempts}, {Key: "last_attempt_date", Value: today}},
+						{Key: "last_attempt_date", Value: today}},
 					nil, guard); upd != nil {
 					stopped++
 				}
