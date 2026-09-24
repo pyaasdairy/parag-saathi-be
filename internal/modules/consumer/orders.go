@@ -362,21 +362,26 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	if lane != "instant" {
 		lane = "morning"
 	}
+	// SERVICEABILITY: the order is judged by the SAME decision GET /serviceability
+	// gives the app (serviceability(), every env override included) at the order's
+	// delivery point, and refused only where that answer is a definitive no. With
+	// no point, or no answer (a lookup error), it goes through as before: like
+	// serviceability itself, ordering never goes dark on missing data.
+	var sv *serviceabilityResult
+	if pt, pincode, ok := s.orderDeliveryPoint(ctx, userID, in); ok {
+		if res, sErr := s.serviceability(ctx, pt.Lat, pt.Lng, pincode); sErr == nil {
+			sv = res
+		}
+	}
+	if refusal := orderServiceabilityRefusal(sv, lane); refusal != nil {
+		return nil, refusal
+	}
 	// Monsoon surcharge: INSTANT orders only, and only if the store manager enabled
 	// it on the delivery location's zone. Authoritative here — read from the zone,
 	// never trusted from the client payload, so a tampered client cannot skip it.
 	monsoonFee := 0.0
-	if lane == "instant" && in.Geo != nil {
-		if sv, sErr := s.serviceability(ctx, in.Geo.Lat, in.Geo.Lng, ""); sErr == nil {
-			// Store shut for the night / paused → refuse instant (defence in depth;
-			// the consumer already hides it, but a stale client must not slip through).
-			if sv.InstantClosed {
-				return nil, errUnprocessable("INSTANT_CLOSED", "instant delivery is closed right now; please choose the morning slot")
-			}
-			if sv.MonsoonEnabled && sv.MonsoonRupees > 0 {
-				monsoonFee = float64(sv.MonsoonRupees)
-			}
-		}
+	if lane == "instant" && sv != nil && sv.MonsoonEnabled && sv.MonsoonRupees > 0 {
+		monsoonFee = float64(sv.MonsoonRupees)
 	}
 	total = round2(total + monsoonFee)
 	priority := in.Priority
@@ -441,6 +446,62 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	// unassigned until a store manager assigns a rider). Best-effort.
 	s.createDeliveryForOrder(ctx, o)
 	return o, nil
+}
+
+// orderDeliveryPoint is where an order is going, by what the order itself
+// carries: its own pin (the point its delivery task is routed to), else the
+// exact coordinates of the saved address it names by id. The pincode is that
+// saved address's, which the app sends beside the same coordinates when it asks
+// /serviceability. ok=false when the order carries neither: a label-only order
+// (the deployed app sends no pin and no address id) is never judged by guessing
+// an address from its label.
+func (s *service) orderDeliveryPoint(ctx context.Context, userID string, in orderInput) (geoPt, string, bool) {
+	var addr *address
+	if cid, err := primitive.ObjectIDFromHex(userID); err == nil {
+		addr = s.addressByID(ctx, cid, in.AddressID) // scoped: someone else's id is ignored
+	}
+	pincode := ""
+	if addr != nil {
+		pincode = addr.Pincode
+	}
+	if in.Geo != nil && coordsSane(in.Geo.Lat, in.Geo.Lng) {
+		return geoPt{Lat: in.Geo.Lat, Lng: in.Geo.Lng}, pincode, true
+	}
+	if addr != nil && addr.Lat != nil && addr.Lng != nil && coordsSane(*addr.Lat, *addr.Lng) {
+		return geoPt{Lat: *addr.Lat, Lng: *addr.Lng}, pincode, true
+	}
+	return geoPt{}, "", false
+}
+
+// orderServiceabilityRefusal turns the /serviceability answer for an order's
+// delivery point into a refusal, only where that answer is a definitive no:
+//
+//   - not serviceable (outside every zone, or beyond the no-zone store fence):
+//     NOT_SERVICEABLE, on either lane;
+//   - instant shut for the night / paused: INSTANT_CLOSED (unchanged);
+//   - instant not offered where a drawn zone decides: INSTANT_OUT_OF_RANGE.
+//
+// Everything else goes through: no answer (nil), and the no-zone default-open
+// answer, where no instant circle exists for the point to be outside of.
+func orderServiceabilityRefusal(sv *serviceabilityResult, lane string) *apiError {
+	if sv == nil {
+		return nil
+	}
+	if !sv.Serviceable {
+		return errUnprocessable("NOT_SERVICEABLE", "We don't deliver to this address yet. Choose another delivery address, or join the waitlist and we'll let you know when we reach you.")
+	}
+	if lane != "instant" {
+		return nil
+	}
+	// Store shut for the night / paused → refuse instant (defence in depth;
+	// the consumer already hides it, but a stale client must not slip through).
+	if sv.InstantClosed {
+		return errUnprocessable("INSTANT_CLOSED", "instant delivery is closed right now; please choose the morning slot")
+	}
+	if !sv.Instant && !sv.DefaultOpen {
+		return errUnprocessable("INSTANT_OUT_OF_RANGE", "Instant delivery doesn't reach this address yet. Choose a morning delivery instead.")
+	}
+	return nil
 }
 
 func (s *service) listOrders(ctx context.Context, userID string) ([]order, error) {

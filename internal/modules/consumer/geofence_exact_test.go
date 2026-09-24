@@ -62,7 +62,10 @@ func TestGeofenceEnforcedWhenTaskHasTheCustomersPin(t *testing.T) {
 	defer done()
 	ctx := context.Background()
 
-	pin := &geoPoint{Lat: 26.8000, Lng: 81.0500}
+	// ~3 km from the store, inside the no-zone 5 km fence (defaultFenceKm): an
+	// order is refused where /serviceability says no, and the old pin
+	// (26.80, 81.05) was 5.19 km out.
+	pin := &geoPoint{Lat: 26.7900, Lng: 81.0300}
 	ord := chainMorningOrder(t, w, "9000003001", pin)
 	task := chainTaskFor(t, w, ord.OrderID)
 	if !task.GeoExact || task.Geo.Lat != pin.Lat {
