@@ -784,9 +784,13 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 	if seat.Claimed >= seat.UnlocksAt {
 		s.unlockFoundingFarm(ctx, seat, now)
 	} else {
+		// scope_key names this join (FF-03 is capped per join): without it
+		// the claim was one per member and IST day, and a re-join on another
+		// farm the same day was never told its new seat and line.
 		s.emitCRMEvent(ctx, "founding.seat_waiting", consumerID, map[string]any{
 			"farm_id": seat.ID, "farm": seat.Name, "farmer": seat.Farmer,
 			"line": m.LineNumber, "togo": seat.UnlocksAt - seat.Claimed,
+			"scope_key": "founding:join:" + m.ID.Hex() + ":" + strconv.Itoa(m.Joins),
 		})
 	}
 	fresh, _ := s.repo.findFoundingMember(ctx, consumerID)
@@ -855,9 +859,11 @@ func (s *service) unlockFoundingFarm(ctx context.Context, farm *foundingFarm, at
 		if err != nil || upd == nil {
 			continue
 		}
+		// scope_key names the farm (FF-01 is capped per farm): a member whose
+		// second farm unlocked the same day as the first was told nothing.
 		payload := map[string]any{
 			"farm_id": farm.ID, "farm": farm.Name, "farmer": farm.Farmer, "line": w.LineNumber, "togo": 0,
-			"unlocked_packs": farm.UnlockedPacks,
+			"unlocked_packs": farm.UnlockedPacks, "scope_key": "founding:farm:" + farm.ID,
 		}
 		s.emitCRMEvent(ctx, "founding.farm_unlocked", w.ConsumerID, payload)
 		s.emitCRMEvent(ctx, "founding.member_active", w.ConsumerID, payload)

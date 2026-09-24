@@ -21,7 +21,9 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
   Every message is claimed exactly once per (trigger, member, IST day, order or
   complaint), so two orders on one day each get their own message; a trigger
   capped per event (per_order, per_complaint, per_credit, ...) claims its order or
-  complaint once whatever the day, so a replay on a later day sends nothing.
+  complaint once whatever the day, so a replay on a later day sends nothing. FF-03
+  is claimed once per join and FF-01 once per farm; FF-02 carries the same farm scope,
+  so a member who re-joins another farm the same day is told about that farm too.
 - **Channels, in order.** The first is the primary; `+x` runs in parallel; `then x` is a
   fallback taken only when the channel before it is unavailable or refused. The in-app
   inbox is not listed because it ALWAYS gets the message (except human_call-only E-05,

@@ -22,6 +22,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 )
@@ -1024,5 +1025,106 @@ func TestFoundingLineNumbersSkipNothing(t *testing.T) {
 	}
 	if f, _ := w.svc.repo.findFoundingFarm(ctx, "farm-a"); f.Claimed != 3 {
 		t.Fatalf("farm A seats: %d want 3", f.Claimed)
+	}
+}
+
+// PM-04: the founding notifications carried no scope, so each one was
+// claimed once per trigger, member and IST day. A member who stopped and
+// re-joined another farm the same day was never told the new seat (FF-03 is
+// capped per join), nor, when that farm unlocked the same day, that it had
+// opened (FF-01 per farm) and that the price is on there (FF-02).
+func TestFoundingNotificationsPerJoinAndPerFarm(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	inbox := func(cid primitive.ObjectID, trigger string) []string {
+		t.Helper()
+		cur, err := w.db.Collection(collConsumerInbox).Find(ctx,
+			bson.D{{Key: "consumer_id", Value: cid}, {Key: "trigger_id", Value: trigger}},
+			options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}))
+		if err != nil {
+			t.Fatalf("inbox: %v", err)
+		}
+		var rows []struct {
+			EN string `bson:"body_en"`
+		}
+		if err := cur.All(ctx, &rows); err != nil {
+			t.Fatalf("inbox decode: %v", err)
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.EN)
+		}
+		return out
+	}
+	named := func(rows []string, want ...string) bool {
+		if len(rows) != len(want) {
+			return false
+		}
+		for i := range want {
+			if !strings.Contains(rows[i], want[i]) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// FF-03: a waiting seat on Gonard, then, the same day, one on Mishra.
+	seedTestFarms(t, w, 50)
+	a := w.customer(t, "9000009501", 1000)
+	if _, err := w.svc.joinFoundingFamily(ctx, a, "gonard-dairy"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	w.svc.crmProcessEvents(ctx)
+	if _, err := w.svc.stopFoundingFamily(ctx, a); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := w.svc.joinFoundingFamily(ctx, a, "mishra-dairy"); err != nil {
+		t.Fatalf("re-join: %v", err)
+	}
+	w.svc.crmProcessEvents(ctx)
+	if got := inbox(a, "FF-03"); !named(got, "Gonard Dairy", "Your seat at Mishra Dairy is held: you are #1 in line.") {
+		t.Fatalf("FF-03 per join: %q", got)
+	}
+	// Once per join whatever the day: the Mishra join replayed tomorrow is
+	// already handled.
+	evs := crmEventsOf(t, w.db, a, "founding.seat_waiting")
+	if len(evs) != 2 {
+		t.Fatalf("seat_waiting events: %d", len(evs))
+	}
+	scope := crmEventScopeKey(evs[1].Payload)
+	if scope == "" || scope == crmEventScopeKey(evs[0].Payload) {
+		t.Fatalf("the two joins must carry two scopes: %q %q", crmEventScopeKey(evs[0].Payload), scope)
+	}
+	if st, _ := w.svc.crmDispatchWith(ctx, "FF-03", a, map[string]string{"FARM": "Mishra Dairy", "LINE": "1", "TOGO": "79"},
+		time.Now().UTC().AddDate(0, 0, 1), crmDispatchOpts{Scope: scope}); st != "" {
+		t.Fatalf("the same join sent FF-03 again on a later day: %s", st)
+	}
+
+	// FF-01 / FF-02: a farm that unlocks at one seat, then, the same day,
+	// another one the member moves to inside the paid month.
+	if _, err := w.svc.upsertFoundingFarms(ctx, []foundingFarmInput{
+		{ID: "farm-one", Name: "Farm One", Farmer: "Ram", UnlocksAt: 1},
+		{ID: "farm-two", Name: "Farm Two", Farmer: "Shyam", UnlocksAt: 1},
+	}, "test"); err != nil {
+		t.Fatalf("farms: %v", err)
+	}
+	b := w.customer(t, "9000009502", 1000)
+	if m, err := w.svc.joinFoundingFamily(ctx, b, "farm-one"); err != nil || m.Status != memberActive {
+		t.Fatalf("join farm one: %+v %v", m, err)
+	}
+	w.svc.crmProcessEvents(ctx)
+	if _, err := w.svc.stopFoundingFamily(ctx, b); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if m, err := w.svc.joinFoundingFamily(ctx, b, "farm-two"); err != nil || m.Status != memberActive {
+		t.Fatalf("join farm two: %+v %v", m, err)
+	}
+	w.svc.crmProcessEvents(ctx)
+	if got := inbox(b, "FF-01"); !named(got, "Farm One is unlocked", "Farm Two is unlocked") {
+		t.Fatalf("FF-01 per farm: %q", got)
+	}
+	if got := inbox(b, "FF-02"); !named(got, "price is on at Farm One", "price is on at Farm Two") {
+		t.Fatalf("FF-02 per farm: %q", got)
 	}
 }

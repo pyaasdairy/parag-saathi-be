@@ -781,11 +781,11 @@ func (s *service) crmStandardParams(ctx context.Context, consumerID primitive.Ob
 }
 
 // crmCapPerEvent reports a frequency cap that counts per product event (one
-// message per order, complaint, credit, failure, plan, line or change), as
-// opposed to per day, per quarter or a running total.
+// message per order, complaint, credit, failure, plan, line, change, join or
+// farm), as opposed to per day, per quarter or a running total.
 func crmCapPerEvent(t crmTrigger) bool {
 	for _, k := range []string{"per_order", "per_order_line", "per_complaint", "per_credit", "per_failure",
-		"per_subscription", "per_event", "per_change", "per_flag"} {
+		"per_subscription", "per_event", "per_change", "per_flag", "per_join", "per_farm"} {
 		if _, ok := t.FrequencyCap[k]; ok {
 			return true
 		}
