@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -80,5 +81,73 @@ func TestCRMW07SuppressedLeavesPackLocked(t *testing.T) {
 	}
 	if st, _ := w.svc.crmDispatch(ctx, "NO-SUCH-TRIGGER", cid, nil); st != "" {
 		t.Fatalf("unknown trigger must report nothing: %q", st)
+	}
+}
+
+// Pack 2 rides a real morning (terms 4.4-4.5): it is minted for tomorrow
+// only when the plan will actually deliver tomorrow under the noon rule. A
+// plan created, resumed or edited after today's noon starts the day after
+// tomorrow, and a day the member skipped (tomorrow's preview cancelled)
+// delivers nothing; either way the free pack would arrive alone.
+func TestCRMPack2AttachFollowsTheNoonRule(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+	household := func(phone string, changedAt time.Time) (primitive.ObjectID, *subscription) {
+		cid := w.customer(t, phone, 500)
+		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		if err != nil {
+			t.Fatalf("createSubscription: %v", err)
+		}
+		chainBackdateSubscription(t, w, sub, changedAt)
+		if _, err := w.db.Collection(collConsumerOffers).InsertOne(ctx, bson.D{
+			{Key: "consumer_id", Value: cid}, {Key: "offer_id", Value: offerWelcomeLitre},
+			{Key: "enrolled_at", Value: istDayAt(D, 8, 0).UTC()}, {Key: "pack1_state", Value: pack1Delivered},
+			{Key: "pack2_state", Value: pack2Pending}, {Key: "subscription_id", Value: sub.SubscriptionID},
+			{Key: "pack2_unlocked_at", Value: istDayAt(D, 9, 0).UTC()},
+		}); err != nil {
+			t.Fatalf("offer: %v", err)
+		}
+		return cid, sub
+	}
+	packsFor := func(cid primitive.ObjectID, day string) int64 {
+		n, _ := w.db.Collection(collOrders).CountDocuments(ctx, bson.D{
+			{Key: "user_id", Value: cid.Hex()}, {Key: "offer_pack", Value: 2}, {Key: "delivery_date", Value: day},
+		})
+		return n
+	}
+
+	// (a) the plan changed at 12:30 today: tomorrow does not deliver, so the
+	// pack waits and rides the day after tomorrow, attached next morning.
+	lateCID, _ := household("9000007201", istDayAt(D, 12, 30))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 40))
+	if ok, err := w.svc.crmTryAttachPack2At(ctx, lateCID, istDayAt(D, 12, 45)); err != nil || ok || packsFor(lateCID, D1) != 0 {
+		t.Fatalf("(a) pack 2 attached to a tomorrow the plan does not deliver: ok=%v err=%v packs=%d", ok, err, packsFor(lateCID, D1))
+	}
+	if ok, err := w.svc.crmTryAttachPack2At(ctx, lateCID, istDayAt(D1, 9, 0)); err != nil || !ok || packsFor(lateCID, D2) != 1 {
+		t.Fatalf("(a) next morning the pack rides the plan's first day %s: ok=%v err=%v", D2, ok, err)
+	}
+
+	// (b) the member skipped tomorrow (cancelled its preview): no attach.
+	skipCID, skipSub := household("9000007202", istDayAt(addDaysIST(D, -2), 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 30))
+	prev := liveSubOrder(t, w, skipSub.SubscriptionID, D1)
+	if prev == nil {
+		t.Fatalf("(b) no preview for tomorrow")
+	}
+	if _, err := w.svc.cancelOrder(ctx, skipCID.Hex(), prev.OrderID); err != nil {
+		t.Fatalf("(b) cancel: %v", err)
+	}
+	if ok, err := w.svc.crmTryAttachPack2At(ctx, skipCID, istDayAt(D, 10, 0)); err != nil || ok || packsFor(skipCID, D1) != 0 {
+		t.Fatalf("(b) pack 2 attached to a skipped tomorrow: ok=%v err=%v", ok, err)
+	}
+
+	// (c) control: a plan from before the cut-off with tomorrow previewed.
+	okCID, _ := household("9000007203", istDayAt(addDaysIST(D, -2), 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 45))
+	if ok, err := w.svc.crmTryAttachPack2At(ctx, okCID, istDayAt(D, 10, 0)); err != nil || !ok || packsFor(okCID, D1) != 1 {
+		t.Fatalf("(c) pack 2 must ride tomorrow's delivery: ok=%v err=%v", ok, err)
 	}
 }

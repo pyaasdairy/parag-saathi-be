@@ -1009,13 +1009,19 @@ func (s *service) crmOnRechargeSettled(ctx context.Context, consumerID primitive
 
 // crmTryAttachPack2 mints the pack-2 ₹0 order for TOMORROW iff tomorrow is a
 // real delivery morning for this household: subscription active, due
-// tomorrow, and the wallet covers that day (the noon rule would skip an
-// unfunded day, and a free pack alone at the door is exactly the lone drop
-// the campaign economics forbid). Idempotent: the pack2_order_id
+// tomorrow, not changed after tomorrow's noon cut-off, tomorrow not skipped,
+// and the wallet covers that day (the noon rule would skip an unfunded day,
+// and a free pack alone at the door is exactly the lone drop the campaign
+// economics forbid). Idempotent: the pack2_order_id
 // empty-slot guard makes concurrent attempts converge on one order.
 // Returns (attached, error); a nil error with attached=false just means
 // "conditions not met yet — the sweep keeps trying".
 func (s *service) crmTryAttachPack2(ctx context.Context, consumerID primitive.ObjectID) (bool, error) {
+	return s.crmTryAttachPack2At(ctx, consumerID, time.Now())
+}
+
+// crmTryAttachPack2At is crmTryAttachPack2 as seen at now.
+func (s *service) crmTryAttachPack2At(ctx context.Context, consumerID primitive.ObjectID, now time.Time) (bool, error) {
 	o, err := s.repo.findOffer(ctx, consumerID)
 	if err != nil {
 		return false, err
@@ -1025,7 +1031,7 @@ func (s *service) crmTryAttachPack2(ctx context.Context, consumerID primitive.Ob
 	}
 	// 14-day window (terms §4.5): past it the sweep expires the pack; never
 	// attach after the cap even if the sweep hasn't swept yet.
-	if o.Pack2UnlockedAt != nil && time.Since(*o.Pack2UnlockedAt) > 14*24*time.Hour {
+	if o.Pack2UnlockedAt != nil && now.Sub(*o.Pack2UnlockedAt) > 14*24*time.Hour {
 		return false, nil
 	}
 	var sub subscription
@@ -1036,9 +1042,21 @@ func (s *service) crmTryAttachPack2(ctx context.Context, consumerID primitive.Ob
 		}
 		return false, errInternal("crm: pack2 subscription lookup failed")
 	}
-	tomorrow := istDay(time.Now().Add(24 * time.Hour))
+	tomorrow := istDay(now.Add(24 * time.Hour))
 	if sub.Status != "active" || !subscriptionDueOn(&sub, tomorrow) {
 		return false, nil // paused or off-cadence — wait for a real morning
+	}
+	// The noon rule: a plan created, resumed or edited after tomorrow's
+	// cut-off starts the day after (the sweep never delivers tomorrow for
+	// it), and a claimed tomorrow with no live order is a day the member
+	// skipped. Either way tomorrow is not a delivery morning.
+	if !sub.subChangedBefore(lockMomentFor(tomorrow)) {
+		return false, nil
+	}
+	if sub.claimed(tomorrow) {
+		if live, lerr := s.repo.findLiveSubscriptionOrder(ctx, sub.SubscriptionID, tomorrow); lerr != nil || live == nil {
+			return false, nil
+		}
 	}
 	dayCost := round2(sub.UnitPrice*float64(sub.Qty)) + subscriptionDeliveryFee
 	if wv, werr := s.wallet(ctx, consumerID); werr != nil || wv.Available < dayCost {

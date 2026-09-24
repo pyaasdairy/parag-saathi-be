@@ -101,6 +101,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 		t.Fatal("first enrolment at a fresh address must not be abuse-flagged")
 	}
 	cid, _ := primitive.ObjectIDFromHex(res.ConsumerID)
+	planFromBeforeNoon(t, ctx, repo, res.SubscriptionID)
 
 	// Idempotency: a second enrol on the same phone must refuse, not double-mint.
 	if _, err := svc.crmEnrol(ctx, "e2e-operator", crmEnrolInput{
@@ -284,6 +285,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	// pack 1 still pending — a settled ₹500 must unlock pack 2 anyway. The
 	// grace window can't have started before the first delivery exists.
 	cid3, _ := primitive.ObjectIDFromHex(res3.ConsumerID)
+	planFromBeforeNoon(t, ctx, repo, res3.SubscriptionID)
 	if _, err := svc.creditTopup(ctx, cid3, 500, "razorpay", "e2e-rzp-3"); err != nil {
 		t.Fatalf("pre-delivery topup: %v", err)
 	}
@@ -303,6 +305,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 		t.Fatalf("enrol #5: %v", err)
 	}
 	cid5, _ := primitive.ObjectIDFromHex(res5.ConsumerID)
+	planFromBeforeNoon(t, ctx, repo, res5.SubscriptionID)
 	deliverOrder(t, ctx, svc, repo, db, res5.Pack1OrderID)
 	svc.crmProcessEvents(ctx)
 	forceFirstDelivery(t, db, cid5, time.Now().In(istZone).AddDate(0, 0, -7)) // today = day 7
@@ -405,6 +408,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	if selfSub.ProductID != "taaza-1l" || selfSub.Qty != 1 || selfSub.Frequency != "alternate" {
 		t.Fatalf("plan not honoured: %+v", selfSub)
 	}
+	planFromBeforeNoon(t, ctx, repo, selfRes.SubscriptionID)
 	selfOffer := mustOffer(t, ctx, svc, selfAcct.ID)
 	if selfOffer.Source != "self" || selfOffer.Pack1OrderID == "" {
 		t.Fatalf("self offer shape: source=%q pack1=%q", selfOffer.Source, selfOffer.Pack1OrderID)
@@ -776,5 +780,20 @@ func TestCommerceFunnelE2E(t *testing.T) {
 	// The recharge events for non-enrolled users must never create offer state.
 	if o, _ := repo.findOffer(ctx, oldAcct.ID); o != nil {
 		t.Fatal("a plain shopper must have NO offer document")
+	}
+}
+
+// planFromBeforeNoon dates a campaign plan to 09:00 IST today, before
+// tomorrow's 12:00 cut-off. Pack 2 attaches only to a morning the plan
+// really delivers (the noon rule: a plan created after the cut-off starts
+// the day after tomorrow), so without this the journey's attach steps
+// passed in the morning and failed every afternoon.
+func planFromBeforeNoon(t *testing.T, ctx context.Context, repo *repository, subID string) {
+	t.Helper()
+	ist := time.Now().In(istZone)
+	at := time.Date(ist.Year(), ist.Month(), ist.Day(), 9, 0, 0, 0, istZone).UTC()
+	if _, err := repo.subscriptions.UpdateOne(ctx, bson.D{{Key: "subscription_id", Value: subID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "created_at", Value: at}, {Key: "changed_at", Value: at}}}}); err != nil {
+		t.Fatalf("date the plan: %v", err)
 	}
 }
