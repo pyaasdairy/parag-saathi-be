@@ -377,6 +377,50 @@ func TestInstantOverridesOnlyOnTheManagersOwnStore(t *testing.T) {
 	}
 }
 
+// ── the zone view reports a live instant state only where there is a lane ──
+//
+// Before: GET /zone answered instantOpenNow true and instantClosesAt 10 PM by
+// day for a zone with no instant radius and for an inactive zone, although
+// the app offers no instant there and extend refuses it, so the planned
+// "closes at 10 PM / Extend" UI would show for a lane that does not exist.
+
+func TestInstantZoneViewReportsNoLiveStateWithoutALane(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	store := w.storeID.Hex()
+	at := ihAt(10, 0)
+	closes := ihUTC(ihAt(22, 0))
+	check := func(what string, z *zone, open bool, closesAt any) {
+		t.Helper()
+		v := zoneViewAt(z, store, at)
+		if v["instantOpenNow"] != open || v["instant_open_now"] != open || v["instantClosesAt"] != closesAt || v["instant_closes_at"] != closesAt {
+			t.Fatalf("%s at 10:00: open %v/%v closes %v/%v, want %v %v", what,
+				v["instantOpenNow"], v["instant_open_now"], v["instantClosesAt"], v["instant_closes_at"], open, closesAt)
+		}
+	}
+
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	std := ihZone(t, w, zone{StandardRadiusM: 8000})
+	check("no instant radius", std, false, nil)
+	// The flag widens instant to it: then it is a lane, hours and all.
+	t.Setenv("INSTANT_TEST_OPEN", "true")
+	check("no instant radius, INSTANT_TEST_OPEN on", std, true, closes)
+	t.Setenv("INSTANT_TEST_OPEN", "")
+
+	inst := ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000})
+	check("instant radius", inst, true, closes) // unchanged
+	off := *inst
+	off.Active = false
+	check("inactive zone", &off, false, nil)
+	// Every other key is still there, and the nil (no zone) view is unchanged.
+	if v := zoneViewAt(std, store, at); v["instantOpenMin"] != 420 || v["instantCloseMin"] != 1320 || v["configured"] != true {
+		t.Fatalf("no-radius view hours: %v", v)
+	}
+	if v := zoneViewAt(nil, store, at); v["instantOpenNow"] != false || v["instantClosesAt"] != nil {
+		t.Fatalf("no-zone view: %v", v)
+	}
+}
+
 // ── the window arithmetic behind both, pure ─────────────────────────────────
 
 func TestInstantHoursWindowArithmetic(t *testing.T) {

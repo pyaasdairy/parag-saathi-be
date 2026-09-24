@@ -904,7 +904,8 @@ func zoneView(z *zone, storeID string) map[string]any {
 
 // zoneViewAt is zoneView with the instant lane's live state at `now` (additive
 // keys, camel + snake): instantOpenNow; instantClosesAt, when the open lane
-// closes (null when shut or open round the clock); and tonight's overrides
+// closes (null when shut or open round the clock; false/null for a zone with
+// no instant lane or an inactive zone); and tonight's overrides
 // instantExtendedUntil / instantClosedUntil while they still run (RFC3339 UTC,
 // else null).
 func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
@@ -927,10 +928,17 @@ func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
 		}
 	}
 	c := z.centerPt()
-	openNow, _, _ := instantWindow(*z, now)
+	// The live state is the instant lane's: a zone with none (no instant
+	// radius and no INSTANT_TEST_OPEN widening, or an inactive zone) is never
+	// "open now" and has no closing time.
+	lane := z.Active && zoneHasInstantLane(z, instantTestOpenOn())
+	openNow := false
 	var closesAt, extendedUntil, closedUntil any
-	if at, ok := instantClosesAt(z, now); ok {
-		closesAt = at.UTC().Format(time.RFC3339)
+	if lane {
+		openNow, _, _ = instantWindow(*z, now)
+		if at, ok := instantClosesAt(z, now); ok {
+			closesAt = at.UTC().Format(time.RFC3339)
+		}
 	}
 	if z.InstantExtendedUntil != nil && now.Before(*z.InstantExtendedUntil) {
 		extendedUntil = z.InstantExtendedUntil.UTC().Format(time.RFC3339)
