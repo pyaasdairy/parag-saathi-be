@@ -293,6 +293,9 @@ func TestCRMTopupMessageEveryCreditPath(t *testing.T) {
 	}
 	w.svc.crmProcessEvents(ctx) // the top-up's own receipt
 	paid := instantOrderDelivered(t, w, referee)
+	// The reward waits out the rider's undo window (referralRewardWorker).
+	afterHold := time.Now().Add(referralRewardHold + time.Hour)
+	w.svc.payDueReferralRewards(ctx, afterHold)
 	if ref, _ := w.svc.repo.findReferralByReferee(ctx, referee); ref == nil || ref.Status != referralCredited || ref.RewardOrderID != paid.OrderID {
 		t.Fatalf("setup: the paid delivery must credit the referral: %+v", ref)
 	}
@@ -313,6 +316,7 @@ func TestCRMTopupMessageEveryCreditPath(t *testing.T) {
 	crmExpectNoValidityClaim(t, "referral reward (referee)", crmB06Rows(t, w, referee))
 	// A second delivery pays nothing more and says nothing more.
 	instantOrderDelivered(t, w, referee)
+	w.svc.payDueReferralRewards(ctx, afterHold)
 	w.svc.crmProcessEvents(ctx)
 	if n := len(crmB06Rows(t, w, referrer)); n != 1 {
 		t.Fatalf("referral reward (referrer) after a second delivery: %d B-06 rows, want 1", n)

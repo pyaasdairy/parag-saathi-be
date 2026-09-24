@@ -21,7 +21,9 @@ package consumer
 // "credited" (the app's ReferralStatus union: 'pending' | 'credited'; it counts
 // and sums "credited" rows). The reward is REFERRAL_REWARD_PAISE (default the
 // Refer screen's Rs 100) credited as a promo (REWARDS) wallet credit to BOTH
-// sides, exactly once per referral, from the delivered sync.
+// sides, exactly once per referral, once that delivery has outlived the
+// rider's undo window: the delivered sync marks the referral due and
+// referralRewardWorker pays it (payDueReferralRewards).
 
 import (
 	"context"
@@ -70,7 +72,18 @@ type referral struct {
 	CreatedAt     time.Time          `bson:"created_at"`
 	RewardedAt    *time.Time         `bson:"rewarded_at,omitempty"`
 	RewardOrderID string             `bson:"reward_order_id,omitempty"`
+	// RewardDueAt is when a pending referral's latest paid-looking delivery
+	// can no longer be undone by the rider: the moment the reward sweep
+	// looks at it. Absent while nothing is waiting.
+	RewardDueAt *time.Time `bson:"reward_due_at,omitempty"`
 }
+
+// referralRewardHold is how long a delivery must stand before it pays a
+// referral. The rider may undo a DELIVERED marking for riderUndoWindow
+// (rider_ops_tasks.go), which hands the referee's money back and puts the
+// order back out, so until then the delivery has not proved the friend paid;
+// the extra minute covers an undo accepted in the window's last second.
+const referralRewardHold = riderUndoWindow + time.Minute
 
 // referralView is one row of GET /referrals, exactly as lib/referrals.ts
 // types it.
@@ -225,15 +238,71 @@ func (r *repository) listReferralsByReferrer(ctx context.Context, referrerID pri
 func (r *repository) markReferralCredited(ctx context.Context, id primitive.ObjectID, orderID string, at time.Time) (bool, error) {
 	res, err := r.referrals().UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: referralPending}},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "status", Value: referralCredited},
-			{Key: "rewarded_at", Value: at},
-			{Key: "reward_order_id", Value: orderID},
-		}}})
+		bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "status", Value: referralCredited},
+				{Key: "rewarded_at", Value: at},
+				{Key: "reward_order_id", Value: orderID},
+			}},
+			{Key: "$unset", Value: bson.D{{Key: "reward_due_at", Value: ""}}},
+		})
 	if err != nil {
 		return false, errInternal("referral update failed")
 	}
 	return res.ModifiedCount == 1, nil
+}
+
+// markReferralDue stamps a pending referral with the moment its referee's
+// latest delivery stands (can no longer be undone).
+func (r *repository) markReferralDue(ctx context.Context, id primitive.ObjectID, due time.Time) error {
+	if _, err := r.referrals().UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: referralPending}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "reward_due_at", Value: due}}}}); err != nil {
+		return errInternal("referral update failed")
+	}
+	return nil
+}
+
+// moveReferralDue re-stamps (next) or clears (nil) a due referral, guarded on
+// the stamp the sweep read: a delivery that stamped it meanwhile wins.
+func (r *repository) moveReferralDue(ctx context.Context, id primitive.ObjectID, was time.Time, next *time.Time) {
+	update := bson.D{{Key: "$unset", Value: bson.D{{Key: "reward_due_at", Value: ""}}}}
+	if next != nil {
+		update = bson.D{{Key: "$set", Value: bson.D{{Key: "reward_due_at", Value: *next}}}}
+	}
+	_, _ = r.referrals().UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: id}, {Key: "status", Value: referralPending}, {Key: "reward_due_at", Value: was}}, update)
+}
+
+// listDueReferrals: the pending referrals whose stamp has come.
+func (r *repository) listDueReferrals(ctx context.Context, now time.Time) ([]referral, error) {
+	cur, err := r.referrals().Find(ctx, bson.D{
+		{Key: "status", Value: referralPending},
+		{Key: "reward_due_at", Value: bson.D{{Key: "$lte", Value: now}}},
+	}, options.Find().SetSort(bson.D{{Key: "reward_due_at", Value: 1}}).SetLimit(500))
+	if err != nil {
+		return nil, errInternal("due referrals lookup failed")
+	}
+	out := []referral{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("due referrals decode failed")
+	}
+	return out, nil
+}
+
+// listPaidLookingDeliveries: the consumer's delivered orders that could have
+// been paid for (hasPaidDelivery's filter), oldest delivery first.
+func (r *repository) listPaidLookingDeliveries(ctx context.Context, consumerID primitive.ObjectID) ([]order, error) {
+	cur, err := r.orders.Find(ctx, paidLookingDeliveries(consumerID),
+		options.Find().SetSort(bson.D{{Key: "delivered_at", Value: 1}}).SetLimit(50))
+	if err != nil {
+		return nil, errInternal("order history lookup failed")
+	}
+	out := []order{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("order history decode failed")
+	}
+	return out, nil
 }
 
 // ── Service ─────────────────────────────────────────────────────────────────
@@ -298,15 +367,21 @@ func errReferralNotEligible(msg string) *apiError {
 	return errUnprocessable("REFERRAL_NOT_ELIGIBLE", msg)
 }
 
-// hasPaidDelivery reports whether the consumer already had a delivered order
-// with a positive total that was not a Welcome Litre promotional pack.
-func (r *repository) hasPaidDelivery(ctx context.Context, consumerID primitive.ObjectID) (bool, error) {
-	n, err := r.orders.CountDocuments(ctx, bson.D{
+// paidLookingDeliveries matches the consumer's delivered orders with a
+// positive total that were not a Welcome Litre promotional pack.
+func paidLookingDeliveries(consumerID primitive.ObjectID) bson.D {
+	return bson.D{
 		{Key: "user_id", Value: consumerID.Hex()},
 		{Key: "status", Value: "delivered"},
 		{Key: "total", Value: bson.D{{Key: "$gt", Value: 0}}},
 		{Key: "offer_pack", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$gt", Value: 0}}}}},
-	}, options.Count().SetLimit(1))
+	}
+}
+
+// hasPaidDelivery reports whether the consumer already had a delivered order
+// with a positive total that was not a Welcome Litre promotional pack.
+func (r *repository) hasPaidDelivery(ctx context.Context, consumerID primitive.ObjectID) (bool, error) {
+	n, err := r.orders.CountDocuments(ctx, paidLookingDeliveries(consumerID), options.Count().SetLimit(1))
 	if err != nil {
 		return false, errInternal("order history lookup failed")
 	}
@@ -388,12 +463,12 @@ func (s *service) applyReferral(ctx context.Context, refereeID primitive.ObjectI
 	return &out, nil
 }
 
-// rewardReferralOnDelivery runs from the delivered sync: the referee's first
-// delivered order THEY PAID FOR after the link credits BOTH wallets and flips
-// the referral to credited. Exactly once per referral: each credit is gated
-// by its own ledger ref, and the status flip is guarded on pending, so a
-// repeated sync (or two racing ones) can neither pay twice nor emit twice.
-// Best-effort by contract: nothing here may fail a delivery.
+// rewardReferralOnDelivery runs from the delivered sync. It pays nothing yet:
+// the rider can undo the marking for riderUndoWindow, which hands the
+// referee's money back (and a reward paid at the door stayed paid after an
+// undo and a fail). A delivery the referee paid for marks the referral due
+// at the moment it stands; payDueReferralRewards pays from then. Best-effort
+// by contract: nothing here may fail a delivery.
 func (s *service) rewardReferralOnDelivery(ctx context.Context, o *order) {
 	if o == nil {
 		return
@@ -411,23 +486,83 @@ func (s *service) rewardReferralOnDelivery(ctx context.Context, o *order) {
 	if !s.referralPaidDelivery(ctx, refereeID, o) {
 		return
 	}
+	if err := s.repo.markReferralDue(ctx, ref.ID, time.Now().UTC().Add(referralRewardHold)); err != nil {
+		s.log.Warn("referral: due mark failed", "referral", ref.ID.Hex(), "order", o.OrderID, "err", err)
+	}
+}
+
+// payDueReferralRewards pays every due referral whose referee has a delivery
+// they paid for that has outlived the undo window and still stands. A
+// referral whose delivery was undone meanwhile finds none and waits for the
+// next one. Returns how many referrals this call credited.
+func (s *service) payDueReferralRewards(ctx context.Context, now time.Time) int {
+	due, err := s.repo.listDueReferrals(ctx, now)
+	if err != nil {
+		s.log.WarnContext(ctx, "referral: due scan failed", "err", err)
+		return 0
+	}
+	paid := 0
+	for i := range due {
+		if s.settleDueReferral(ctx, &due[i], now) {
+			paid++
+		}
+	}
+	return paid
+}
+
+// settleDueReferral pays ref on the referee's oldest standing paid delivery,
+// or moves its stamp to the next delivery still inside the hold, or clears it.
+func (s *service) settleDueReferral(ctx context.Context, ref *referral, now time.Time) bool {
+	orders, err := s.repo.listPaidLookingDeliveries(ctx, ref.RefereeID)
+	if err != nil {
+		return false
+	}
+	var next *time.Time
+	for i := range orders {
+		o := &orders[i]
+		at, perr := time.Parse(time.RFC3339, o.DeliveredAt)
+		if perr != nil {
+			continue
+		}
+		if stands := at.Add(referralRewardHold); now.Before(stands) {
+			if next == nil || stands.Before(*next) {
+				next = &stands
+			}
+			continue
+		}
+		if s.referralPaidDelivery(ctx, ref.RefereeID, o) {
+			return s.payReferralReward(ctx, ref, o)
+		}
+	}
+	if ref.RewardDueAt != nil {
+		s.repo.moveReferralDue(ctx, ref.ID, *ref.RewardDueAt, next)
+	}
+	return false
+}
+
+// payReferralReward credits BOTH wallets for a delivery the referee paid for
+// and flips the referral to credited. Exactly once per referral: each credit
+// is gated by its own ledger ref, and the status flip is guarded on pending,
+// so a repeated sweep (or two racing replicas) can neither pay twice nor
+// emit twice. Reports whether this call did the flip.
+func (s *service) payReferralReward(ctx context.Context, ref *referral, o *order) bool {
 	amount := round2(float64(ref.RewardPaise) / 100)
 	if amount <= 0 {
-		return
+		return false
 	}
 	key := "referral:" + ref.ID.Hex()
 	if _, err := s.creditRewards(ctx, ref.ReferrerID, amount, key+":referrer", "Referral reward: a family you invited took their first delivery"); err != nil {
 		s.log.Warn("referral: referrer credit failed", "referral", ref.ID.Hex(), "err", err)
-		return
+		return false
 	}
 	if _, err := s.creditRewards(ctx, ref.RefereeID, amount, key+":referee", "Referral reward: welcome to PYAAS"); err != nil {
 		s.log.Warn("referral: referee credit failed", "referral", ref.ID.Hex(), "err", err)
-		return
+		return false
 	}
 	now := time.Now().UTC()
 	flipped, err := s.repo.markReferralCredited(ctx, ref.ID, o.OrderID, now)
 	if err != nil || !flipped {
-		return
+		return false
 	}
 	payload := map[string]any{
 		"referral_id": ref.ID.Hex(), "order_id": o.OrderID, "reward_amount": amount,
@@ -435,6 +570,31 @@ func (s *service) rewardReferralOnDelivery(ctx context.Context, o *order) {
 	}
 	s.emitCRMEvent(ctx, "referral.rewarded", ref.ReferrerID, payload)
 	s.emitCRMEvent(ctx, "referral.rewarded", ref.RefereeID, payload)
+	return true
+}
+
+// referralRewardWorker pays the referral rewards whose delivery has outlived
+// the rider's undo window: once at boot (a restart must not strand a due
+// reward), then every 5 minutes, so a reward lands within about 20 minutes
+// of the delivery. Every pay is exactly-once, so replicas and a boot pass
+// racing a tick are harmless.
+func (s *service) referralRewardWorker(ctx context.Context) {
+	run := func(now time.Time) {
+		runCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		s.payDueReferralRewards(runCtx, now)
+		cancel()
+	}
+	run(time.Now())
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			run(now)
+		}
+	}
 }
 
 // referralPaidDelivery reports whether the referee paid for this delivered

@@ -124,6 +124,10 @@ func Register(r chi.Router, d *deps.Deps) {
 	// wallet on next_bill_date, retried for three days, then stopped.
 	go svc.foundingBillingWorker(context.Background())
 
+	// Referral rewards (referrals.go): a referee's paid delivery pays both
+	// sides once the rider can no longer undo it (the 15-minute window).
+	go svc.referralRewardWorker(context.Background())
+
 	// CRM (Welcome Litre) — the worker self-gates on CRM_ENABLED every tick,
 	// so it idles for free until the founder flips the env; indexes are
 	// created OUTSIDE the fatal boot path (a campaign index failure must

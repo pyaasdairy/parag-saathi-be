@@ -1102,8 +1102,10 @@ func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 			})
 		}
 	}
-	// Referral reward (referrals.go): the referee's first delivered order
-	// pays both sides, exactly once. Best-effort, never blocks the delivery.
+	// Referral reward (referrals.go): the referee's first paid delivery marks
+	// the referral due; referralRewardWorker pays both sides, exactly once,
+	// once the rider can no longer undo it. Best-effort, never blocks the
+	// delivery.
 	s.rewardReferralOnDelivery(ctx, o)
 }
 

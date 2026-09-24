@@ -136,7 +136,7 @@ worker (`TestCRMTopupMessageEveryCreditPath`):
 | rider undo within 15 minutes | B-06 | "₹<debit> added to your Wallet (delivery <code> reversed). Refundable." | case 7 |
 | AutoPay mandate execution | none | it DEBITS the wallet (subscription auto-renewal), so no "added" message; a short wallet sends B-03 | case 8, `TestCRMEmitPaymentFailed` |
 | a credit whose balance update fails | none | no message for money that never arrived (fixed in `f7384d9`) | case 9 |
-| referral reward (both sides, on the referee's first paid delivery) | B-06 (T-B05-PROMO) | one each: "₹100 Pyaas credit added (Referral reward: …). Usable on orders; not refundable in cash." | case 10 |
+| referral reward (both sides, once the referee's first paid delivery has outlived the rider's 15-minute undo window) | B-06 (T-B05-PROMO) | one each: "₹100 Pyaas credit added (Referral reward: …). Usable on orders; not refundable in cash." | case 10 |
 
 A Welcome Litre household that tops up ₹500 or more inside its 7-day window also gets
 W-04 for the same recharge: that one is about the free pack, B-06 is the receipt.

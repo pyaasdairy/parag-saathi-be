@@ -161,7 +161,9 @@ func TestReferralApplyLinksOnceAndRewardsExactlyOnce(t *testing.T) {
 		t.Fatalf("referee list: %d %s", code, body)
 	}
 
-	// The referee's first delivered order pays both sides Rs 100 in REWARDS.
+	// The referee's first delivered order pays both sides Rs 100 in REWARDS,
+	// once the rider can no longer undo it (the reward sweep after the hold).
+	afterHold := time.Now().Add(referralRewardHold + time.Hour)
 	ord, err := w.svc.createOrder(ctx, referee.Hex(), orderInput{
 		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Qty: 1, Price: 35}},
 		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
@@ -175,6 +177,9 @@ func TestReferralApplyLinksOnceAndRewardsExactlyOnce(t *testing.T) {
 	if _, err := w.svc.deliverDelivery(ctx, w.rider, task.ID, deliverInput{ProofPhoto: "p.jpg", Geo: &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true}); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
+	if n := w.svc.payDueReferralRewards(ctx, afterHold); n != 1 {
+		t.Fatalf("the reward sweep credited %d referral(s), want 1", n)
+	}
 	rw, _ := w.svc.wallet(ctx, referrer)
 	ew, _ := w.svc.wallet(ctx, referee)
 	if rw.Rewards != 100 || ew.Rewards != 100 {
@@ -183,9 +188,10 @@ func TestReferralApplyLinksOnceAndRewardsExactlyOnce(t *testing.T) {
 	if ew.Cash != 500-ord.Total {
 		t.Fatalf("the delivery itself still settled from cash: %v want %v", ew.Cash, 500-ord.Total)
 	}
-	// Exactly once: a replayed delivered sync moves no more money and emits
-	// no second referral.rewarded; the ledger row reads credited.
+	// Exactly once: a replayed delivered sync and another sweep move no more
+	// money and emit no second referral.rewarded; the ledger row reads credited.
 	w.svc.syncOrderDelivered(ctx, chainTaskFor(t, w, ord.OrderID))
+	w.svc.payDueReferralRewards(ctx, afterHold)
 	rw, _ = w.svc.wallet(ctx, referrer)
 	ew, _ = w.svc.wallet(ctx, referee)
 	if rw.Rewards != 100 || ew.Rewards != 100 {
@@ -217,6 +223,7 @@ func TestReferralApplyLinksOnceAndRewardsExactlyOnce(t *testing.T) {
 	if _, err := w.svc.deliverDelivery(ctx, w.rider, task2.ID, deliverInput{ProofPhoto: "p.jpg", Geo: &geoPt{Lat: task2.Geo.Lat, Lng: task2.Geo.Lng}, GeofenceOK: true}); err != nil {
 		t.Fatalf("deliver 2: %v", err)
 	}
+	w.svc.payDueReferralRewards(ctx, afterHold)
 	if rw, _ = w.svc.wallet(ctx, referrer); rw.Rewards != 100 {
 		t.Fatalf("a second delivery paid the referrer again: %v", rw.Rewards)
 	}
@@ -327,8 +334,12 @@ func TestReferralRewardWaitsForAPaidDelivery(t *testing.T) {
 	if _, err := w.svc.applyReferral(ctx, referee, code); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
+	afterHold := time.Now().Add(referralRewardHold + time.Hour)
 	pending := func(step string) {
 		t.Helper()
+		// The reward sweep, run past every delivery's undo window, must still
+		// find nothing the friend paid for.
+		w.svc.payDueReferralRewards(ctx, afterHold)
 		ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
 		rw, _ := w.svc.wallet(ctx, referrer)
 		if ref == nil || ref.Status != referralPending || rw.Rewards != 0 {
@@ -370,6 +381,7 @@ func TestReferralRewardWaitsForAPaidDelivery(t *testing.T) {
 		t.Fatalf("paid order: %v", err)
 	}
 	chainDeliver(t, w, paid.OrderID)
+	w.svc.payDueReferralRewards(ctx, afterHold)
 	ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
 	rw, _ := w.svc.wallet(ctx, referrer)
 	if ref == nil || ref.Status != referralCredited || ref.RewardOrderID != paid.OrderID || rw.Rewards != 100 {
@@ -456,5 +468,108 @@ func TestReferralApplyRefusesEstablishedAndCircular(t *testing.T) {
 	}
 	if n, _ := w.db.Collection(collReferrals).CountDocuments(ctx, bson.D{}); n != 2 {
 		t.Fatalf("referral links: %d want 2 (B<-A, D<-A)", n)
+	}
+}
+
+// PM-01: the reward paid the moment the referee's first delivery was marked,
+// but the rider may undo a DELIVERED marking for riderUndoWindow, which hands
+// the referee's money back and puts the order back out. After an undo and a
+// fail the friend had paid nothing and the order was cancelled, yet both
+// wallets kept Rs 100 and the referral read credited.
+func TestReferralRewardNotPaidForADeliveryTheRiderUndid(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	referrer := w.customer(t, "9000007401", 0)
+	referee := w.customer(t, "9000007402", 500)
+	code, err := w.svc.referralCode(ctx, referrer)
+	if err != nil {
+		t.Fatalf("code: %v", err)
+	}
+	if _, err := w.svc.applyReferral(ctx, referee, code); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	rewards := func(cid primitive.ObjectID) float64 {
+		t.Helper()
+		wv, err := w.svc.wallet(ctx, cid)
+		if err != nil {
+			t.Fatalf("wallet: %v", err)
+		}
+		return wv.Rewards
+	}
+	unpaid := func(step string) {
+		t.Helper()
+		ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
+		if ref == nil || ref.Status != referralPending || rewards(referrer) != 0 || rewards(referee) != 0 {
+			t.Fatalf("%s: the referral paid out for a delivery the friend did not pay for: %+v referrer %v referee %v",
+				step, ref, rewards(referrer), rewards(referee))
+		}
+	}
+
+	past := func() time.Time { return time.Now().Add(referralRewardHold + time.Minute) }
+
+	// The first delivery: inside the undo window nothing is paid.
+	o := instantOrderDelivered(t, w, referee)
+	unpaid("right after the delivery")
+	if n := w.svc.payDueReferralRewards(ctx, time.Now()); n != 0 {
+		t.Fatalf("a sweep inside the undo window paid %d referral(s)", n)
+	}
+	unpaid("a sweep inside the undo window")
+
+	// The rider undoes it and it then fails at the door: once the window
+	// has passed the sweep still pays nothing, and the stamp is gone.
+	task := chainTaskFor(t, w, o.OrderID)
+	if code := riderUndo(t, w, task.ID); code != 200 {
+		t.Fatalf("rider undo: %d", code)
+	}
+	if _, err := w.svc.failDelivery(ctx, w.rider, task.ID, "Customer not at home"); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+	if st := w.orderByID(t, o.OrderID).Status; st != "cancelled" || w.cash(t, referee) != 500 {
+		t.Fatalf("setup: order %s, referee cash %v (want cancelled, 500)", st, w.cash(t, referee))
+	}
+	unpaid("after an undo and a fail")
+	if n := w.svc.payDueReferralRewards(ctx, past()); n != 0 {
+		t.Fatalf("the sweep paid %d referral(s) for an undone delivery", n)
+	}
+	unpaid("a sweep after the window, the delivery undone")
+	if ref, _ := w.svc.repo.findReferralByReferee(ctx, referee); ref.RewardDueAt != nil {
+		t.Fatalf("the stamp of an undone delivery must be cleared: %v", ref.RewardDueAt)
+	}
+
+	// The next delivery is undone and delivered again: the one that stands
+	// pays both sides once, when the window has passed.
+	o2 := instantOrderDelivered(t, w, referee)
+	task2 := chainTaskFor(t, w, o2.OrderID)
+	if code := riderUndo(t, w, task2.ID); code != 200 {
+		t.Fatalf("rider undo 2: %d", code)
+	}
+	if _, err := w.svc.deliverDelivery(ctx, w.rider, task2.ID, deliverInput{
+		ProofPhoto: "https://example.test/proof2.jpg", Geo: &geoPt{Lat: task2.Geo.Lat, Lng: task2.Geo.Lng}, GeofenceOK: true,
+	}); err != nil {
+		t.Fatalf("deliver again: %v", err)
+	}
+	unpaid("the redelivery, inside its window")
+	if n := w.svc.payDueReferralRewards(ctx, past()); n != 1 {
+		t.Fatalf("the sweep after the window credited %d referral(s), want 1", n)
+	}
+	ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
+	if ref == nil || ref.Status != referralCredited || ref.RewardOrderID != o2.OrderID || ref.RewardDueAt != nil ||
+		rewards(referrer) != 100 || rewards(referee) != 100 {
+		t.Fatalf("the standing delivery must credit the referral: %+v referrer %v referee %v", ref, rewards(referrer), rewards(referee))
+	}
+	if cash := w.cash(t, referee); cash != 500-o2.Total {
+		t.Fatalf("referee cash %v want %v (the undone order refunded, the standing one paid once)", cash, 500-o2.Total)
+	}
+	// Exactly once: another sweep and a replayed delivered sync add nothing.
+	w.svc.syncOrderDelivered(ctx, chainTaskFor(t, w, o2.OrderID))
+	if n := w.svc.payDueReferralRewards(ctx, past()); n != 0 {
+		t.Fatalf("a second sweep credited %d referral(s)", n)
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "ref_id", Value: bson.D{{Key: "$regex", Value: "^referral:"}}}}); n != 2 {
+		t.Fatalf("referral ledger rows: %d want 2", n)
+	}
+	if evs, _ := w.db.Collection(collCRMEvents).CountDocuments(ctx, bson.D{{Key: "topic", Value: "referral.rewarded"}}); evs != 2 {
+		t.Fatalf("referral.rewarded events: %d want 2 (one per side)", evs)
 	}
 }
