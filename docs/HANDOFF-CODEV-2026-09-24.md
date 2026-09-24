@@ -1162,7 +1162,143 @@ route). The test world stamps its seed top-ups at 2026-01-01 (`chainStampLedger`
 - An instant order delivered after 12:00 is added back by the as-of rule, so the door can
   still find the wallet short the next morning (the owner's decision 1).
 - Not changed here: W-01 ("Tomorrow by 7 am") follows the pack 1 date, which the G9 item
-  owns (its DLT id is mapped in production, so a wording change needs a new registration
-  first); W-03a ("Recharge by 12 noon today") is only true when its 10:30 tick runs before
-  noon; the pack-2 attach still checks the current wallet before noon; `T-SMS-SKIP` (a
-  standalone SMS template no trigger uses) still carries the old alternative-text block.
+  owns (done in 10.2: an afternoon enrolment gets the unregistered T-W01-LATER naming the
+  real morning); W-03a ("Recharge by 12 noon today") is only true when its 10:30 tick runs
+  before noon; the pack-2 attach still checks the current wallet before noon; `T-SMS-SKIP`
+  (a standalone SMS template no trigger uses) still carries the old alternative-text block.
+
+### 10.2 Orders, plan changes, the store and the rider, and the SMS caveats
+
+| commit | what |
+|---|---|
+| `5fadafb` | R4(i): patch, pause, resume and cancel bring the plan's editable previews into line in the request (`syncPlanPreviews`) |
+| `fe448a6` | R2: a one-off morning order for a closed or past morning is moved to the first open one and accepted (`requested_date`, `date_moved`); D-01 names the real day (`createDeliveryForOrderAt`) |
+| `ddeae1e` | G4: a start date on a locked morning is re-anchored on the first editable one |
+| `3fcdffa` | G7: a member's cancel of a morning order past its noon cut-off is 409 `ORDER_LOCKED` |
+| `341cde7` | G9: the Welcome Litre pack 1 (and a plan minted with it) is for the first open morning |
+| `97e6cea` | the store's `completed_today` counts on the IST day; R4(iii)/(iv) verified by tests |
+| `8b28bbb` | R4(v): racing noon sweeps from two instances decide each day once (test) |
+| `986ec90` | CRM caveat 1: each body goes out only under its own SMS / WhatsApp registration |
+| `3ac09f8` | CRM caveat 2: the rider-undo credit's [REASON] uses a 6-character order code |
+| `57a6016` | CRM caveat 3: B-06 ("money added") also goes by push, in parallel |
+| `e1a7e48` | CRM caveat 4: a refused send is logged at ERROR and kept as `channel_errors` |
+| `76049af` | W-01 names the morning pack 1 really comes (T-W01-LATER) |
+| `2dcf9a3` | CRM caveat 5: `.env.example` / `render.yaml` wording, `docs/CRM-MESSAGES.md` |
+
+**Plan changes reach the store at once (R4(i)).** `setSubscriptionStatusAt` and
+`patchSubscriptionAt` end with `syncPlanPreviews(plan, now)`: the sweep's RECONCILE and
+PREVIEW for that one plan, for days from `firstEditableDay(now)`. A preview the plan no
+longer delivers (pause, cancel, vacation, moved start) is cancelled and its day released;
+one it still delivers takes the plan's line; an active plan previews its first editable
+day. Days past their cut-off are never touched (`lockPreviewsBeforeChange` decided them
+first). Best-effort and idempotent against a tick or a replica; `/upcoming` is unchanged
+(`813099a`'s batched reads stay). A new plan was already previewed by the create handler's
+kick; that is unchanged.
+
+**One-off morning orders (R2).** `morningDeliveryDate` in `orders.go`: no date → the first
+open morning (as before); a date that is closed (tomorrow from 12:00 IST, today) or past →
+moved to `firstEditableDay` and ACCEPTED, `date_moved: true`, `requested_date` = the day
+asked for; an open date → kept (`requested_date` = it); more than 7 days ahead → 422
+`BAD_DELIVERY_DATE` (unchanged); a malformed date → 400. The order and its task carry the
+real `delivery_date`, and D-01's [ETA] is worded against the moment the order was placed
+("8 Oct by 7 am"). The two keys are stored, so `GET /orders` and `GET /orders/{id}` carry
+them; the instant lane carries none of the three. `CUTOFF_PASSED` is no longer sent (the
+constant `errCodeCutoffPassed` and `apiError.next_delivery_date` stay for old builds).
+
+**Re-anchor (G4).** `reanchorLockedStart`: a start date from today through
+`lockedThroughDay(now)` becomes `firstEditableDay(now)`, on create and on a patch that sends
+a DIFFERENT start date. A past start is an anchor and is kept (the shipped app re-sends the
+original start on resume); re-sending the stored start moves nothing. So after noon an
+alternate or weekly plan "from tomorrow" first delivers the day after tomorrow, not 3 or 8
+days later; A-03's weekly case now says "8 Oct". For a new plan the new app's
+`next_delivery_date: w.start_date` fallback now names the right first morning; it should
+still read the server's `next_delivery_date` (lib seam G6).
+
+**Cancel after the cut-off (G7).** `cancelOrderAt`: a member's `POST /orders/{id}/cancel`
+of a morning order (one-off or subscription, locked or not yet) whose delivery day is on
+or before `lockedThroughDay(now)` answers 409 `ORDER_LOCKED`, "Orders lock at 12 noon the
+day before delivery, so this one can no longer be cancelled.", and changes nothing. The
+store's cancel (`storeCancelDelivery`), the rider's marks, operator paths and the instant
+lane are untouched. The noon lock already reserves a member's one-off morning orders due
+that day (`listMemberDayCommitted`, `fef95fc`); with G7 that reservation is exact.
+
+**Welcome Litre pack 1 (G9).** `crmEnrolCore` mints pack 1 for `firstEditableDay(at)`
+(`pack1_scheduled_for` says so), and a plan it mints (`crmCreateSubscriptionAt`) starts that
+morning. `offer.finalized` carries `pack1_day`; W-01 picks T-W01 ("Tomorrow by 7 am", the
+registered body) when pack 1 is tomorrow as seen when W-01 is sent (`offer.pack1_tomorrow`),
+else T-W01-LATER ("You're set. 8 Oct by 7 am: …", same words, not registered: inbox and push
+only until DLT / Meta approve it and it is mapped under `T-W01-LATER`). The promoter's door
+script still says "tomorrow".
+
+**Store and rider (R4(iii)-(v)).** Verified by tests, no change needed: at the lock the
+store's queue gains tomorrow's funded orders as tasks dated tomorrow with the pack size and
+the dated slot, and Upcoming moves on to the day after
+(`TestStoreSeesTomorrowsLockedOrdersAfterTheLock`); the rider's today (`/route/today`, the
+`/route/complete` guard, `/inventory/today` and its session) is today's stops plus overdue
+open ones, never a later day's (`bd68a11`; `TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays`);
+five racing sweeps (two instances at 12:00:05, a restart at 12:14:59) and three racing CRM
+ticks leave one task per funded order, one skip and one `day_skipped` per short member and
+one B-02 (`TestConcurrentNoonSweeps`). Fixed: `GET /stores/{id}/riders` `completed_today`
+compared UTC dates; it now counts deliveries on the IST day (`deliveredOnISTDay`), so the
+route's first stops before 05:30 IST count for today.
+
+**CRM SMS caveats.**
+
+1. `crmRegistrationFor` (SMS and WhatsApp): the routed template id is looked up first
+   ("T-B05-PROMO"), then the trigger id, and the trigger id covers only the trigger's own
+   template (plain, or a conditional's `then`). B-06's promo / referral credits no longer
+   go out under the refund body's DLT id; with only `B-06` mapped they are inbox and push
+   only. Existing trigger-keyed mappings (W-01, W-07) behave exactly as before.
+2. The rider-undo credit's reason is "delivery 5D05C6 reversed" (`crmShortOrderCode`: the
+   last six characters of the order id in capitals, 24 characters in all).
+3. B-06 has `parallel: ["push"]`. Live service triggers that still name no push (unchanged,
+   for the owner to decide): A-02, A-03, A-05, B-02, B-03, C-03, D-05, E-01, E-02, E-04,
+   E-05 (human_call by design), E-06, W-06, W-07, W-08.
+4. A channel that tried and failed (provider refusal, unknown outcome, content it could not
+   render) is logged at ERROR with trigger, template, channel and role, and recorded on the
+   dispatch row as `channel_errors` `[{channel, role, template, error (300 chars), transient}]`,
+   shown by the operator's dispatch log (`GET /consumer/crm/dispatch-log/{phone}`, additive
+   key).
+   `channel` still names only what delivered. Unavailable channels stay a Warn; push to a
+   member with no device is "no recipient" (`errCRMNoRecipient`), not an error.
+5. `.env.example` / `render.yaml`: the values are MSG91's template ids, not the 19-digit DLT
+   ids; keys are trigger or template ids; `CRM_MSG91_SENDER` is optional. B-06's SMS
+   variables (`##x##`, `##reason##`) are in `docs/CRM-MESSAGES.md` section 3.
+
+**What the apps see**
+
+- Shipped app (`release/26.07.03`): a morning order after noon now succeeds instead of
+  422, but its cart footer and order screen still say "tomorrow" (only D-01 names the
+  moved day); a cancel of a locked morning order shows the ORDER_LOCKED message where it
+  used to succeed; an alternate plan created after noon runs one day out of phase with the
+  app's local calendar (G4, accepted). Its low-balance pause / resume flow is unchanged.
+- New app (`feature/consumer-revamp-phase2`): the home card already reads `delivery_date`;
+  lib seam still open: `placeOrder` should return the created order (or `delivery_date`,
+  `requested_date`, `date_moved`) so the cart can say "moved to Thu 8 Oct"; the order
+  screen's "tomorrow morning" copy is UI.
+- Saathi: Upcoming reflects member changes on the next 12 s poll; tomorrow's tasks appear
+  at the lock; a moved one-off order appears under its real day; `completed_today` is right
+  before 05:30 IST. Rider badges still count later days (app follow-up).
+
+**Tests** (`CONSUMER_MONGO_TEST_URI=mongodb://127.0.0.1:27018`, injected clocks, simulated at
+11:59, 12:00:01, 12:14:59, 23:59 and month end where the rule is time-dependent):
+`subscriptions_write_sync_test.go`, `orders_cutoff_test.go` (rewritten:
+`TestMorningOrderAfterNoonMovesToTheFirstOpenMorning`, `TestMovedMorningOrderOnTheWire`,
+`TestD01NamesTheMovedDay`), `subscriptions_reanchor_test.go`, `orders_cancel_lock_test.go`,
+`crm_pack1_noon_test.go`, `store_rider_day_test.go`, `subscriptions_concurrency_test.go`,
+`crm_template_registration_test.go`, `crm_b06_push_test.go`, `crm_channel_errors_test.go`,
+`crm_w01_noon_test.go`. Made date- and hour-independent because of G4 / G7 / G9: tests
+that make plans for fixed October days now make them at `chainPlanMadeAt` (1 Sep); member
+cancels run at an explicit moment; `planFromBeforeNoon` models a 09:00 enrolment fully;
+the plan-variant and dry-run W-01 tests enrol at a fixed morning.
+
+**Residuals, known**
+
+- The referral rewards' remarks ("Referral reward: a family you invited took their first
+  delivery", 64 characters) exceed a DLT variable's 30: shorten them before T-B05-PROMO is
+  mapped for SMS.
+- T-W01-LATER needs DLT and Meta registration before an afternoon enrolment's W-01 can
+  leave by SMS or WhatsApp.
+- The `/upcoming` trims the design offered as optional (skip the task lookup for previews,
+  one `$in` address read) were not made; the poll is as `813099a` left it.
+- `awaiting_funds` on `/upcoming` stays (true only in the seconds before the lock tick).
