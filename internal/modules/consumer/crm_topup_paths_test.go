@@ -208,7 +208,7 @@ func TestCRMTopupMessageEveryCreditPath(t *testing.T) {
 		t.Fatalf("undo ledger row: %v", err)
 	}
 	w.svc.crmProcessEvents(ctx)
-	undoWant := "₹" + crmRupees(back.Amount) + " added to your Wallet (delivery " + task.OrderCode + " reversed). Refundable."
+	undoWant := "₹" + crmRupees(back.Amount) + " added to your Wallet (delivery " + strings.ToUpper(task.OrderCode[len(task.OrderCode)-6:]) + " reversed). Refundable."
 	var undoRows int
 	for _, r := range crmB06Rows(t, w, g) {
 		if strings.Contains(r.EN, "reversed") {

@@ -158,7 +158,10 @@ func TestCRMEmitWalletCredited(t *testing.T) {
 	}
 	evs = crmEventsOf(t, w.db, cid, "wallet.credited")
 	last = evs[len(evs)-1].Payload
-	if last["account"] != "topup" || last["reason"] != "delivery "+task.OrderCode+" reversed" {
+	// The reason is a DLT variable (at most 30 characters): the order's short
+	// code, its last six characters in capitals, not the whole order id.
+	short := strings.ToUpper(task.OrderCode[len(task.OrderCode)-6:])
+	if reason, _ := last["reason"].(string); last["account"] != "topup" || reason != "delivery "+short+" reversed" || len(reason) > 30 {
 		t.Fatalf("wallet.credited on undo: %+v", last)
 	}
 	if _, has := last["order_id"]; has {
