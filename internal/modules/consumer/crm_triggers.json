@@ -338,8 +338,9 @@
    "dlt_category": "transactional",
    "cta": null,
    "correction": "C-02",
-   "en": "₹[X] Pyaas credit added ([REASON]). Usable on orders; not refundable in cash. Valid 30 days.",
-   "hi": "₹[X] Pyaas credit ([REASON]) mila. Order par use karein; cash refund nahi. 30 din valid."
+   "en": "₹[X] Pyaas credit added ([REASON]). Usable on orders; not refundable in cash.",
+   "hi": "₹[X] Pyaas credit ([REASON]) mila. Order par use karein; cash refund nahi.",
+   "note": "No validity sentence: nothing in the backend expires the REWARDS (promo_credit) bucket, so 'Valid 30 days' / '30 din valid' promised a lapse that never happens. Put it back together with a real expiry."
   },
   "T-C01": {
    "dlt_category": "service_implicit",

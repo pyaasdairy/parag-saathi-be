@@ -74,6 +74,19 @@ func crmExpectOneB06(t *testing.T, w *chainWorld, cid primitive.ObjectID, path, 
 	}
 }
 
+// crmExpectNoValidityClaim (PM-02): Pyaas credit (the REWARDS bucket) never
+// expires - nothing in the backend lapses it - so no B-06 row may tell the
+// member it is "Valid 30 days" ("30 din valid"). The referral reward was the
+// first production path to render that promise to both families.
+func crmExpectNoValidityClaim(t *testing.T, path string, rows []struct{ EN, HI, Template string }) {
+	t.Helper()
+	for _, r := range rows {
+		if strings.Contains(strings.ToLower(r.EN), "valid") || strings.Contains(strings.ToLower(r.HI), "valid") {
+			t.Fatalf("%s: the message promises a validity nothing enforces: %q / %q", path, r.EN, r.HI)
+		}
+	}
+}
+
 func rzpTestSignature(secret, orderID, paymentID string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(orderID + "|" + paymentID))
@@ -182,6 +195,7 @@ func TestCRMTopupMessageEveryCreditPath(t *testing.T) {
 		t.Fatalf("promoCredit replay: %v", err)
 	}
 	crmExpectOneB06(t, w, e, "promo credit", "T-B05-PROMO", "₹75 Pyaas credit added (Welcome credit). Usable on orders; not refundable in cash.")
+	crmExpectNoValidityClaim(t, "promo credit", crmB06Rows(t, w, e))
 
 	// 6) Refund.
 	f := w.customer(t, "9000008106", 0)
@@ -295,6 +309,8 @@ func TestCRMTopupMessageEveryCreditPath(t *testing.T) {
 	if refereeReward != 1 {
 		t.Fatalf("referral reward (referee): %d B-06 rows, want 1: %+v", refereeReward, crmB06Rows(t, w, referee))
 	}
+	crmExpectNoValidityClaim(t, "referral reward (referrer)", crmB06Rows(t, w, referrer))
+	crmExpectNoValidityClaim(t, "referral reward (referee)", crmB06Rows(t, w, referee))
 	// A second delivery pays nothing more and says nothing more.
 	instantOrderDelivered(t, w, referee)
 	w.svc.crmProcessEvents(ctx)
