@@ -82,8 +82,10 @@ func TestCRMLifecycleEmitsContractC6(t *testing.T) {
 	if p["labelled_product"] != "Milk gold-500ml 500ml"+crmLabelledSuffix {
 		t.Fatalf("labelled_product must carry name + variant: %v", p["labelled_product"])
 	}
-	if p["eta"] != "by "+crmDLTDeliveryBy {
-		t.Fatalf("eta for an undated morning order: %v", p["eta"])
+	// A morning order that names no day is dated with the first open morning
+	// (orders.go, the noon cut-off), so the message names that day.
+	if eta, _ := p["eta"].(string); ord.DeliveryDate == "" || !strings.HasSuffix(eta, " by "+crmDLTDeliveryBy) {
+		t.Fatalf("eta for a morning order must name its day (%q): %v", ord.DeliveryDate, p["eta"])
 	}
 
 	// (2) order.dispatched when the rider leaves with it.

@@ -385,6 +385,13 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	// (Instant orders never carry one; the FE sends null.) Invalid input is
 	// rejected loudly instead of silently becoming a due-now delivery.
 	deliveryDate := strings.TrimSpace(in.DeliveryDate)
+	if deliveryDate == "" && lane == "morning" {
+		// A morning order that names no day (an older client, a direct API
+		// call) is for the first morning still open to orders: tomorrow
+		// before noon, the day after tomorrow from noon. Undated, its task
+		// went on the very next route and skipped the noon cut-off.
+		deliveryDate = firstEditableDay(at)
+	}
 	if deliveryDate != "" && lane == "morning" {
 		d, derr := time.ParseInLocation("2006-01-02", deliveryDate, istZone)
 		if derr != nil {
