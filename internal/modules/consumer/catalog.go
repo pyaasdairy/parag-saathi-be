@@ -344,6 +344,10 @@ type storeStockView struct {
 	Variant    string `json:"variant,omitempty"`
 	StockCount int    `json:"stock_count"`
 	InStock    bool   `json:"in_stock"`
+	// Price is the unit price an order for this line is billed at (the price
+	// index: a store override beats the seeded price). The console prices
+	// "Sold today" per pack size from it; absent when the SKU is not sellable.
+	Price float64 `json:"price,omitempty"`
 }
 
 type storeStockResponse struct {
@@ -1086,6 +1090,15 @@ func (s *service) storeStock(ctx context.Context, actor auth.Actor, storeID stri
 			StockCount: count,
 			InStock:    inStock,
 		})
+	}
+	// The billed unit price per line, from the same index orders bill with. A
+	// failed catalogue read leaves the prices out; the stock view still serves.
+	if ix, perr := s.loadPriceIndex(ctx); perr == nil {
+		for i := range items {
+			if p, ok := ix.priceFor(items[i].SkuID, items[i].Variant); ok {
+				items[i].Price = round2(p)
+			}
+		}
 	}
 	// In stock on top, out of stock at the bottom. Stable, so the seeded
 	// category/name order is preserved within each group.
