@@ -113,6 +113,11 @@ type subscription struct {
 	// day still belongs to the plan (subChangedBefore). updated_at cannot
 	// serve: the worker's own claims stamp it too.
 	ChangedAt time.Time `bson:"changed_at,omitempty" json:"-"`
+	// PauseReason says who paused a paused plan: always "member" (POST
+	// /pause). The server never pauses for a low wallet - the noon lock skips
+	// the day instead (lockConsumerDay) - and never resumes a pause on its
+	// own, so a paused plan waits for the member. Cleared on resume; additive.
+	PauseReason string `bson:"pause_reason,omitempty" json:"pause_reason,omitempty"`
 	// NextDeliveryDate is derived on the wire (subscriptionNextDelivery): the
 	// first day this plan still delivers, honouring the noon cut-off, so the
 	// app can show when a plan created after noon really starts.
@@ -821,8 +826,14 @@ func (s *service) setSubscriptionStatusAt(ctx context.Context, consumerID primit
 	}
 	// A day already past its cut-off keeps the plan as it stood then.
 	s.lockPreviewsBeforeChange(ctx, sub, now)
-	updated, err := s.repo.updateSubscription(ctx, subID, consumerID,
-		bson.D{{Key: "status", Value: target}, {Key: "changed_at", Value: now.UTC()}},
+	set := bson.D{{Key: "status", Value: target}, {Key: "changed_at", Value: now.UTC()}}
+	switch target {
+	case "paused":
+		set = append(set, bson.E{Key: "pause_reason", Value: "member"}) // the only pause there is
+	case "active":
+		set = append(set, bson.E{Key: "pause_reason", Value: ""})
+	}
+	updated, err := s.repo.updateSubscription(ctx, subID, consumerID, set,
 		bson.D{{Key: "status", Value: sub.Status}})
 	if err != nil {
 		return nil, err
