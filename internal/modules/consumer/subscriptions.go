@@ -622,7 +622,10 @@ func subscriptionVariantSuffix(variant string) string {
 }
 
 // findLiveSubscriptionForProduct: the consumer's non-cancelled plan on the
-// same product line (product id + normalised variant), or nil.
+// same product line (product id + normalised variant), or nil. A plan with
+// no variant (the Welcome Litre plan is stored that way) is the whole
+// product, so it matches any variant of it, and a request with no variant
+// matches any plan on the product.
 func (r *repository) findLiveSubscriptionForProduct(ctx context.Context, consumerID primitive.ObjectID, productID, variant string) (*subscription, error) {
 	cur, err := r.subscriptions.Find(ctx, bson.D{
 		{Key: "consumer_id", Value: consumerID},
@@ -638,7 +641,7 @@ func (r *repository) findLiveSubscriptionForProduct(ctx context.Context, consume
 	}
 	want := variantKey(variant)
 	for i := range rows {
-		if variantKey(rows[i].Variant) == want {
+		if have := variantKey(rows[i].Variant); have == want || have == "" || want == "" {
 			return &rows[i], nil
 		}
 	}

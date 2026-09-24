@@ -763,3 +763,24 @@ func TestMissedSweepSparesAnOrderTheRiderIsCarrying(t *testing.T) {
 		t.Fatalf("after the late mark: %s", o.Status)
 	}
 }
+
+// A plan stored with no variant (the Welcome Litre campaign plan is minted
+// that way) covers every variant of its product: a second plan on the same
+// SKU with a variant used to pass the DUPLICATE_SUBSCRIPTION guard, and the
+// worker then minted two morning orders a day. The reverse holds too.
+func TestDuplicateSubscriptionMatchesAPlanWithoutAVariant(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	for i, c := range []struct{ stored, requested string }{{"", "500ml"}, {"500ml", ""}} {
+		cid := w.customer(t, "900001050"+string(rune('1'+i)), 500)
+		if _, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: c.stored, Qty: 1, Frequency: "daily"}); err != nil {
+			t.Fatalf("first plan (%q): %v", c.stored, err)
+		}
+		_, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "gold-500ml", Variant: c.requested, Qty: 2, Frequency: "daily"})
+		var ae *apiError
+		if !errors.As(err, &ae) || ae.Code != "DUPLICATE_SUBSCRIPTION" {
+			t.Fatalf("stored %q, requested %q: want DUPLICATE_SUBSCRIPTION, got %v", c.stored, c.requested, err)
+		}
+	}
+}
