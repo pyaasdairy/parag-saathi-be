@@ -207,6 +207,8 @@ func riderSummariseRoute(tasks []delivery) riderRouteSummaryResponse {
 // plate (it is re-stamped on assign and on claim), which is exactly the day the
 // rider owes the stop. created_at would date a subscription order to the night
 // it was minted, and delivered_at only exists once the work is already done.
+// A dated task (a morning order) is also anchored on its delivery_date: every
+// stop due that day counts, and none due on a later one.
 //
 // assigned_at is stored as an RFC3339 string in UTC (delivery_svc.go), so a
 // string range query is the correct comparison — the format is fixed-width and
@@ -240,6 +242,12 @@ func (r *repository) riderRouteTasksForDay(ctx context.Context, riderPartyID, da
 	// pending work, POST /route/complete refused until the next morning, and
 	// today's pickup sheet listed tomorrow's crates. An undated task (an
 	// instant order) belongs to whenever it is open.
+	//
+	// And a stop DUE today is today's work whatever its state and whenever it
+	// was assigned: under the noon lock today's round is routinely assigned
+	// the afternoon before, so a stop delivered or failed this morning fell
+	// out of both branches above and the header read "1 stop, 0 delivered"
+	// after a morning's work (nr-4, 24 Sep).
 	openStatuses := bson.A{"ASSIGNED", "ACCEPTED", "OUT_FOR_DELIVERY"}
 	cur, err := r.deliveries.Find(ctx,
 		bson.D{
@@ -251,6 +259,7 @@ func (r *repository) riderRouteTasksForDay(ctx context.Context, riderPartyID, da
 						{Key: "$lt", Value: rfc3339(to)},
 					}}},
 					bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: openStatuses}}}},
+					bson.D{{Key: "delivery_date", Value: day}},
 				}}},
 				bson.D{{Key: "$or", Value: bson.A{
 					bson.D{{Key: "delivery_date", Value: bson.D{{Key: "$exists", Value: false}}}},

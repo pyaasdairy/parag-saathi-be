@@ -39,6 +39,13 @@ func deliveryFeeFor(subtotal float64) float64 {
 	return deliveryFee
 }
 
+// errCodeCutoffPassed is the 422 code a one-off morning order for a closed
+// morning used to get (with next_delivery_date). Since 24 Sep such an order
+// is moved to the first open morning and accepted instead (createOrderAt),
+// so the server no longer sends it; the code stays defined because shipped
+// app builds still handle it.
+const errCodeCutoffPassed = "CUTOFF_PASSED"
+
 // Statuses a placed order may still be cancelled from. "assigned" is included so a
 // customer can still cancel AFTER a rider claims/accepts but BEFORE pickup — once the
 // order is picked up (out_for_delivery) it can no longer be cancelled or returned.
@@ -109,6 +116,13 @@ type order struct {
 	Priority       string             `bson:"priority,omitempty"      json:"priority,omitempty"`
 	DeliveryWindow string             `bson:"delivery_window,omitempty" json:"delivery_window,omitempty"`
 	DeliveryDate   string             `bson:"delivery_date,omitempty" json:"delivery_date,omitempty"`
+	// RequestedDate is the morning a one-off order asked for (the body's
+	// delivery_date, as sent) and DateMoved is true when that morning was
+	// already closed at 12 noon the day before (or past) and the order was
+	// moved to the first open one: delivery_date is always the real day.
+	// Morning one-off orders only; additive, absent everywhere else.
+	RequestedDate string `bson:"requested_date,omitempty" json:"requested_date,omitempty"`
+	DateMoved     bool   `bson:"date_moved,omitempty"     json:"date_moved,omitempty"`
 	// Welcome Litre linkage (crm_offers.go). OfferPack 1|2 marks a
 	// promotional pack order; both omitempty → absent everywhere else.
 	DeliveryPrefs *deliveryPrefsDoc `bson:"delivery_prefs,omitempty" json:"delivery_prefs,omitempty"`
@@ -362,12 +376,25 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	if lane != "instant" {
 		lane = "morning"
 	}
+	// Scheduled morning date (instant orders never carry one; the FE sends
+	// null, and a stale client's date is ignored on the instant lane). Decided
+	// BEFORE the serviceability guard, so the guard judges the order as it will
+	// be delivered: its lane, and a morning past its noon cut-off already moved
+	// to the first open morning.
+	deliveryDate, requested, moved, derr := morningDeliveryDate(lane, in.DeliveryDate, at)
+	if derr != nil {
+		return nil, derr
+	}
 	// SERVICEABILITY: the order is judged by the SAME decision GET /serviceability
 	// gives the app (serviceability(), every env override included) at the order's
 	// delivery point and at the order's own moment (the instant hours), and
 	// refused only where that answer is a definitive no. With no point, or no
 	// answer (a lookup error), it goes through as before: like serviceability
-	// itself, ordering never goes dark on missing data.
+	// itself, ordering never goes dark on missing data. The moment matters only to
+	// the instant lane, which leaves now; a morning order is judged by its point
+	// alone (NOT_SERVICEABLE), which no clock changes, so the morning it goes out
+	// on - moved past the noon cut-off or not - gets the same verdict, and instant
+	// being shut tonight never refuses it.
 	var sv *serviceabilityResult
 	if pt, pincode, ok := s.orderDeliveryPoint(ctx, userID, in); ok {
 		if res, sErr := s.serviceabilityAt(ctx, pt.Lat, pt.Lng, pincode, at); sErr == nil {
@@ -389,53 +416,13 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	if priority == "" {
 		priority = "normal"
 	}
-	// Scheduled morning date: validate against IST — tomorrow through +7 days.
-	// (Instant orders never carry one; the FE sends null.) Invalid input is
-	// rejected loudly instead of silently becoming a due-now delivery.
-	deliveryDate := strings.TrimSpace(in.DeliveryDate)
-	if deliveryDate == "" && lane == "morning" {
-		// A morning order that names no day (an older client, a direct API
-		// call) is for the first morning still open to orders: tomorrow
-		// before noon, the day after tomorrow from noon. Undated, its task
-		// went on the very next route and skipped the noon cut-off.
-		deliveryDate = firstEditableDay(at)
-	}
-	if deliveryDate != "" && lane == "morning" {
-		d, derr := time.ParseInLocation("2006-01-02", deliveryDate, istZone)
-		if derr != nil {
-			return nil, errBadRequest("delivery_date must be YYYY-MM-DD")
-		}
-		ist := at.In(istZone)
-		today0 := time.Date(ist.Year(), ist.Month(), ist.Day(), 0, 0, 0, 0, istZone)
-		if d.Before(today0.AddDate(0, 0, 1)) || d.After(today0.AddDate(0, 0, 7)) {
-			return nil, errUnprocessable("BAD_DELIVERY_DATE", "pick a morning between tomorrow and 7 days from now")
-		}
-		// THE NOON CUT-OFF (One Voice 1.2, "Order by 12 noon, delivery by
-		// 7 AM"): tomorrow's morning route locks at 12:00 IST today, for
-		// one-off orders exactly as for subscription changes (the same
-		// lockedThroughDay the sweep uses). The order is refused rather than
-		// moved to a later morning: the member agreed to tomorrow, so the
-		// message names the next open morning and lets them choose.
-		if deliveryDate <= lockedThroughDay(at) {
-			next := firstEditableDay(at)
-			label := next
-			if nd, ok := parseDay(next); ok {
-				label = nd.Format("Mon 2 Jan")
-			}
-			return nil, &apiError{status: http.StatusUnprocessableEntity, Code: "CUTOFF_PASSED",
-				Message:          "Order by 12 noon for tomorrow; next available " + label + ".",
-				NextDeliveryDate: next}
-		}
-	} else {
-		deliveryDate = ""
-	}
 	now := at.UTC()
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: userID, Status: "placed",
 		Subtotal: subtotal, DeliveryFee: fee, MonsoonFee: monsoonFee, Total: total, PaymentMethod: pm,
 		AddressLabel: in.AddressLabel, AddressText: in.AddressText, AddressID: strings.TrimSpace(in.AddressID), RiderID: nil,
 		PlacedAt: now, Priority: priority, DeliveryWindow: in.DeliveryWindow, Lane: lane,
-		DeliveryDate: deliveryDate, BuyerGSTIN: strings.TrimSpace(in.BuyerGSTIN),
+		DeliveryDate: deliveryDate, RequestedDate: requested, DateMoved: moved, BuyerGSTIN: strings.TrimSpace(in.BuyerGSTIN),
 		Items: items, Rider: nil, CanReview: false, Review: nil,
 		ConsumerName: in.ConsumerName, Phone: in.Phone, Geo: in.Geo, CreatedAt: now, UpdatedAt: now,
 		DeliveryPrefs: sanitizeDeliveryPrefs(in.DeliveryPrefs),
@@ -444,8 +431,10 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 		return nil, err
 	}
 	// Create the last-mile delivery task (routed to the nearest Parag Store,
-	// unassigned until a store manager assigns a rider). Best-effort.
-	s.createDeliveryForOrder(ctx, o)
+	// unassigned until a store manager assigns a rider). Best-effort. On the
+	// order's clock, so D-01 words the real day against the moment it was
+	// placed.
+	s.createDeliveryForOrderAt(ctx, o, at)
 	return o, nil
 }
 
@@ -505,6 +494,44 @@ func orderServiceabilityRefusal(sv *serviceabilityResult, lane string) *apiError
 	return nil
 }
 
+// morningDeliveryDate decides the morning a one-off order is delivered on,
+// validated against the IST calendar at `at`:
+//
+//   - the instant lane carries no day (deliveryDate "", nothing requested);
+//   - a morning order that names no day (an older client, a direct API call)
+//     is for the first morning still open to orders: tomorrow before noon,
+//     the day after tomorrow from noon (undated, its task used to ride the
+//     very next route and skip the noon cut-off);
+//   - THE NOON CUT-OFF (One Voice 1.2, "Order by 12 noon, delivery by 7 AM";
+//     owner, 24 Sep, R2): a named morning that is already closed - tomorrow
+//     from 12:00 IST today, today, or a past day - is MOVED to the first open
+//     morning and the order is accepted (moved = true, requested = the day
+//     asked for). It used to be refused with 422 CUTOFF_PASSED, a dead end
+//     for the shipped cart, which always sends tomorrow. The same
+//     lockedThroughDay the subscription sweep uses decides "closed";
+//   - more than 7 days ahead is still refused (BAD_DELIVERY_DATE), and a
+//     malformed date is a 400.
+func morningDeliveryDate(lane, requestedRaw string, at time.Time) (deliveryDate, requested string, moved bool, err error) {
+	if lane != "morning" {
+		return "", "", false, nil
+	}
+	first := firstEditableDay(at)
+	requested = strings.TrimSpace(requestedRaw)
+	if requested == "" {
+		return first, "", false, nil
+	}
+	if _, perr := time.ParseInLocation("2006-01-02", requested, istZone); perr != nil {
+		return "", "", false, errBadRequest("delivery_date must be YYYY-MM-DD")
+	}
+	if requested > addDaysIST(istToday(at), 7) {
+		return "", "", false, errUnprocessable("BAD_DELIVERY_DATE", "pick a morning between tomorrow and 7 days from now")
+	}
+	if requested < first {
+		return first, requested, true, nil // closed at noon the day before, or past
+	}
+	return requested, requested, false, nil
+}
+
 func (s *service) listOrders(ctx context.Context, userID string) ([]order, error) {
 	return s.repo.listOrders(ctx, userID)
 }
@@ -514,6 +541,35 @@ func (s *service) getOrder(ctx context.Context, userID, orderID string) (*order,
 }
 
 func (s *service) cancelOrder(ctx context.Context, userID, orderID string) (*order, error) {
+	return s.cancelOrderAt(ctx, userID, orderID, s.now())
+}
+
+// errOrderLockedMessage is ORDER_LOCKED's message (G7): the words the apps
+// show when a member's cancel comes after the noon cut-off.
+const errOrderLockedMessage = "Orders lock at 12 noon the day before delivery, so this one can no longer be cancelled."
+
+// memberCancelLocked reports whether a member's cancel of o comes too late
+// at now (G7, owner, 24 Sep): a MORNING order (one-off or subscription) is
+// fixed from 12:00 IST the day before its delivery day - the store has
+// procured for it, the noon lock has funded the member's day with it
+// reserved - so from then, and on the day itself, the member can no longer
+// cancel it. Only the cancellable statuses are judged (anything else keeps
+// its own error). The instant lane and an undated legacy morning order have
+// no cut-off. Store, rider and operator cancels never come through here.
+func memberCancelLocked(o *order, now time.Time) bool {
+	if o == nil || o.Lane == "instant" || (o.Status != "placed" && o.Status != "confirmed") {
+		return false
+	}
+	day := orderDeliveryDate(o)
+	return day != "" && day <= lockedThroughDay(now)
+}
+
+// cancelOrderAt is the member's cancel at an explicit moment.
+func (s *service) cancelOrderAt(ctx context.Context, userID, orderID string, now time.Time) (*order, error) {
+	// G7: a morning order past its noon cut-off stays as it is.
+	if cur, ferr := s.repo.findOrder(ctx, orderID, userID); ferr == nil && memberCancelLocked(cur, now) {
+		return nil, errConflict("ORDER_LOCKED", errOrderLockedMessage)
+	}
 	// Guard: only placed/confirmed orders may cancel — the $in precondition makes
 	// this atomic (no cancelling an order that just went out for delivery).
 	o, err := s.repo.updateOrder(ctx, orderID, userID,

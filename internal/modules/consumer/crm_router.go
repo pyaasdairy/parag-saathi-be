@@ -30,6 +30,8 @@ var crmLifecycleTopics = []string{
 	"complaint.created", "complaint.resolved", "rating.submitted",
 	"user.registered", "wallet.credited", "payment.failed",
 	"subscription.activated", "subscription.created_unpaid", "subscription.modified",
+	// The noon lock skipped a member's day for want of funds (D-07).
+	"subscription.day_skipped",
 	"order.line_cancelled", "delivery.delayed", "serviceability.checked",
 	// Growth programmes: Founding Family seats (founding.go) and referrals
 	// (referrals.go). The referral topics carry no trigger yet; they are in
@@ -111,6 +113,9 @@ func crmDelayBase(ev crmEvent, now time.Time) time.Time {
 // fire. Reports whether a dispatch was attempted and, when not, why.
 func (s *service) crmFireTrigger(ctx context.Context, t crmTrigger, e *crmEventCtx, now time.Time) (bool, string) {
 	cfg := crmConfigLoad()
+	if e.now.IsZero() {
+		e.now = now // a token worded against the clock reads the moment it is sent
+	}
 	params := e.params()
 	// A conditional template ({"if": ..., "then": ..., "else": ...}, B-06)
 	// picks its branch on the same condition grammar and facts; an
@@ -166,9 +171,12 @@ func (s *service) crmCondFailClosed(t crmTrigger, err error) {
 // crmEventCtx resolves the condition keys of one outbox event. The order
 // behind an order_id is looked up at most once, lazily.
 type crmEventCtx struct {
-	s       *service
-	ctx     context.Context
-	ev      crmEvent
+	s   *service
+	ctx context.Context
+	ev  crmEvent
+	// now is the moment the message is sent (set by crmFireTrigger): a
+	// delayed trigger words its day tokens against it, not the event's.
+	now     time.Time
 	ord     *order
 	ordDone bool
 	off     *consumerOffer
@@ -204,11 +212,31 @@ func (e *crmEventCtx) params() map[string]string {
 		o = e.ownOrder()
 	}
 	p := crmEventParams(e.ev.Topic, e.ev.Payload, o)
-	if e.ev.Topic == "complaint.created" {
+	switch e.ev.Topic {
+	case "complaint.created":
 		// [AMOUNT] is what the member paid for the goods, never the order's
 		// total: absent when nothing was paid (E-04 then offers redelivery).
 		if amt, err := e.refundable(); err == nil && amt > 0 {
 			p["AMOUNT"] = crmRupees(amt)
+		}
+	case "subscription.created_unpaid":
+		// A-05 fires two hours after the plan was made: [DATE] is the morning
+		// the plan starts as seen NOW (a tomorrow the noon lock has skipped
+		// meanwhile is not offered), not the label the emitter wrote.
+		if lbl := e.planStartLabel(); lbl != "" {
+			p["DATE"] = lbl
+		}
+	case "offer.finalized":
+		// T-W01-LATER's [DATE]: the morning pack 1 comes, worded when W-01
+		// is sent.
+		if day, _ := e.ev.Payload["pack1_day"].(string); strings.TrimSpace(day) != "" {
+			p["DATE"] = crmDayLabel(day, e.sentAt())
+		}
+	case "founding.farm_unlocked":
+		// An event written before the emitter carried the label: the first
+		// morning still open to orders when the farm unlocked.
+		if _, ok := p["DATE"]; !ok && !e.ev.CreatedAt.IsZero() {
+			p["DATE"] = crmDayLabel(firstEditableDay(e.ev.CreatedAt), e.sentAt())
 		}
 	}
 	for k, v := range e.s.crmStandardParams(e.ctx, e.ev.ConsumerID) {
@@ -218,6 +246,33 @@ func (e *crmEventCtx) params() map[string]string {
 	}
 	e.prm = p
 	return p
+}
+
+// sentAt is the moment the message goes out: the fire clock, else the wall.
+func (e *crmEventCtx) sentAt() time.Time {
+	if !e.now.IsZero() {
+		return e.now
+	}
+	return time.Now()
+}
+
+// planStartLabel words the first morning the event's plan still delivers,
+// as seen when the message is sent; "" when the plan cannot be read or
+// delivers nothing in the next three weeks.
+func (e *crmEventCtx) planStartLabel() string {
+	subID, _ := e.ev.Payload["subscription_id"].(string)
+	if subID = strings.TrimSpace(subID); subID == "" {
+		return ""
+	}
+	sub, err := e.s.repo.findSubscriptionByID(e.ctx, subID)
+	if err != nil || sub == nil || sub.ConsumerID != e.ev.ConsumerID {
+		return ""
+	}
+	at := e.sentAt()
+	if day := e.s.nextDeliveryFor(e.ctx, sub, at); day != "" {
+		return crmDayLabel(day, at)
+	}
+	return ""
 }
 
 // fact resolves one condition key. Only the keys listed here exist; any
@@ -339,6 +394,36 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 		// order carries a promotional line iff it is a pack order.
 		n, _ := crmPayloadNumber(p["offer_pack"])
 		return n > 0, nil
+	case "offer.pack1_tomorrow":
+		// W-01 (offer.finalized): pack 1 comes tomorrow as seen when the
+		// message goes out. From 12:00 IST it comes the day after tomorrow
+		// (G9), and T-W01's registered "Tomorrow by 7 am" would be untrue.
+		// An event from before the payload carried the day was always for
+		// tomorrow.
+		day, _ := p["pack1_day"].(string)
+		if strings.TrimSpace(day) == "" {
+			return true, nil
+		}
+		return day == istDay(e.sentAt().Add(24*time.Hour)), nil
+	case "tomorrow.delivery_blocked":
+		// subscription.day_skipped (D-07): the skipped day is tomorrow as the
+		// lock saw it and nothing else arrives that morning; the emitter
+		// decides it once the member's day is decided (tellDaySkipped). A
+		// catch-up after an outage decides one plan at a time, so another plan
+		// locked for that day after the event was written is read again here.
+		v, ok := p["tomorrow_blocked"].(bool)
+		if !ok {
+			return nil, fmt.Errorf("payload carries no tomorrow_blocked")
+		}
+		if !v {
+			return false, nil
+		}
+		day, _ := p["day"].(string)
+		due, err := e.s.memberMorningDeliveryDue(e.ctx, e.ev.ConsumerID.Hex(), day)
+		if err != nil {
+			return nil, err
+		}
+		return !due, nil
 	}
 	return nil, fmt.Errorf("unknown condition key %q", key)
 }
@@ -695,10 +780,17 @@ func crmEventParams(topic string, payload map[string]any, o *order) map[string]s
 		if v := str("reason"); v != "" {
 			p["REASON"] = v
 		}
-	case "subscription.activated":
-		// [DATE] in T-A03 is the first delivery morning, worded by the emitter
-		// ("today", "tomorrow", "2 Jan"); it overrides the Welcome Litre DATE.
+	case "subscription.activated", "subscription.created_unpaid":
+		// [DATE] in T-A03 / T-A05 is the first delivery morning, worded by the
+		// emitter ("today", "tomorrow", "2 Jan"); it overrides the Welcome
+		// Litre DATE. A-05 re-words it when it fires (crmEventCtx.params).
 		if v := str("start_label"); v != "" {
+			p["DATE"] = v
+		}
+	case "subscription.day_skipped":
+		// [DATE] in T-D07: the next morning the plan delivers after the
+		// skipped one, worded by the lock that skipped it.
+		if v := str("resume_label"); v != "" {
 			p["DATE"] = v
 		}
 	case "delivery.delayed":
@@ -723,6 +815,11 @@ func crmEventParams(topic string, payload map[string]any, o *order) map[string]s
 		}
 		if n, ok := crmPayloadNumber(payload["togo"]); ok {
 			p["TOGO"] = strconv.Itoa(int(n))
+		}
+		// [DATE] in T-FF01: the first morning still open to orders at the
+		// unlock (tomorrow before 12 noon, the day after from noon).
+		if v := str("first_delivery_label"); v != "" {
+			p["DATE"] = v
 		}
 	case "referral.applied", "referral.rewarded":
 		if n, ok := crmPayloadNumber(payload["reward_amount"]); ok {

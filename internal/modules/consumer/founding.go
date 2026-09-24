@@ -864,6 +864,9 @@ func (s *service) unlockFoundingFarm(ctx context.Context, farm *foundingFarm, at
 		payload := map[string]any{
 			"farm_id": farm.ID, "farm": farm.Name, "farmer": farm.Farmer, "line": w.LineNumber, "togo": 0,
 			"unlocked_packs": farm.UnlockedPacks, "scope_key": "founding:farm:" + farm.ID,
+			// FF-01's [DATE]: the first morning an order placed now reaches
+			// (tomorrow before 12 noon, the day after from noon).
+			"first_delivery_label": crmDayLabel(firstEditableDay(at), at),
 		}
 		s.emitCRMEvent(ctx, "founding.farm_unlocked", w.ConsumerID, payload)
 		s.emitCRMEvent(ctx, "founding.member_active", w.ConsumerID, payload)

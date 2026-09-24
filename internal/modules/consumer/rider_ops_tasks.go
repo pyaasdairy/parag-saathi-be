@@ -856,11 +856,25 @@ func (s *service) riderReverseDeliveryDebit(ctx context.Context, d *delivery, ma
 		"delivery", d.ID, "order", d.OrderID, "amount", amount, "bucket", bucket)
 	// CRM wallet.credited (B-06): the member is told their money is back.
 	// order_id is deliberately absent - the claim scopes on the undo ref.
+	// [REASON] is a DLT variable (at most 30 characters), so it names the
+	// order by its short code, never the whole order id.
 	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
 		"amount": amount, "account": crmCreditAccount(bucket),
-		"reason": "delivery " + d.OrderCode + " reversed", "ref": undoRef, "scope_key": undoRef,
+		"reason": "delivery " + crmShortOrderCode(d.OrderCode) + " reversed", "ref": undoRef, "scope_key": undoRef,
 	})
 	return nil
+}
+
+// crmShortOrderCode is an order's short code for a message variable: the
+// last six characters of its id in capitals ("ord_3d3bb45d05c6" -> "5D05C6").
+// "delivery 5D05C6 reversed" is 24 characters, inside the 30 a DLT variable
+// allows; the whole id made it 34 and the SMS failed DLT scrubbing.
+func crmShortOrderCode(orderCode string) string {
+	code := strings.TrimSpace(orderCode)
+	if len(code) > 6 {
+		code = code[len(code)-6:]
+	}
+	return strings.ToUpper(code)
 }
 
 // riderRestoreOrderOutForDelivery walks the consumer's order back from

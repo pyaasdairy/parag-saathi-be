@@ -47,12 +47,17 @@ func TestCRMPlanVariantWelcomeLitreCarriesPackSize(t *testing.T) {
 	defer done()
 	ctx := context.Background()
 
+	// Enrolled at a fixed moment before noon, so the plans' first morning is
+	// the next day whatever the wall clock says (G9: from noon it is the day
+	// after tomorrow).
+	enrolAt := istDayAt("2026-10-06", 9, 0)
+	start := firstEditableDay(enrolAt)
 	enrol := func(phone, line, product string, qty int) (primitive.ObjectID, string) {
 		t.Helper()
-		res, err := w.svc.crmEnrol(ctx, "variant-test-operator", crmEnrolInput{
+		res, err := w.svc.crmEnrolAt(ctx, "variant-test-operator", crmEnrolInput{
 			Phone: phone, Name: "Variant Household", Line1: line, Pincode: "226030", Lat: 26.7725, Lng: 81.0150,
 			PlanProductID: product, PlanQty: qty, PlanFrequency: "daily",
-		})
+		}, enrolAt)
 		if err != nil {
 			t.Fatalf("crmEnrol %s: %v", product, err)
 		}
@@ -60,6 +65,9 @@ func TestCRMPlanVariantWelcomeLitreCarriesPackSize(t *testing.T) {
 		if _, err := w.svc.creditTopup(ctx, cid, 500, "razorpay", "fund-"+phone); err != nil {
 			t.Fatalf("fund: %v", err)
 		}
+		// The noon lock reads the wallet as it stood at 12:00 (walletAsOf):
+		// the top-up is dated long before, whatever the wall clock says.
+		chainStampLedger(t, w, cid, "fund-"+phone, "TOPUP", chainLedgerEpoch)
 		return cid, res.SubscriptionID
 	}
 	_, litre := enrol("9000008401", "Flat 11, Size Tower", "gold-1l", 1)
@@ -81,7 +89,7 @@ func TestCRMPlanVariantWelcomeLitreCarriesPackSize(t *testing.T) {
 	legacy := &subscription{
 		MongoID: primitive.NewObjectID(), SubscriptionID: newSubscriptionID(), ConsumerID: legacyCID,
 		ProductID: "gold-1l", Name: "Milk gold-1l", Qty: 1, UnitPrice: 69, Frequency: "daily",
-		Status: "active", StartDate: istDay(now.Add(24 * time.Hour)), CreatedAt: now, UpdatedAt: now,
+		Status: "active", StartDate: start, CreatedAt: now, UpdatedAt: now,
 	}
 	if _, err := w.db.Collection(collSubscriptions).InsertOne(ctx, legacy); err != nil {
 		t.Fatalf("legacy subscription: %v", err)
@@ -90,9 +98,7 @@ func TestCRMPlanVariantWelcomeLitreCarriesPackSize(t *testing.T) {
 	// The plans' first morning under the noon lock: the 11:00 tick the day
 	// before previews it, the 12:15 tick locks it and mints the store task.
 	// The plans are dated before that cut-off, so the test reads the same
-	// whatever the wall clock says (created "now" after noon, they would
-	// start the day after tomorrow and no task would exist for start).
-	start := istDay(now.Add(24 * time.Hour))
+	// whatever the wall clock says.
 	cutoff := lockMomentFor(start)
 	for _, id := range []string{litre, half, legacy.SubscriptionID} {
 		chainBackdateSubscription(t, w, &subscription{SubscriptionID: id}, cutoff.Add(-2*time.Hour))

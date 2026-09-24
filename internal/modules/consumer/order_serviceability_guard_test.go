@@ -54,7 +54,8 @@ func guardZone(t *testing.T, w *chainWorld, z zone) {
 }
 
 // guardClock is 09:00 IST today: before the noon cut-off, so an undated
-// morning order is for tomorrow and never trips CUTOFF_PASSED.
+// morning order is for tomorrow (after noon it would be moved to the day
+// after: orders_noon_guard_test.go).
 func guardClock() time.Time { return istDayAt(istToday(time.Now()), 9, 0) }
 
 // guardAddress saves an address for the customer and returns its id (hex). A

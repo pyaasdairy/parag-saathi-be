@@ -454,8 +454,12 @@ type crmDispatchRow struct {
 	// Intended is the trigger's configured primary channel, recorded at
 	// claim time so the operator log shows what SHOULD have carried the
 	// message next to what did (Channel).
-	Intended  string    `bson:"intended,omitempty"`
-	CreatedAt time.Time `bson:"created_at"`
+	Intended string `bson:"intended,omitempty"`
+	// ChannelErrors are the channels that tried and failed (a provider
+	// rejection, an unknown outcome): what did NOT carry the message, and
+	// why. Absent when every attempted channel delivered.
+	ChannelErrors []crmChannelError `bson:"channel_errors,omitempty"`
+	CreatedAt     time.Time         `bson:"created_at"`
 }
 
 func (r *repository) crmDispatchCol() *mongo.Collection {
@@ -520,9 +524,17 @@ func (s *service) crmClaimDispatchScoped(ctx context.Context, t crmTrigger, cons
 }
 
 func (s *service) crmFinishDispatch(ctx context.Context, row *crmDispatchRow, status, guard, channel string) {
-	_, _ = s.repo.crmDispatchCol().UpdateByID(ctx, row.ID, bson.D{{Key: "$set", Value: bson.D{
-		{Key: "status", Value: status}, {Key: "guard", Value: guard}, {Key: "channel", Value: channel},
-	}}})
+	s.crmFinishDispatchWith(ctx, row, status, guard, channel, nil)
+}
+
+// crmFinishDispatchWith is crmFinishDispatch that also records the channels
+// that failed (channel_errors); none means the row keeps its old shape.
+func (s *service) crmFinishDispatchWith(ctx context.Context, row *crmDispatchRow, status, guard, channel string, failed []crmChannelError) {
+	set := bson.D{{Key: "status", Value: status}, {Key: "guard", Value: guard}, {Key: "channel", Value: channel}}
+	if len(failed) > 0 {
+		set = append(set, bson.E{Key: "channel_errors", Value: failed})
+	}
+	_, _ = s.repo.crmDispatchCol().UpdateByID(ctx, row.ID, bson.D{{Key: "$set", Value: set}})
 }
 
 func (s *service) crmCountDispatched(ctx context.Context, consumerID primitive.ObjectID, category, day, excludeTrigger string) int {
@@ -717,6 +729,7 @@ func (s *service) crmDispatchWith(ctx context.Context, triggerID string, consume
 	// stay byte-identical; the SUPPRESSED G9 row below is the audit record.)
 	ch := crmInboxRefs(opts.Payload)
 	delivered := make([]string, 0, 3)
+	var failed []crmChannelError
 	// A trigger a person answers (crmHumanOnly, E-05) has no template and
 	// must never auto-respond, so it writes no inbox row.
 	if !crmHumanOnly(t) {
@@ -756,15 +769,16 @@ func (s *service) crmDispatchWith(ctx context.Context, triggerID string, consume
 			if phone, err := s.crmDeliveryPhone(ctx, consumerID); err != nil {
 				s.log.Warn("crm: no deliverable phone for external channels", "trigger", t.ID, "consumer", consumerID.Hex(), "err", err)
 			} else {
-				delivered = append(delivered, crmDeliverExternal(ctx, s.log, phone, t, tpl, std, ext)...)
+				ok, bad := crmDeliverExternalReport(ctx, s.log, phone, t, tpl, std, ext)
+				delivered, failed = append(delivered, ok...), bad
 			}
 		}
 	}
 	if len(delivered) == 0 {
-		s.crmFinishDispatch(ctx, row, "SUPPRESSED", "G9_channel_availability", ch.Name())
+		s.crmFinishDispatchWith(ctx, row, "SUPPRESSED", "G9_channel_availability", ch.Name(), failed)
 		return "SUPPRESSED", "G9_channel_availability"
 	}
-	s.crmFinishDispatch(ctx, row, "SENT", "", strings.Join(delivered, "+"))
+	s.crmFinishDispatchWith(ctx, row, "SENT", "", strings.Join(delivered, "+"), failed)
 	return "SENT", ""
 }
 
@@ -1072,8 +1086,16 @@ func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm st
 	// TERMS §5.3: "your wallet needs enough balance by 12 NOON for the next
 	// morning's delivery. If it does not, WE TELL YOU" — so the shortfall
 	// notice fires right after noon, not at five o'clock, one full day before
-	// the cut-off it names (crmSweepTomorrowShortfall).
-	if hm >= "12:00" {
+	// the cut-off it names (crmSweepTomorrowShortfall). Right AFTER the noon
+	// lock, not before it: the sweep must know whether the lock skipped
+	// tomorrow (D-07 then speaks instead), so the day's sweep is claimed only
+	// once a subscription sweep has run tomorrow's lock to the end
+	// (noonLockRan: after a boot past noon this CRM tick can come first, and
+	// a day never previewed leaves no undecided preview to wait on), and then
+	// once no preview for tomorrow is still undecided, or from 13:00 in any
+	// case (one member's lock that keeps failing must not silence B-02 for
+	// everyone).
+	if hm >= "12:00" && s.noonLockRan(ctx, lockedThroughDay(now)) && (hm >= "13:00" || s.noonLockDecided(ctx, now)) {
 		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-02-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
 			s.crmSweepTomorrowShortfall(ctx, now)
 		}
@@ -1157,8 +1179,36 @@ func (s *service) crmSweepTomorrowShortfall(ctx context.Context, now time.Time) 
 		if s.crmInLiveWelcomeJourney(ctx, cid) {
 			continue
 		}
+		// One clear message (owner, 24 Sep): a member the noon lock just told
+		// "no delivery tomorrow - recharge by 12 noon tomorrow" (D-07) is not
+		// also sent B-02's "recharge by 12 noon tomorrow" at the same noon.
+		if s.crmSkipNoticeFor(ctx, cid, lockedThroughDay(now)) {
+			continue
+		}
 		s.crmDispatchAt(ctx, "B-02", cid, nil, now)
 	}
+}
+
+// crmSkipNoticeFor reports whether D-07 speaks to this member about day:
+// the noon lock skipped it and said so (a subscription.day_skipped event
+// whose tomorrow_blocked holds), nothing else still arrives that morning
+// (the D-07 condition reads it again at send time), and D-07 is not
+// switched off.
+func (s *service) crmSkipNoticeFor(ctx context.Context, consumerID primitive.ObjectID, day string) bool {
+	if s.deps.Flags != nil && s.crmTriggerKilled(ctx, "D-07") {
+		return false
+	}
+	n, err := s.repo.accounts.Database().Collection(collCRMEvents).CountDocuments(ctx, bson.D{
+		{Key: "topic", Value: "subscription.day_skipped"},
+		{Key: "consumer_id", Value: consumerID},
+		{Key: "payload.day", Value: day},
+		{Key: "payload.tomorrow_blocked", Value: true},
+	}, options.Count().SetLimit(1))
+	if err != nil || n == 0 {
+		return false
+	}
+	due, derr := s.memberMorningDeliveryDue(ctx, consumerID.Hex(), day)
+	return derr == nil && !due
 }
 
 // crmPlanCostOn is what the LOCK will ask the wallet for one plan's delivery
@@ -1182,8 +1232,9 @@ func (s *service) crmPlanCostOn(ctx context.Context, sub *subscription, day stri
 // spendable now, less every order due on or before through that is paid for
 // first. Money moves at delivery, so a locked order (and an instant or dated
 // one-off on its way) still sits in the balance until its morning. A preview
-// that has not locked yet counts only while the balance can still lock it,
-// the LOCK step's own wallet floor. A read error leaves the balance as it is.
+// that has not locked yet counts only while the balance can still lock it
+// (the noon lock funds it only then; lockConsumerDay). A read error leaves
+// the balance as it is.
 func (s *service) crmSpendableAtLock(ctx context.Context, consumerID primitive.ObjectID, available float64, through string) float64 {
 	cur, err := s.repo.orders.Find(ctx, bson.D{
 		{Key: "user_id", Value: consumerID.Hex()},

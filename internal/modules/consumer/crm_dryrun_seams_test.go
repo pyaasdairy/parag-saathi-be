@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
@@ -148,15 +149,20 @@ func TestDryRunW01ReachesStubThroughTheWorker(t *testing.T) {
 	defer done()
 	ctx := context.Background()
 
-	res, err := w.svc.crmEnrol(ctx, "dry-run-operator", crmEnrolInput{
+	// A morning enrolment: pack 1 comes tomorrow, so W-01 is the registered
+	// "Tomorrow by 7 am" body (an afternoon one is T-W01-LATER, which has no
+	// DLT registration and goes to the inbox only). A fixed moment, so the
+	// test reads the same at any hour.
+	at := istDayAt("2026-10-06", 10, 0)
+	res, err := w.svc.crmEnrolAt(ctx, "dry-run-operator", crmEnrolInput{
 		Phone: "9000007106", Name: "Dry Run Household", Line1: "Flat 2, Stub Tower",
 		Pincode: "226030", Lat: 26.7725, Lng: 81.0150,
-	})
+	}, at)
 	if err != nil {
 		t.Fatalf("crmEnrol: %v", err)
 	}
 	cid, _ := primitive.ObjectIDFromHex(res.ConsumerID)
-	w.svc.crmProcessEvents(ctx)
+	w.svc.crmProcessEventsAt(ctx, at.Add(time.Minute))
 	if got := crmDispatchStatuses(t, w.db, cid, "W-01"); len(got) != 1 || got[0] != "SENT" {
 		t.Fatalf("W-01 after the worker: %v", got)
 	}

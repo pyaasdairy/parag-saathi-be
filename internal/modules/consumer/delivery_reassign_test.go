@@ -36,7 +36,7 @@ func TestStoreReassignOfCustomerCancelledTaskIsRefused(t *testing.T) {
 
 	ord := chainMorningOrder(t, w, "9000005101", nil)
 	task := chainTaskFor(t, w, ord.OrderID)
-	if _, err := w.svc.cancelOrder(ctx, ord.UserID, ord.OrderID); err != nil {
+	if _, err := w.svc.cancelOrderAt(ctx, ord.UserID, ord.OrderID, ord.PlacedAt); err != nil { // placed-at: its morning is still open
 		t.Fatalf("customer cancel: %v", err)
 	}
 	if d := chainTaskFor(t, w, ord.OrderID); d.Status != "FAILED" {

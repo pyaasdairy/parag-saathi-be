@@ -483,6 +483,64 @@ func (s *service) wallet(ctx context.Context, consumerID primitive.ObjectID) (wa
 	return walletToView(wl), nil
 }
 
+// walletAsOf is the Available balance as it stood at the instant `at`: the
+// balance now, with every ledger movement stamped in (at, now] played back
+// out - credits taken off, debits added back (the owner's decision of 24
+// Sep: the noon lock sees the wallet exactly as it stood at 12:00:00, so an
+// instant order delivered at 12:07 or a top-up at 12:03 cannot change a
+// decision a tick at 12:00:05 or 12:14:59 would make). It depends only on
+// `at` and the ledger, never on when it is read.
+//
+// `now` bounds the window from above: a row stamped after it is taken as
+// already part of the balance (the moment the caller reads for; in
+// production the tick's clock, a few seconds before the read).
+func (s *service) walletAsOf(ctx context.Context, consumerID primitive.ObjectID, at, now time.Time) (float64, error) {
+	wv, err := s.wallet(ctx, consumerID)
+	if err != nil {
+		return 0, err
+	}
+	if !at.Before(now) {
+		return wv.Available, nil
+	}
+	rows, err := s.repo.walletTxnsBetween(ctx, consumerID, at, now)
+	if err != nil {
+		return 0, err
+	}
+	asOf, unknown := walletAsOfFromRows(wv.Available, rows, at, now)
+	if len(unknown) > 0 {
+		s.log.WarnContext(ctx, "wallet as-of: ledger rows of an unknown type were counted as no movement",
+			"consumer", consumerID.Hex(), "types", unknown)
+	}
+	return asOf, nil
+}
+
+// walletAsOfFromRows is walletAsOf's arithmetic: available less the signed
+// sum of the settled rows stamped in (at, now]. TOPUP, BONUS and REFUND are
+// money in; DEBIT is money out, also when a rider's undo later marked it
+// REVERSED (the money did leave then; the undo's own REFUND row brings it
+// back). A row of any other type moves nothing here and is reported.
+func walletAsOfFromRows(available float64, rows []walletTxn, at, now time.Time) (float64, []string) {
+	var unknown []string
+	moved := 0.0
+	for _, r := range rows {
+		if !r.CreatedAt.After(at) || r.CreatedAt.After(now) {
+			continue
+		}
+		if r.Status != "SUCCESS" && r.Status != "REVERSED" {
+			continue
+		}
+		switch r.Type {
+		case "TOPUP", "BONUS", "REFUND":
+			moved += r.Amount
+		case "DEBIT":
+			moved -= r.Amount
+		default:
+			unknown = append(unknown, r.Type)
+		}
+	}
+	return round2(available - moved), unknown
+}
+
 // bonusFor returns the promotional Rewards bonus for a Cash top-up (§17: bonus
 // lands in Rewards, never Cash). Simple tiered rule for the pilot.
 // bonusFor mirrors the FE's RECHARGE_TIERS (lib/pricing.ts) EXACTLY — the tier

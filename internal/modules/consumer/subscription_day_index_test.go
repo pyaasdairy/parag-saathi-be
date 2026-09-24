@@ -30,9 +30,11 @@ func TestSubscriptionDayRacingWorkersYieldOneOrder(t *testing.T) {
 	defer done()
 	ctx := context.Background()
 	cid := w.customer(t, "9000008201", 5000)
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
+	// Made two days before its start (still open then), so the noon rule's
+	// re-anchor never depends on the hour the test runs.
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
 		ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: istToday(time.Now()),
-	})
+	}, time.Now().Add(-48*time.Hour))
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}

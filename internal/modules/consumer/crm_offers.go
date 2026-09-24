@@ -392,10 +392,17 @@ type crmEnrolResult struct {
 //  4. mark the 2+2 ledger exhausted (offer exclusivity, founder option B);
 //  5. create the default address if none, then a NORMAL daily subscription
 //     (ships only when funded — the existing floors are the campaign design);
-//  6. mint the standalone ₹0 pack-1 order + its delivery task for the next
-//     morning, and record the offer with pack1=pending, pack2=locked;
+//  6. mint the standalone ₹0 pack-1 order + its delivery task for the first
+//     morning still open to orders (tomorrow before 12 noon IST, the day
+//     after tomorrow from noon), and record the offer with pack1=pending,
+//     pack2=locked;
 //  7. emit offer_enrolled + the W-01 welcome dispatch.
 func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) (*crmEnrolResult, error) {
+	return s.crmEnrolAt(ctx, actor, in, time.Now())
+}
+
+// crmEnrolAt is crmEnrol at an explicit moment.
+func (s *service) crmEnrolAt(ctx context.Context, actor string, in crmEnrolInput, now time.Time) (*crmEnrolResult, error) {
 	if !crmEnabled() {
 		return nil, errForbidden("CRM is not enabled")
 	}
@@ -417,8 +424,8 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		return nil, err
 	}
 	if acct == nil {
-		now := time.Now().UTC()
-		acct = &account{ID: primitive.NewObjectID(), Phone: canonical, Status: "ACTIVE", CreatedAt: now, UpdatedAt: now}
+		at := now.UTC()
+		acct = &account{ID: primitive.NewObjectID(), Phone: canonical, Status: "ACTIVE", CreatedAt: at, UpdatedAt: at}
 		if err := s.repo.insertAccount(ctx, acct); err != nil {
 			return nil, err
 		}
@@ -449,7 +456,7 @@ func (s *service) crmEnrol(ctx context.Context, actor string, in crmEnrolInput) 
 		}
 		addr = na
 	}
-	return s.crmEnrolCore(ctx, actor, acct, addr, in, "promoter")
+	return s.crmEnrolCore(ctx, actor, acct, addr, in, "promoter", now)
 }
 
 // crmSelfEnrol — THE APP'S OWN FUNNEL (offer terms §3.1: "Start a subscription
@@ -498,11 +505,12 @@ func (s *service) crmSelfEnrol(ctx context.Context, consumerID primitive.ObjectI
 	if in.AssetType == "" {
 		in.AssetType = "self"
 	}
-	return s.crmEnrolCore(ctx, "self:"+consumerID.Hex(), acct, addr, in, "self")
+	return s.crmEnrolCore(ctx, "self:"+consumerID.Hex(), acct, addr, in, "self", time.Now())
 }
 
-// crmEnrolCore is the single enrolment state machine both entries share.
-func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account, addr *address, in crmEnrolInput, source string) (*crmEnrolResult, error) {
+// crmEnrolCore is the single enrolment state machine both entries share,
+// run at `at` (the wall clock in production).
+func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account, addr *address, in crmEnrolInput, source string, at time.Time) (*crmEnrolResult, error) {
 	cfg := crmOfferConfig()
 	phone := normalizePhone(acct.Phone)
 
@@ -555,7 +563,7 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 	// no orphan subscription, no orphan ₹0 order, no double free milk.
 	// A crash between here and the finalize below leaves an INCOMPLETE offer
 	// (pack1_order_id "") which the next enrol call RESUMES instead of refusing.
-	now := time.Now().UTC()
+	now := at.UTC()
 	offer := &consumerOffer{
 		ConsumerID: acct.ID, OfferID: offerWelcomeLitre, EnrolledAt: now,
 		Pack1State: pack1Pending, Pack2State: pack2Locked, Source: source,
@@ -593,8 +601,11 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 	}
 
 	// 6) the customer's chosen plan (a NORMAL subscription — ships only when
-	// funded) and the standalone ₹0 pack-1 order for the next IST morning.
-	sub, minted, serr := s.crmEnsureSubscription(ctx, acct.ID, planProduct, planQty, planFreq)
+	// funded) and the standalone ₹0 pack-1 order for the first IST morning
+	// still open to orders (G9, owner 24 Sep: tomorrow before 12 noon, the
+	// day after tomorrow from noon - never a morning the store has locked).
+	// A plan minted here starts that same morning.
+	sub, minted, serr := s.crmEnsureSubscriptionAt(ctx, acct.ID, planProduct, planQty, planFreq, at)
 	if serr != nil {
 		return nil, serr // offer stays incomplete — a retry resumes right here
 	}
@@ -606,8 +617,8 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 			s.crmDeleteSubscription(ctx, sub.SubscriptionID)
 		}
 	}
-	packDay := istDay(time.Now().Add(24 * time.Hour))
-	pack1, perr := s.mintPromoPackOrder(ctx, acct, addr, packDay, 1)
+	packDay := firstEditableDay(at)
+	pack1, perr := s.mintPromoPackOrderAt(ctx, acct, addr, packDay, 1, at)
 	if perr != nil {
 		retractSub() // never shipped — safe to retract
 		return nil, perr
@@ -668,6 +679,8 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 	// dispatch-log claim dedupes.
 	s.emitCRMEvent(ctx, "offer.finalized", acct.ID, map[string]any{
 		"offer_id": offerWelcomeLitre, "source": source,
+		// The morning pack 1 comes (G9): W-01 says "tomorrow" only when it is.
+		"pack1_day": packDay,
 	})
 
 	return &crmEnrolResult{
@@ -678,7 +691,7 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 }
 
 // crmDeleteSubscription retracts a campaign subscription that lost the enrol
-// finalize race — it has never shipped (start date is tomorrow) and nothing
+// finalize race — it has never shipped (it starts on the first open morning) and nothing
 // references it, so a hard delete is the honest cleanup.
 func (s *service) crmDeleteSubscription(ctx context.Context, subscriptionID string) {
 	if subscriptionID == "" {
@@ -730,6 +743,11 @@ func (s *service) crmRetractPromoOrder(ctx context.Context, orderID string) {
 // `minted` reports whether this call created the plan, so a failed enrolment
 // retracts only its own scaffolding and never cancels the customer's plan.
 func (s *service) crmEnsureSubscription(ctx context.Context, consumerID primitive.ObjectID, productID string, qty int, frequency string) (sub *subscription, minted bool, err error) {
+	return s.crmEnsureSubscriptionAt(ctx, consumerID, productID, qty, frequency, time.Now())
+}
+
+// crmEnsureSubscriptionAt is crmEnsureSubscription at an explicit moment.
+func (s *service) crmEnsureSubscriptionAt(ctx context.Context, consumerID primitive.ObjectID, productID string, qty int, frequency string, at time.Time) (sub *subscription, minted bool, err error) {
 	existing, lerr := s.repo.listSubscriptions(ctx, consumerID)
 	if lerr != nil {
 		return nil, false, lerr
@@ -743,7 +761,7 @@ func (s *service) crmEnsureSubscription(ctx context.Context, consumerID primitiv
 			return &existing[i], false, nil
 		}
 	}
-	created, cerr := s.crmCreateSubscription(ctx, consumerID, productID, qty, frequency)
+	created, cerr := s.crmCreateSubscriptionAt(ctx, consumerID, productID, qty, frequency, at)
 	if cerr != nil {
 		return nil, false, cerr
 	}
@@ -756,6 +774,14 @@ func (s *service) crmEnsureSubscription(ctx context.Context, consumerID primitiv
 // the app's 1 L/day milk floor (2 × 500 ml). It intentionally reuses the plain
 // subscription document — the sweep treats it identically to any other plan.
 func (s *service) crmCreateSubscription(ctx context.Context, consumerID primitive.ObjectID, productID string, qty int, frequency string) (*subscription, error) {
+	return s.crmCreateSubscriptionAt(ctx, consumerID, productID, qty, frequency, time.Now())
+}
+
+// crmCreateSubscriptionAt is crmCreateSubscription at an explicit moment. The
+// plan starts on the first morning still open to orders at `at` (G4/G9: its
+// cadence counts from the morning pack 1 arrives, never from a locked
+// tomorrow).
+func (s *service) crmCreateSubscriptionAt(ctx context.Context, consumerID primitive.ObjectID, productID string, qty int, frequency string, at time.Time) (*subscription, error) {
 	ix, err := s.loadPriceIndex(ctx)
 	if err != nil {
 		return nil, err
@@ -764,12 +790,12 @@ func (s *service) crmCreateSubscription(ctx context.Context, consumerID primitiv
 	if !ok {
 		return nil, errUnprocessable("SKU_UNAVAILABLE", "the chosen milk is not sellable right now")
 	}
-	now := time.Now().UTC()
+	now := at.UTC()
 	sub := &subscription{
 		MongoID: primitive.NewObjectID(), SubscriptionID: newSubscriptionID(),
 		ConsumerID: consumerID, ProductID: productID, Name: ix.nameFor(productID),
 		Variant: ix.variantFor(productID), Qty: qty, UnitPrice: round2(unit), Frequency: frequency,
-		Status: "active", StartDate: istDay(time.Now().Add(24 * time.Hour)),
+		Status: "active", StartDate: firstEditableDay(at),
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if _, err := s.repo.subscriptions.InsertOne(ctx, sub); err != nil {
@@ -945,6 +971,11 @@ func (s *service) crmRegisterHouseholdClaim(ctx context.Context, consumerID prim
 // nothing here ever reads a client-supplied price or flag, so the price
 // authority's ₹0 rejection for client input stays fully intact.
 func (s *service) mintPromoPackOrder(ctx context.Context, acct *account, addr *address, day string, packNo int) (*order, error) {
+	return s.mintPromoPackOrderAt(ctx, acct, addr, day, packNo, time.Now())
+}
+
+// mintPromoPackOrderAt is mintPromoPackOrder placed at an explicit moment.
+func (s *service) mintPromoPackOrderAt(ctx context.Context, acct *account, addr *address, day string, packNo int, at time.Time) (*order, error) {
 	cfg := crmOfferConfig()
 	ix, err := s.loadPriceIndex(ctx)
 	if err != nil {
@@ -961,7 +992,7 @@ func (s *service) mintPromoPackOrder(ctx context.Context, acct *account, addr *a
 	if acct.FullName != nil {
 		fullName = *acct.FullName
 	}
-	now := time.Now().UTC()
+	now := at.UTC()
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: acct.ID.Hex(), Status: "placed",
 		Subtotal: 0, DeliveryFee: 0, Total: 0, PaymentMethod: "wallet",
@@ -985,7 +1016,7 @@ func (s *service) mintPromoPackOrder(ctx context.Context, acct *account, addr *a
 	if err := s.repo.insertOrder(ctx, o); err != nil {
 		return nil, err
 	}
-	s.createDeliveryForOrder(ctx, o) // amount 0 → PREPAID task; settle writes the ₹0 gate row
+	s.createDeliveryForOrderAt(ctx, o, at) // amount 0 → PREPAID task; settle writes the ₹0 gate row
 	return o, nil
 }
 
@@ -1166,7 +1197,7 @@ func (s *service) crmTryAttachPack2At(ctx context.Context, consumerID primitive.
 	if derr != nil || addr == nil {
 		return false, errInternal("crm: pack2 address lookup failed")
 	}
-	p2, perr := s.mintPromoPackOrder(ctx, acct, addr, tomorrow, 2)
+	p2, perr := s.mintPromoPackOrderAt(ctx, acct, addr, tomorrow, 2, now)
 	if perr != nil {
 		return false, perr // outbox/sweep retries; state=pending resumes here
 	}

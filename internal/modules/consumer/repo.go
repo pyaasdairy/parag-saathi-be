@@ -557,6 +557,38 @@ func (r *repository) deleteWalletTxn(ctx context.Context, id primitive.ObjectID)
 	_, _ = r.walletTxns.DeleteOne(ctx, bson.D{{Key: "_id", Value: id}})
 }
 
+// walletTxnsAsOfIndexName is the (consumer_id, created_at) ledger index the
+// noon lock's as-of replay reads by (walletTxnsBetween).
+const walletTxnsAsOfIndexName = "consumer_created_at"
+
+// ensureWalletAsOfIndex builds that index. Callers treat a failure as
+// non-fatal: it is a query index, the replay still answers without it.
+func (r *repository) ensureWalletAsOfIndex(ctx context.Context) error {
+	_, err := r.walletTxns.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "consumer_id", Value: 1}, {Key: "created_at", Value: 1}},
+		Options: options.Index().SetName(walletTxnsAsOfIndexName),
+	})
+	return err
+}
+
+// walletTxnsBetween is every settled ledger row of one member stamped in
+// (from, to] - the movements walletAsOf plays back out.
+func (r *repository) walletTxnsBetween(ctx context.Context, consumerID primitive.ObjectID, from, to time.Time) ([]walletTxn, error) {
+	cur, err := r.walletTxns.Find(ctx, bson.D{
+		{Key: "consumer_id", Value: consumerID},
+		{Key: "created_at", Value: bson.D{{Key: "$gt", Value: from.UTC()}, {Key: "$lte", Value: to.UTC()}}},
+		{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"SUCCESS", "REVERSED"}}}},
+	}, options.Find().SetLimit(2000))
+	if err != nil {
+		return nil, errInternal("wallet ledger read failed")
+	}
+	out := []walletTxn{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("wallet ledger decode failed")
+	}
+	return out, nil
+}
+
 func (r *repository) listWalletTxns(ctx context.Context, consumerID primitive.ObjectID, limit int64) ([]walletTxn, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

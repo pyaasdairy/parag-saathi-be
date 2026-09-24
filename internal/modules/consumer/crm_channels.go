@@ -7,9 +7,11 @@
 //
 // COMPLIANCE INVARIANTS (TRAI / Meta — non-negotiable):
 //   - SMS content is the DLT-REGISTERED template held at MSG91; we only supply
-//     variables. A trigger with no mapped DLT template id (CRM_DLT_TEMPLATE_IDS)
-//     never attempts SMS — unregistered content is a TRAI violation, so the
-//     channel reports itself unavailable with a logged reason instead. DLT
+//     variables. A body with no mapped DLT template id (CRM_DLT_TEMPLATE_IDS,
+//     keyed by the routed template id, else by the trigger id for the
+//     trigger's own template: crmRegistrationFor) never attempts SMS —
+//     unregistered content is a TRAI violation, so the channel reports itself
+//     unavailable with a logged reason instead. DLT
 //     approves each language body as a SEPARATE registration, so a mapping may
 //     be per-language ({"en":…,"hi":…}); the id is resolved for the language of
 //     the body actually sent, and a missing language key is equally unmapped.
@@ -86,6 +88,25 @@ const (
 var errCRMTransient = errors.New("transient transport failure")
 
 func crmIsTransient(err error) bool { return errors.Is(err, errCRMTransient) }
+
+// errCRMNoRecipient marks a channel that has nobody to reach for this member
+// (push with no registered device): not a provider failure, so the chain
+// moves on as for any definitive miss, but it is neither logged as an error
+// nor recorded on the dispatch row.
+var errCRMNoRecipient = errors.New("no recipient on this channel")
+
+// crmChannelErrorMax bounds a recorded error (a provider body can be long).
+const crmChannelErrorMax = 300
+
+// crmChannelError is one channel that did not carry a dispatch, as recorded
+// on its dispatch row (channel_errors).
+type crmChannelError struct {
+	Channel   string `bson:"channel"   json:"channel"`
+	Role      string `bson:"role"      json:"role"` // primary | fallback | parallel
+	Template  string `bson:"template"  json:"template,omitempty"`
+	Error     string `bson:"error"     json:"error"`
+	Transient bool   `bson:"transient" json:"transient"`
+}
 
 // ── Delivery routing config (the trigger JSON's `delivery` block) ───────────
 
@@ -203,8 +224,8 @@ func (d crmDLTTemplateID) forLang(lang string) string {
 	return d.byLang[lang]
 }
 
-// crmParseDLTMap reads CRM_DLT_TEMPLATE_IDS: {"<trigger-id>": <string-or-
-// per-language-object>}. Same safety contract as crmParseTemplateMap —
+// crmParseDLTMap reads CRM_DLT_TEMPLATE_IDS: {"<template-or-trigger-id>":
+// <string-or-per-language-object>}; see crmRegistrationFor for the lookup. Same safety contract as crmParseTemplateMap —
 // malformed JSON (including a value of the wrong type) degrades to a nil map:
 // log once, every trigger reports "no template mapped", never a crash or an
 // unregistered send.
@@ -221,6 +242,53 @@ func crmParseDLTMap(log *slog.Logger, env string) map[string]crmDLTTemplateID {
 		return nil
 	}
 	return m
+}
+
+// crmRegistrationFor looks up a provider registration (a DLT flow id, an
+// approved WhatsApp template name) for the message BODY a dispatch routes.
+// A registration is approved for one body's exact wording, and a trigger can
+// route more than one body (B-06: T-B05-REFUND for a top-up or refund,
+// T-B05-PROMO for Pyaas credit), so the lookup is (owner, 24 Sep):
+//
+//  1. the routed template id ("T-B05-PROMO") - a body mapped on its own;
+//  2. the trigger id ("B-06") - but ONLY for the trigger's own primary
+//     template (its plain template, or the "then" branch of a conditional),
+//     so every existing trigger-keyed mapping keeps working for the body it
+//     was registered for, and a variant body never borrows it.
+//
+// A variant with no mapping of its own is unmapped: the channel reports
+// itself unavailable and the member still gets the inbox (and push). A
+// trigger the config does not know (a test's ad hoc trigger) has no variant
+// and keeps its trigger-id mapping.
+func crmRegistrationFor[V any](m map[string]V, t crmTrigger) (V, bool) {
+	var zero V
+	tplID := t.Template.String()
+	if tplID != "" {
+		if v, ok := m[tplID]; ok {
+			return v, true
+		}
+	}
+	if tplID != "" && !crmIsPrimaryTemplate(t.ID, tplID) {
+		return zero, false
+	}
+	v, ok := m[t.ID]
+	return v, ok
+}
+
+// crmIsPrimaryTemplate reports whether tplID is the template the trigger's
+// config names first: its plain template, or a conditional's "then" branch.
+// A trigger missing from the config (or with no template) takes whatever it
+// was given as its own.
+func crmIsPrimaryTemplate(triggerID, tplID string) bool {
+	cfg := crmConfigLoad()
+	if cfg == nil {
+		return true
+	}
+	t, ok := cfg.Triggers[triggerID]
+	if !ok || t.Template.String() == "" {
+		return true
+	}
+	return t.Template.String() == tplID
 }
 
 // crmParseTemplateMap reads a {"<trigger-id>":"<provider-template>"} JSON map
@@ -303,7 +371,21 @@ func (s *service) crmTransports() map[string]crmTransport {
 // parallel channels best-effort, never triggering fallback. Channels not in
 // the transports map (unshipped kinds, disabled keys) are skipped silently.
 func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t crmTrigger, tpl crmTemplate, params map[string]string, transports map[string]crmTransport) []string {
+	delivered, _ := crmDeliverExternalReport(ctx, log, phone, t, tpl, params, transports)
+	return delivered
+}
+
+// crmDeliverExternalReport is crmDeliverExternal that also reports every
+// channel that tried and failed (CRM caveat 4, owner 24 Sep): a provider
+// rejection, a transport failure with an unknown outcome, or content the
+// channel could not render. Each one is logged at ERROR with the trigger and
+// template and returned for the dispatch row (channel_errors); none of them
+// is ever in delivered, so the row never claims a message that did not go.
+// A channel that is unavailable (keys, mapping, category) or has nobody to
+// reach (errCRMNoRecipient) is not a failure and stays a Warn line.
+func crmDeliverExternalReport(ctx context.Context, log *slog.Logger, phone string, t crmTrigger, tpl crmTemplate, params map[string]string, transports map[string]crmTransport) ([]string, []crmChannelError) {
 	var delivered []string
+	var failed []crmChannelError
 	done := map[string]bool{}
 	attempt := func(name, role string) (ok, transient bool) {
 		if done[name] {
@@ -333,8 +415,22 @@ func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t c
 			return false, false
 		}
 		if err := tr.deliver(ctx, phone, t, tpl, params); err != nil {
+			if errors.Is(err, errCRMNoRecipient) {
+				if log != nil {
+					log.Warn("crm: channel has no recipient", "trigger", t.ID, "channel", name, "role", role, "reason", err.Error())
+				}
+				return false, false
+			}
+			msg := err.Error()
+			if len(msg) > crmChannelErrorMax {
+				msg = msg[:crmChannelErrorMax]
+			}
+			failed = append(failed, crmChannelError{
+				Channel: name, Role: role, Template: t.Template.String(), Error: msg, Transient: crmIsTransient(err),
+			})
 			if log != nil {
-				log.Warn("crm: channel send failed", "trigger", t.ID, "channel", name, "role", role, "transient", crmIsTransient(err), "err", err)
+				log.ErrorContext(ctx, "crm: channel send failed", "trigger", t.ID, "template", t.Template.String(),
+					"channel", name, "role", role, "transient", crmIsTransient(err), "err", err)
 			}
 			return false, crmIsTransient(err)
 		}
@@ -355,7 +451,7 @@ func crmDeliverExternal(ctx context.Context, log *slog.Logger, phone string, t c
 	for _, p := range t.Delivery.Parallel {
 		attempt(p, "parallel")
 	}
-	return delivered
+	return delivered, failed
 }
 
 // ── SMS — MSG91 Flow API (DLT-registered campaign templates) ────────────────
@@ -365,7 +461,7 @@ type smsChannel struct {
 	sender  string // 6-char DLT header (CRM_MSG91_SENDER, e.g. PYAASD)
 	baseURL string // crmMSG91FlowEndpoint, or the CRM_MSG91_BASE_URL origin + flow path; a struct field so tests point it at httptest
 	client  *http.Client
-	dlt     map[string]crmDLTTemplateID // trigger id → DLT flow/template id(s) (CRM_DLT_TEMPLATE_IDS)
+	dlt     map[string]crmDLTTemplateID // template or trigger id → MSG91 flow/template id(s) (CRM_DLT_TEMPLATE_IDS; crmRegistrationFor)
 	log     *slog.Logger
 }
 
@@ -386,6 +482,13 @@ func newSMSChannel(log *slog.Logger) *smsChannel {
 }
 
 func (c *smsChannel) Name() string { return "sms" }
+
+// dltFor is the DLT registration of the body this dispatch routes
+// (crmRegistrationFor): unmapped is the zero value, whose forLang is "".
+func (c *smsChannel) dltFor(t crmTrigger) crmDLTTemplateID {
+	id, _ := crmRegistrationFor(c.dlt, t)
+	return id
+}
 
 func (c *smsChannel) Enabled() bool { return c != nil && c.authKey != "" }
 
@@ -420,8 +523,8 @@ func (c *smsChannel) available(t crmTrigger, tpl crmTemplate) error {
 	// "hi", en → "en"): DLT registers each language body separately, so an id
 	// approved for one language never covers the other. Missing = unmapped =
 	// the same refusal as a trigger absent from the map entirely.
-	if c.dlt[t.ID].forLang(crmSMSLang(tpl)) == "" {
-		return fmt.Errorf("sms: no DLT template id mapped for trigger %s (CRM_DLT_TEMPLATE_IDS) — refusing unregistered content", t.ID)
+	if c.dltFor(t).forLang(crmSMSLang(tpl)) == "" {
+		return fmt.Errorf("sms: no DLT template id mapped for trigger %s template %s (CRM_DLT_TEMPLATE_IDS) — refusing unregistered content", t.ID, t.Template.String())
 	}
 	if crmSMSBody(tpl) == "" {
 		return fmt.Errorf("sms: template %s has no roman body", t.Template.String())
@@ -464,7 +567,7 @@ func (c *smsChannel) deliver(ctx context.Context, phone string, t crmTrigger, tp
 		}
 	}
 	payload := map[string]any{
-		"template_id": c.dlt[t.ID].forLang(crmSMSLang(tpl)),
+		"template_id": c.dltFor(t).forLang(crmSMSLang(tpl)),
 		"short_url":   "0",
 		"recipients":  []any{rec},
 	}
@@ -518,7 +621,7 @@ type whatsappChannel struct {
 	phoneID string
 	baseURL string // crmWAGraphBase, or the CRM_WA_BASE_URL origin + version; a struct field so tests point it at httptest
 	client  *http.Client
-	names   map[string]string // trigger id → approved template name (CRM_WA_TEMPLATE_NAMES)
+	names   map[string]string // template or trigger id → approved template name (CRM_WA_TEMPLATE_NAMES; crmRegistrationFor)
 	log     *slog.Logger
 }
 
@@ -549,6 +652,13 @@ func newWhatsAppChannel(log *slog.Logger) *whatsappChannel {
 
 func (c *whatsappChannel) Name() string { return "whatsapp" }
 
+// nameFor is the approved template name for the body this dispatch routes
+// (crmRegistrationFor): "" when that body has no approved template.
+func (c *whatsappChannel) nameFor(t crmTrigger) string {
+	name, _ := crmRegistrationFor(c.names, t)
+	return name
+}
+
 func (c *whatsappChannel) Enabled() bool { return c != nil && c.token != "" && c.phoneID != "" }
 
 // crmWABody picks WhatsApp's body + language code: hi_devanagari preferred
@@ -568,8 +678,8 @@ func (c *whatsappChannel) available(t crmTrigger, tpl crmTemplate) error {
 	if !c.Enabled() {
 		return fmt.Errorf("whatsapp: channel not configured (CRM_WA_TOKEN / CRM_WA_PHONE_ID unset)")
 	}
-	if c.names[t.ID] == "" {
-		return fmt.Errorf("whatsapp: no approved template name mapped for trigger %s (CRM_WA_TEMPLATE_NAMES) — business-initiated WhatsApp requires a pre-approved template", t.ID)
+	if c.nameFor(t) == "" {
+		return fmt.Errorf("whatsapp: no approved template name mapped for trigger %s template %s (CRM_WA_TEMPLATE_NAMES) — business-initiated WhatsApp requires a pre-approved template", t.ID, t.Template.String())
 	}
 	if body, _ := crmWABody(tpl); body == "" {
 		return fmt.Errorf("whatsapp: template %s has no body", t.Template.String())
@@ -588,7 +698,7 @@ func (c *whatsappChannel) deliver(ctx context.Context, phone string, t crmTrigge
 		return fmt.Errorf("whatsapp: %w", err)
 	}
 	template := map[string]any{
-		"name":     c.names[t.ID],
+		"name":     c.nameFor(t),
 		"language": map[string]string{"code": lang},
 	}
 	if len(values) > 0 { // Meta rejects an empty parameters array

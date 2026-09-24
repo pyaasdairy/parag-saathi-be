@@ -110,6 +110,11 @@ func newChainWorld(t *testing.T) (*chainWorld, func()) {
 		cancel()
 		t.Fatalf("referral indexes: %v", err)
 	}
+	// The noon lock's as-of wallet replay reads by this index.
+	if err := repo.ensureWalletAsOfIndex(ctx); err != nil {
+		cancel()
+		t.Fatalf("wallet as-of index: %v", err)
+	}
 
 	storeID := primitive.NewObjectID()
 	if _, err := db.Collection("org_units").InsertOne(ctx, bson.D{
@@ -167,7 +172,11 @@ func newChainWorld(t *testing.T) (*chainWorld, func()) {
 }
 
 // customer creates an ACTIVE account with a default in-zone address, funded to
-// `fund` rupees through the settled-recharge path.
+// `fund` rupees through the settled-recharge path. The top-up's ledger row is
+// stamped at chainLedgerEpoch, long before any simulated lock moment: the
+// noon lock reads the wallet as it stood at 12:00 (walletAsOf), and a seed
+// row stamped with the real clock would otherwise fall inside a simulated
+// day's window whenever the wall clock happened to be in it.
 func (w *chainWorld) customer(t *testing.T, phone string, fund float64) primitive.ObjectID {
 	t.Helper()
 	ctx := context.Background()
@@ -190,6 +199,7 @@ func (w *chainWorld) customer(t *testing.T, phone string, fund float64) primitiv
 		if _, err := w.svc.creditTopup(ctx, acct.ID, fund, "razorpay", "fund-"+phone); err != nil {
 			t.Fatalf("fund wallet: %v", err)
 		}
+		chainStampLedger(t, w, acct.ID, "fund-"+phone, "TOPUP", chainLedgerEpoch)
 	}
 	return acct.ID
 }
@@ -323,10 +333,11 @@ func TestFullChainSubscriptionMorningDelivery(t *testing.T) {
 
 	cid := w.customer(t, "9000001002", 500)
 	// taaza (not gold) so the 2+2 trial pricing never masks the real charge.
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
+	const D = "2026-10-06"
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
 		ProductID: "taaza-500ml", Name: "Milk taaza-500ml", Qty: 2,
-		Frequency: "daily", StartDate: istToday(time.Now()),
-	})
+		Frequency: "daily", StartDate: D,
+	}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}
@@ -334,13 +345,13 @@ func TestFullChainSubscriptionMorningDelivery(t *testing.T) {
 		t.Fatalf("server price authority: unit %v want 29", sub.UnitPrice)
 	}
 
-	// The morning sweep materialises today's delivery: the catch-up branch,
-	// for a plan that predates today's noon cut-off (a plan created now would
-	// start on the first editable day under the noon rule). The sweep runs at
-	// 04:00, before today's 05:00 route leaves: from then on the catch-up
-	// leaves the day alone, so the wall clock would make this hour-dependent.
-	chainBackdateSubscription(t, w, sub, time.Now().Add(-48*time.Hour))
-	placed := w.svc.sweepSubscriptionOrders(ctx, istDayAt(istToday(time.Now()), 4, 0))
+	// The sweep at 03:00 on D materialises D's delivery: the catch-up branch,
+	// for a plan that predates D's noon cut-off (a plan created now would
+	// start on the first editable day under the noon rule), before D's route
+	// leaves (a day whose route has left is not caught up). A fixed day, never
+	// the wall clock: the catch-up of "today" depends on the hour.
+	chainBackdateSubscription(t, w, sub, istDayAt(addDaysIST(D, -2), 9, 0))
+	placed := w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 3, 0))
 	if placed < 1 {
 		t.Fatalf("sweep placed %d orders — the morning lane produced nothing", placed)
 	}

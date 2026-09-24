@@ -106,7 +106,7 @@ func TestStoreCancelCancelsTheOrderAndEmitsOrderFailed(t *testing.T) {
 	// A customer-cancelled order whose task then fails is already terminal:
 	// no second flip, no event.
 	ord2 := chainMorningOrder(t, w, "9000005003", nil)
-	if _, err := w.svc.cancelOrder(ctx, ord2.UserID, ord2.OrderID); err != nil {
+	if _, err := w.svc.cancelOrderAt(ctx, ord2.UserID, ord2.OrderID, ord2.PlacedAt); err != nil { // placed-at: its morning is still open
 		t.Fatalf("cancelOrder: %v", err)
 	}
 	if evs := failedEventsFor(t, w, ord2.OrderID); len(evs) != 0 {

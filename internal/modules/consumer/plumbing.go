@@ -49,8 +49,10 @@ type apiError struct {
 	// Shortfall rides on WALLET_SHORT (founding.go): the rupees the wallet is
 	// short of the Rs 99 seat, as a field beside the message that names it.
 	Shortfall float64 `json:"shortfall,omitempty"`
-	// NextDeliveryDate rides on CUTOFF_PASSED (orders.go): the first morning
-	// (YYYY-MM-DD, IST) a one-off order can still reach.
+	// NextDeliveryDate rode on CUTOFF_PASSED (orders.go): the first morning
+	// (YYYY-MM-DD, IST) a one-off order can still reach. Since 24 Sep a closed
+	// morning is moved rather than refused, so nothing sets it now; the key
+	// stays for any refusal that names a day (omitempty: absent when unset).
 	NextDeliveryDate string `json:"next_delivery_date,omitempty"`
 }
 

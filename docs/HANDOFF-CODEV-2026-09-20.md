@@ -570,16 +570,20 @@ like D-01 (push, WhatsApp after 15 min, SMS, inbox always). Tokens `[FARM]`,
   the picker should read this field or offer the day after tomorrow.
 - Exactly-once is unchanged: the per-day claim plus the unique
   `(subscription_id, scheduled_for)` index.
-- An unfunded preview is retried every tick until its route leaves (05:00 IST on its
-  day, `routeStartFor`); from then it expires (cancelled, the day stays skipped) instead
-  of minting a task for a round already gone, which the missed close then cancelled
-  the next noon (R2F-15, after the merge into `integration/delivery`).
+- Superseded on 24 Sep afternoon (`HANDOFF-CODEV-2026-09-24.md` section 10): the lock
+  decides a member's day once, on the wallet as it stood at 12:00, and an unfunded
+  preview is skipped at once (`cancelled_by: "wallet_short"`, the day claim kept, D-07),
+  never retried. Before that: an unfunded preview was retried every tick until its route
+  left (05:00 IST on its day, `routeStartFor`). A preview no lock decided before its route
+  left still expires (cancelled, the day stays skipped) instead of minting a task for a
+  round already gone, which the missed close then cancelled the next noon (R2F-15, after
+  the merge into `integration/delivery`).
 - A one-off morning order with no `delivery_date` is dated with the first open
   morning (`firstEditableDay`) instead of riding the next route undated.
 - `GET /stores/{storeId}/upcoming` now lists the window from tomorrow through the
   first editable day; each row's `delivery_date` says which day, and a preview row
-  carries `awaiting_funds` (past its cut-off, not locked for want of funds) and
-  `locks_at` (its cut-off, RFC3339). The admin CRM
+  carries `awaiting_funds` (past its cut-off, not yet decided by the lock; since 24 Sep
+  only the seconds before the lock tick) and `locks_at` (its cut-off, RFC3339). The admin CRM
   timeline event reads "Subscription day confirmed (noon lock)".
 - The CRM B-02 shortfall notice (12:00) fires at the lock itself and judges the day
   after tomorrow (the day whose cut-off is "12 noon tomorrow", the copy it keeps),

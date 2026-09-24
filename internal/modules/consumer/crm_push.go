@@ -163,7 +163,7 @@ func (c *pushChannel) deliver(ctx context.Context, _ string, t crmTrigger, tpl c
 		return fmt.Errorf("push: device lookup: %v: %w", err, errCRMTransient)
 	}
 	if len(tokens) == 0 {
-		return fmt.Errorf("push: no registered device for the member")
+		return fmt.Errorf("push: no registered device for the member: %w", errCRMNoRecipient)
 	}
 	body := crmPushBody(tpl)
 	if _, _, err := crmTokenValues(body, params); err != nil {

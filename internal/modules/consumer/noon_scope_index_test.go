@@ -27,7 +27,7 @@ func TestNoonScopeIndexCoexist(t *testing.T) {
 
 	// A daily plan from before the cut-off: the noon tick locks D+1.
 	planner := w.customer(t, "9000011501", 1000)
-	sub, err := w.svc.createSubscription(ctx, planner, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 1, Frequency: "daily", StartDate: D1})
+	sub, err := w.svc.createSubscriptionAt(ctx, planner, subscriptionInput{ProductID: "gold-500ml", Variant: "500ml", Qty: 1, Frequency: "daily", StartDate: D1}, chainPlanMadeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}

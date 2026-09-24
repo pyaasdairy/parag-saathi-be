@@ -35,16 +35,18 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		"payment.failed":     {"payment_order_id": "order_1", "payment_id": "pay_1", "amount": float64(500), "reason": "declined", "source": "razorpay"},
 		"subscription.activated": {"subscription_id": "sub_1", "product_id": "gold-500ml", "qty": int32(2),
 			"frequency": "daily", "start_date": "2026-09-25", "start_label": "tomorrow"},
-		"subscription.created_unpaid": {"subscription_id": "sub_1", "first_cycle_amount": float64(70)},
+		"subscription.created_unpaid": {"subscription_id": "sub_1", "first_cycle_amount": float64(70), "start_label": "tomorrow"},
 		"subscription.modified":       {"subscription_id": "sub_1", "change": "paused"},
+		"subscription.day_skipped": {"subscription_id": "sub_1", "day": "2026-10-07", "reason": "wallet_short", "shortfall": float64(58),
+			"resume_label": "8 Oct", "tomorrow_blocked": true, "scope_key": "day_skipped:2026-10-07"},
 		"order.line_cancelled": {"order_id": "ord_1", "line_id": "item_1", "labelled_product": label,
 			"amount": float64(35), "before_delivery": true},
 		"delivery.delayed":       {"order_id": "ord_1", "labelled_product": label, "new_eta_known": true, "eta": "about 7:52 am"},
 		"serviceability.checked": {"in_zone": false, "pincode": "226030"},
 		// Founding Family (founding.go) and referrals (referrals.go), as the
 		// emitters write them.
-		"founding.farm_unlocked": {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(0), "unlocked_packs": ""},
-		"founding.member_active": {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(0), "unlocked_packs": ""},
+		"founding.farm_unlocked": {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(0), "unlocked_packs": "", "first_delivery_label": "tomorrow"},
+		"founding.member_active": {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(0), "unlocked_packs": "", "first_delivery_label": "tomorrow"},
 		"founding.seat_waiting":  {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(53)},
 		"referral.applied":       {"referral_id": "r1", "referee_id": "u2", "code": "PGHZU4", "reward_amount": 100.0},
 		"referral.rewarded":      {"referral_id": "r1", "order_id": "ord_1", "reward_amount": 100.0, "referrer_id": "u1", "referee_id": "u2"},
@@ -96,7 +98,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		}
 		routed[id] = true
 	}
-	for _, id := range []string{"A-02", "D-01", "D-02", "D-06", "D-09", "E-01", "E-02", "E-04", "E-06", "E-07", "W-02", "W-05", "FF-01", "FF-02", "FF-03"} {
+	for _, id := range []string{"A-02", "D-01", "D-02", "D-06", "D-07", "D-09", "E-01", "E-02", "E-04", "E-06", "E-07", "W-02", "W-05", "FF-01", "FF-02", "FF-03"} {
 		if !routed[id] {
 			t.Errorf("%s should be reachable from a lifecycle topic", id)
 		}
@@ -143,7 +145,8 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	if err := json.Unmarshal(embeddedCRMConfig, &meta); err != nil {
 		t.Fatalf("embedded config: %v", err)
 	}
-	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 58 || len(meta.Templates) != 51 {
+	// 52 templates: the 50 of the founding merge, T-E04-REDELIVER and T-W01-LATER.
+	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 58 || len(meta.Templates) != 52 {
 		t.Fatalf("meta.trigger_count=%d triggers=%d templates=%d", meta.Meta.TriggerCount, len(meta.Triggers), len(meta.Templates))
 	}
 }

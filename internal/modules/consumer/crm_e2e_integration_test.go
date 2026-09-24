@@ -350,6 +350,9 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 		t.Fatalf("B-01 must not repeat within the day: %d", n)
 	}
 	// 17:00: ₹50 cannot cover tomorrow's ₹70 → the critical B-02 cut-off alert.
+	// B-02 waits for the day's noon lock (nr-3); it is recorded as run here,
+	// not driven, so B-02 judges this member on its own.
+	noonLockRanAt(t, svc, time.Date(bday.Year(), bday.Month(), bday.Day(), 12, 0, 5, 0, istZone))
 	svc.crmProcessSchedules(ctx, time.Date(bday.Year(), bday.Month(), bday.Day(), 17, 5, 0, 0, istZone))
 	if n := inboxCount(t, db, nAcct.ID, "B-02"); n != 1 {
 		t.Fatalf("B-02 shortfall alert = %d rows, want 1", n)
@@ -358,6 +361,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	// critical B-02 fires again — the spec's critical_exempt_from_daily_cap.
 	nday := time.Date(bday.Year(), bday.Month(), bday.Day(), 17, 5, 0, 0, istZone).AddDate(0, 0, 1)
 	svc.crmProcessSchedules(ctx, time.Date(nday.Year(), nday.Month(), nday.Day(), 9, 5, 0, 0, istZone))
+	noonLockRanAt(t, svc, time.Date(nday.Year(), nday.Month(), nday.Day(), 12, 0, 5, 0, istZone))
 	svc.crmProcessSchedules(ctx, nday)
 	if n := inboxCount(t, db, nAcct.ID, "B-01"); n != 1 {
 		t.Fatalf("B-01 repeated inside its 7-day cycle: %d", n)
@@ -783,17 +787,20 @@ func TestCommerceFunnelE2E(t *testing.T) {
 	}
 }
 
-// planFromBeforeNoon dates a campaign plan to 09:00 IST today, before
-// tomorrow's 12:00 cut-off. Pack 2 attaches only to a morning the plan
-// really delivers (the noon rule: a plan created after the cut-off starts
-// the day after tomorrow), so without this the journey's attach steps
-// passed in the morning and failed every afternoon.
+// planFromBeforeNoon makes a campaign plan the one an enrolment at 09:00 IST
+// today would have made: dated before tomorrow's 12:00 cut-off and starting
+// tomorrow. Pack 2 attaches only to a morning the plan really delivers (the
+// noon rule: a plan created after the cut-off starts the day after
+// tomorrow, and from G9 an afternoon enrolment's plan starts then too), so
+// without this the journey's attach steps passed in the morning and failed
+// every afternoon.
 func planFromBeforeNoon(t *testing.T, ctx context.Context, repo *repository, subID string) {
 	t.Helper()
 	ist := time.Now().In(istZone)
 	at := time.Date(ist.Year(), ist.Month(), ist.Day(), 9, 0, 0, 0, istZone).UTC()
 	if _, err := repo.subscriptions.UpdateOne(ctx, bson.D{{Key: "subscription_id", Value: subID}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "created_at", Value: at}, {Key: "changed_at", Value: at}}}}); err != nil {
+		bson.D{{Key: "$set", Value: bson.D{{Key: "created_at", Value: at}, {Key: "changed_at", Value: at},
+			{Key: "start_date", Value: firstEditableDay(at)}}}}); err != nil {
 		t.Fatalf("date the plan: %v", err)
 	}
 }
