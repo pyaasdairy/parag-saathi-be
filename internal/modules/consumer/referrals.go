@@ -491,6 +491,12 @@ func (s *service) creditRewards(ctx context.Context, consumerID primitive.Object
 		return walletView{}, err
 	}
 	s.repo.updateWalletTxnBalances(ctx, row.ID, updated.ID, updated.Seq, updated.CashBalance, updated.RewardsBalance)
+	// wallet.credited (B-06), as promoCredit sends it: past the exactly-once
+	// gate and the $inc, so a replayed ref says nothing and money that never
+	// arrived is never announced. The Pyaas-credit wording (not refundable).
+	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
+		"amount": amount, "account": "promo_credit", "reason": remark, "ref": ref, "scope_key": ref,
+	})
 	return walletToView(updated), nil
 }
 

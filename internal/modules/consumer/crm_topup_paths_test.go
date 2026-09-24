@@ -261,4 +261,44 @@ func TestCRMTopupMessageEveryCreditPath(t *testing.T) {
 	if evs := crmEventsOf(t, w.db, x, "wallet.recharge_settled"); len(evs) != 0 {
 		t.Fatalf("wallet.recharge_settled emitted for a credit that never landed: %+v", evs)
 	}
+
+	// 10) The referral reward (referrals.go): the referee's first paid
+	//     delivery credits Rs 100 of Pyaas credit to BOTH wallets, and each
+	//     side is told, once, in the non-refundable wording.
+	referrer := w.customer(t, "9000008111", 0)
+	referee := w.customer(t, "9000008112", 0)
+	code, err := w.svc.referralCode(ctx, referrer)
+	if err != nil {
+		t.Fatalf("referral code: %v", err)
+	}
+	if _, err := w.svc.applyReferral(ctx, referee, code); err != nil {
+		t.Fatalf("apply referral: %v", err)
+	}
+	if _, err := w.svc.creditTopup(ctx, referee, 500, "razorpay", "order_referee_1"); err != nil {
+		t.Fatalf("referee top-up: %v", err)
+	}
+	w.svc.crmProcessEvents(ctx) // the top-up's own receipt
+	paid := instantOrderDelivered(t, w, referee)
+	if ref, _ := w.svc.repo.findReferralByReferee(ctx, referee); ref == nil || ref.Status != referralCredited || ref.RewardOrderID != paid.OrderID {
+		t.Fatalf("setup: the paid delivery must credit the referral: %+v", ref)
+	}
+	crmExpectOneB06(t, w, referrer, "referral reward (referrer)", "T-B05-PROMO", "₹100 Pyaas credit added (Referral reward")
+	var refereeReward int
+	for _, r := range crmB06Rows(t, w, referee) {
+		if strings.Contains(r.EN, "Pyaas credit added (Referral reward") {
+			refereeReward++
+			if r.Template != "T-B05-PROMO" || crmTokenRe.FindString(r.EN) != "" {
+				t.Fatalf("referral reward (referee): %+v", r)
+			}
+		}
+	}
+	if refereeReward != 1 {
+		t.Fatalf("referral reward (referee): %d B-06 rows, want 1: %+v", refereeReward, crmB06Rows(t, w, referee))
+	}
+	// A second delivery pays nothing more and says nothing more.
+	instantOrderDelivered(t, w, referee)
+	w.svc.crmProcessEvents(ctx)
+	if n := len(crmB06Rows(t, w, referrer)); n != 1 {
+		t.Fatalf("referral reward (referrer) after a second delivery: %d B-06 rows, want 1", n)
+	}
 }
