@@ -679,6 +679,8 @@ func (s *service) crmEnrolCore(ctx context.Context, actor string, acct *account,
 	// dispatch-log claim dedupes.
 	s.emitCRMEvent(ctx, "offer.finalized", acct.ID, map[string]any{
 		"offer_id": offerWelcomeLitre, "source": source,
+		// The morning pack 1 comes (G9): W-01 says "tomorrow" only when it is.
+		"pack1_day": packDay,
 	})
 
 	return &crmEnrolResult{

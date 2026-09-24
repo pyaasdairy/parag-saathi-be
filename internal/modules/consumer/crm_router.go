@@ -215,6 +215,12 @@ func (e *crmEventCtx) params() map[string]string {
 		if lbl := e.planStartLabel(); lbl != "" {
 			p["DATE"] = lbl
 		}
+	case "offer.finalized":
+		// T-W01-LATER's [DATE]: the morning pack 1 comes, worded when W-01
+		// is sent.
+		if day, _ := e.ev.Payload["pack1_day"].(string); strings.TrimSpace(day) != "" {
+			p["DATE"] = crmDayLabel(day, e.sentAt())
+		}
 	case "founding.farm_unlocked":
 		// An event written before the emitter carried the label: the first
 		// morning still open to orders when the farm unlocked.
@@ -369,6 +375,17 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 		// order carries a promotional line iff it is a pack order.
 		n, _ := crmPayloadNumber(p["offer_pack"])
 		return n > 0, nil
+	case "offer.pack1_tomorrow":
+		// W-01 (offer.finalized): pack 1 comes tomorrow as seen when the
+		// message goes out. From 12:00 IST it comes the day after tomorrow
+		// (G9), and T-W01's registered "Tomorrow by 7 am" would be untrue.
+		// An event from before the payload carried the day was always for
+		// tomorrow.
+		day, _ := p["pack1_day"].(string)
+		if strings.TrimSpace(day) == "" {
+			return true, nil
+		}
+		return day == istDay(e.sentAt().Add(24*time.Hour)), nil
 	case "tomorrow.delivery_blocked":
 		// subscription.day_skipped (D-07): the skipped day is tomorrow as the
 		// lock saw it and no free Welcome Litre pack still arrives that

@@ -125,7 +125,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	if err := json.Unmarshal(embeddedCRMConfig, &meta); err != nil {
 		t.Fatalf("embedded config: %v", err)
 	}
-	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 58 || len(meta.Templates) != 50 {
+	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 58 || len(meta.Templates) != 51 {
 		t.Fatalf("meta.trigger_count=%d triggers=%d templates=%d", meta.Meta.TriggerCount, len(meta.Triggers), len(meta.Templates))
 	}
 }

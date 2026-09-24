@@ -506,6 +506,14 @@
    "hi_devanagari": "सब्सक्रिप्शन शुरू ✅ कल सुबह 7 बजे तक आपका पहला पैक — 500 मि.ली. पराग फुल क्रीम, मुफ़्त। अभी कोई भुगतान नहीं। 7 दिन के भीतर ₹500 का वॉलेट रिचार्ज कीजिए — दूसरा 500 मि.ली. पैक भी मुफ़्त। कभी भी रोकें, बदलें या बंद कीजिए।",
    "channel_note": "WhatsApp carries the Devanagari rendering. SMS fallback uses the Roman version — a Devanagari SMS carries 70 characters per segment instead of 160."
   },
+  "T-W01-LATER": {
+   "dlt_category": "service_implicit",
+   "cta": "none",
+   "en": "You're set. [DATE] by 7 am: 500 ml Parag Full Cream — delivered by PYAAS, free. No payment now. Recharge Rs500 any time in the next 7 days and your second 500 ml pack comes free with your first paid delivery. Pause or cancel any time.",
+   "hi": "Ho gaya. [DATE] subah 7 baje tak 500 ml Parag Full Cream — muft, koi payment nahi. 7 din ke andar Rs500 recharge karein to doosra 500 ml pack bhi muft, pehli paid delivery ke saath. Kabhi bhi pause ya band karein.",
+   "hi_devanagari": "सब्सक्रिप्शन शुरू ✅ [DATE] सुबह 7 बजे तक आपका पहला पैक — 500 मि.ली. पराग फुल क्रीम, मुफ़्त। अभी कोई भुगतान नहीं। 7 दिन के भीतर ₹500 का वॉलेट रिचार्ज कीजिए — दूसरा 500 मि.ली. पैक भी मुफ़्त। कभी भी रोकें, बदलें या बंद कीजिए।",
+   "channel_note": "W-01 for an enrolment whose free pack 1 does not come tomorrow (from 12:00 IST it comes the day after tomorrow, G9, 24 Sep): [DATE] is that morning ('8 Oct'). Not registered with DLT or Meta: until it is, it reaches the inbox and push only, never under T-W01's registration (which says tomorrow)."
+  },
   "T-W02": {
    "dlt_category": "service_implicit",
    "cta": "recharge",
@@ -2311,7 +2319,11 @@
      }
     ]
    },
-   "template": "T-W01",
+   "template": {
+    "if": "offer.pack1_tomorrow == true",
+    "then": "T-W01",
+    "else": "T-W01-LATER"
+   },
    "frequency_cap": {
     "per_offer": 1
    },
