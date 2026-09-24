@@ -179,14 +179,19 @@ func TestCRMEmitSubscriptionLifecycle(t *testing.T) {
 	nowIST := time.Now().In(istZone)
 	t0 := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 15, 0, 0, 0, istZone)
 
-	sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
-		ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: istToday(time.Now()),
-	})
+	// Plans made at 10:00 today (a fixed hour: the noon lock decides the
+	// first morning). A plan starting today is past today's cut-off, so the
+	// first morning A-03 can promise is tomorrow (R2F-16).
+	today := istToday(time.Now())
+	madeAt := istDayAt(today, 10, 0)
+	sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
+		ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: today,
+	}, madeAt)
 	if err != nil {
 		t.Fatalf("createSubscription: %v", err)
 	}
 	evs := crmEventsOf(t, w.db, cid, "subscription.activated")
-	if len(evs) != 1 || evs[0].Payload["subscription_id"] != sub.SubscriptionID || evs[0].Payload["start_label"] != "today" {
+	if len(evs) != 1 || evs[0].Payload["subscription_id"] != sub.SubscriptionID || evs[0].Payload["start_label"] != "tomorrow" {
 		t.Fatalf("subscription.activated: %+v", evs)
 	}
 	unpaid := crmEventsOf(t, w.db, cid, "subscription.created_unpaid")
@@ -197,15 +202,15 @@ func TestCRMEmitSubscriptionLifecycle(t *testing.T) {
 	if got := crmDispatchStatuses(t, w.db, cid, "A-03"); len(got) != 1 || got[0] != "SENT" {
 		t.Fatalf("A-03: %v", got)
 	}
-	if body := inboxBodyEN(t, w.db, cid, "A-03"); !strings.HasPrefix(body, "Your morning milk starts today, delivered by 7 am.") {
+	if body := inboxBodyEN(t, w.db, cid, "A-03"); !strings.HasPrefix(body, "Your morning milk starts tomorrow, delivered by 7 am.") {
 		t.Fatalf("A-03 body = %q", body)
 	}
 
 	// A funded plan is activated without the unpaid nudge.
 	funded := w.customer(t, "9000007404", 500)
-	if _, err := w.svc.createSubscription(ctx, funded, subscriptionInput{
-		ProductID: "gold-1l", Qty: 1, Frequency: "alternate", StartDate: addDaysIST(istToday(time.Now()), 1),
-	}); err != nil {
+	if _, err := w.svc.createSubscriptionAt(ctx, funded, subscriptionInput{
+		ProductID: "gold-1l", Qty: 1, Frequency: "alternate", StartDate: addDaysIST(today, 1),
+	}, madeAt); err != nil {
 		t.Fatalf("createSubscription funded: %v", err)
 	}
 	if n := len(crmEventsOf(t, w.db, funded, "subscription.created_unpaid")); n != 0 {

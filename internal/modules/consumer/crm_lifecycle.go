@@ -106,10 +106,16 @@ func crmFailureReasonForCustomer(reason string) string {
 }
 
 // crmSubscriptionStartLabel is the [DATE] token of T-A03: the first morning
-// the plan delivers on or after its start date, worded against `now`
-// ("today", "tomorrow", else "2 Jan"). A plan that never delivers inside a
-// fortnight reports its start date as written.
+// the plan really delivers, worded against `now` ("today", "tomorrow", else
+// "2 Jan"). That is the plan's next_delivery_date, which honours the noon
+// lock (a plan made after noon starts the day after tomorrow, a morning past
+// its cut-off is never offered); without one, the first cadence day on or
+// after the start date, and a plan that never delivers inside a fortnight
+// reports its start date as written.
 func crmSubscriptionStartLabel(sub *subscription, now time.Time) string {
+	if sub.NextDeliveryDate != "" {
+		return crmDayLabel(sub.NextDeliveryDate, now)
+	}
 	day := sub.StartDate
 	for i := 0; i < 14; i++ {
 		d := addDaysIST(sub.StartDate, i)

@@ -542,6 +542,13 @@ type subscriptionInput struct {
 }
 
 func (s *service) createSubscription(ctx context.Context, consumerID primitive.ObjectID, in subscriptionInput) (*subscription, error) {
+	return s.createSubscriptionAt(ctx, consumerID, in, time.Now())
+}
+
+// createSubscriptionAt is createSubscription made at an explicit moment: the
+// noon lock decides which morning a new plan first reaches, so tests drive it
+// at a fixed IST time like the sweep's.
+func (s *service) createSubscriptionAt(ctx context.Context, consumerID primitive.ObjectID, in subscriptionInput, at time.Time) (*subscription, error) {
 	if in.ProductID == "" {
 		return nil, errBadRequest("product_id is required")
 	}
@@ -585,7 +592,7 @@ func (s *service) createSubscription(ctx context.Context, consumerID primitive.O
 			"You already have a %s plan for %s%s. Change its quantity or days in My subscriptions.",
 			dup.Frequency, dup.Name, subscriptionVariantSuffix(dup.Variant)))
 	}
-	now := time.Now().UTC()
+	now := at.UTC()
 	start := in.StartDate
 	if start == "" {
 		start = istToday(now)
