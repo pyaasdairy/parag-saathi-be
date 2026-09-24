@@ -189,6 +189,11 @@ func (ix *catalogPriceIndex) memberPriceFor(productID, variant string) (price fl
 	if !ok {
 		return 0, false
 	}
+	// Only PYAAS milk has a member price: a member_price stored on any other
+	// row (Parag included) is never applied, whoever wrote it.
+	if !ix.pyaas[productID] {
+		return base, true
+	}
 	if variant != "" {
 		if mv := ix.memberVariants[productID]; mv != nil {
 			if p, hit := mv[variantKey(variant)]; hit && p > 0 && p <= base {
@@ -204,9 +209,6 @@ func (ix *catalogPriceIndex) memberPriceFor(productID, variant string) (price fl
 	}
 	if p, hit := ix.member[productID]; hit && !explicitVariant && p > 0 && p <= base {
 		return p, true
-	}
-	if !ix.pyaas[productID] {
-		return base, true
 	}
 	litres := ix.litres[productID]
 	if variant != "" {
