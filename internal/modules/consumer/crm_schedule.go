@@ -184,6 +184,8 @@ func crmEventStale(e *crmEventCtx) (bool, string) {
 			return true, fmt.Sprintf("order %s is %s again: the failure was undone", o.OrderID, o.Status)
 		}
 		return false, ""
+	case "payment.failed":
+		return crmPaymentFailureStale(e)
 	}
 	if id, _ := e.ev.Payload["order_id"].(string); strings.TrimSpace(id) == "" {
 		return false, ""
@@ -194,6 +196,28 @@ func crmEventStale(e *crmEventCtx) (bool, string) {
 	}
 	if o.Status == "cancelled" {
 		return true, fmt.Sprintf("order %s cancelled before the delay elapsed", o.OrderID)
+	}
+	return false, ""
+}
+
+// crmPaymentFailureStale: B-03 says "no money was deducted", so it waits
+// out a checkout retry. A Razorpay checkout that fails one method often
+// succeeds with another on the SAME order; once that top-up order is paid (or
+// its ledger credit exists) the failure is not news any more. A mandate
+// shortfall names no payment order and is never stale here.
+func crmPaymentFailureStale(e *crmEventCtx) (bool, string) {
+	orderID, _ := e.ev.Payload["payment_order_id"].(string)
+	if orderID = strings.TrimSpace(orderID); orderID == "" {
+		return false, ""
+	}
+	if po, err := e.s.repo.findPaymentOrderByID(e.ctx, orderID); err == nil && po.Status == "PAID" {
+		return true, fmt.Sprintf("payment order %s was paid by a later attempt", orderID)
+	}
+	n, err := e.s.repo.walletTxns.CountDocuments(e.ctx, bson.D{
+		{Key: "consumer_id", Value: e.ev.ConsumerID}, {Key: "ref_id", Value: orderID}, {Key: "type", Value: "TOPUP"},
+	})
+	if err == nil && n > 0 {
+		return true, fmt.Sprintf("payment order %s was credited by a later attempt", orderID)
 	}
 	return false, ""
 }

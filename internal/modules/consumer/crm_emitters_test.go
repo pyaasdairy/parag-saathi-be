@@ -296,6 +296,7 @@ func TestCRMEmitPaymentFailed(t *testing.T) {
 		t.Fatalf("payment.failed from the webhook: %+v", evs)
 	}
 	w.svc.crmProcessEvents(ctx)
+	w.svc.crmFireDueSchedules(ctx, time.Now().Add(11*time.Minute)) // B-03 waits PT10M for a checkout retry
 	if got := crmDispatchScopes(t, w.db, cid, "B-03"); len(got) != 1 || got["pay_f1"] != "SENT" {
 		t.Fatalf("B-03 once per gateway payment: %v", got)
 	}
@@ -328,6 +329,7 @@ func TestCRMEmitPaymentFailed(t *testing.T) {
 		t.Fatalf("payment.failed from the mandate: %+v", evs)
 	}
 	w.svc.crmProcessEvents(ctx)
+	w.svc.crmFireDueSchedules(ctx, time.Now().Add(11*time.Minute))
 	if got := crmDispatchScopes(t, w.db, cid, "B-03"); len(got) != 2 || got[mandateChargeRef(m.MandateID, dayKey(at))] != "SENT" {
 		t.Fatalf("B-03 once per (mandate, day): %v", got)
 	}

@@ -849,7 +849,7 @@
    "phase": 1,
    "kind": "event",
    "event": "payment.failed",
-   "delay": "PT0S",
+   "delay": "PT10M",
    "conditions": [],
    "segments": [
     "new",
@@ -870,7 +870,7 @@
     "plus_one_retry_link": true
    },
    "success_metric": "recovery_pct",
-   "note": "'no money was deducted' must be verified against the gateway response before rendering. If the gateway reports a pending or captured state, use a different message — an inaccurate money statement is the highest-risk copy in the system."
+   "note": "'no money was deducted' must be verified against the gateway response before rendering. If the gateway reports a pending or captured state, use a different message — an inaccurate money statement is the highest-risk copy in the system. Held 10 minutes (delay PT10M) for a checkout retry on the same Razorpay order, and dropped at fire time when that top-up order is PAID or its TOPUP ledger row exists."
   },
   {
    "id": "B-04",
