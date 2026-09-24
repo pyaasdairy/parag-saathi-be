@@ -872,3 +872,44 @@ func TestFoundingAndReferralRefuseWithoutTheirUniqueIndex(t *testing.T) {
 		t.Fatalf("apply once the index is back: %d %s", code, body)
 	}
 }
+
+// The billing worker bills at boot, like the subscription worker. It used to
+// wait a full hour before its first tick, and every deploy (and a free-plan
+// instance spinning down when idle) restarts the process, so an instance
+// that never stayed up an hour never billed: members kept level-3 prices and
+// free delivery without paying.
+func TestFoundingBillingWorkerBillsAtBoot(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 1)
+	a := w.customer(t, "9000009121", 198)
+	if _, err := w.svc.joinFoundingFamily(ctx, a, "gonard-dairy"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	m, _ := w.svc.repo.findFoundingMember(ctx, a)
+	// Due since yesterday, so the check holds across an IST midnight.
+	due := addDaysIST(istToday(time.Now()), -1)
+	if _, err := w.db.Collection(collFoundingMembers).UpdateByID(ctx, m.ID, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "next_bill_date", Value: due}}}}); err != nil {
+		t.Fatalf("due: %v", err)
+	}
+	wctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go w.svc.foundingBillingWorker(wctx)
+	ref := "founding:bill:" + m.ID.Hex() + ":" + due
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "ref_id", Value: ref}})
+		if n == 1 {
+			if fresh, _ := w.svc.repo.findFoundingMember(ctx, a); fresh != nil && fresh.NextBillDate != due {
+				break // billed and rolled to the next month
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the worker did not bill at boot: %d rows for %s", n, ref)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	stop()
+}

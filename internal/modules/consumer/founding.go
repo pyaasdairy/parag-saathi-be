@@ -102,7 +102,7 @@ type foundingMember struct {
 	LastBillDate string `bson:"last_bill_date,omitempty"`
 	BillAttempts int    `bson:"bill_attempts,omitempty"`
 	// LastAttemptDate is the IST day of the last short-wallet attempt: the
-	// worker ticks hourly, and every failed tick on one day is that day's
+	// worker ticks every 15 minutes, and every failed tick on one day is that day's
 	// single attempt, so BillAttempts counts billing DAYS (spec 5.6).
 	LastAttemptDate string `bson:"last_attempt_date,omitempty"`
 	// PerksUntil: after a stop, the last IST day the paid month still covers.
@@ -821,7 +821,7 @@ func (s *service) unlockFoundingFarm(ctx context.Context, farm *foundingFarm, at
 				memberDay = d.Day()
 			}
 		case w.PerksUntil != "":
-			memberBill = today // the billing worker takes month one within the hour
+			memberBill = today // the billing worker takes month one on its next tick
 		}
 		upd, err := s.repo.updateFoundingMember(ctx, w.ID,
 			bson.D{
@@ -898,10 +898,10 @@ func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (bille
 			if !errors.As(derr, &ae) || ae.Code != "INSUFFICIENT_FUNDS" {
 				continue // transient: try again next tick
 			}
-			// The worker ticks hourly, but the member is promised three
+			// The worker ticks every 15 minutes, but the member is promised three
 			// billing DAYS ("we will try again tomorrow"). Every tick still
-			// tries the debit, so a top-up later today is billed within the
-			// hour, but only the first short tick of an IST day counts.
+			// tries the debit, so a top-up later today is billed on the next
+			// tick, but only the first short tick of an IST day counts.
 			if m.LastAttemptDate == today {
 				continue
 			}
@@ -938,10 +938,16 @@ func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (bille
 	return billed, stopped
 }
 
-// foundingBillingWorker ticks hourly; the ledger refs make every tick after
-// the first on a bill day a no-op.
+// foundingBillingWorker bills once at boot, then every 15 minutes (the
+// subscription worker's cadence); the ledger refs make every tick after the
+// first on a bill day a no-op. The boot pass matters: every deploy restarts
+// the process and a free-plan instance spins down when idle, so a worker
+// that first ticked after an hour could go days without billing anyone.
 func (s *service) foundingBillingWorker(ctx context.Context) {
-	t := time.NewTicker(time.Hour)
+	bootCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	s.billFoundingMembers(bootCtx, time.Now())
+	cancel()
+	t := time.NewTicker(15 * time.Minute)
 	defer t.Stop()
 	for {
 		select {
