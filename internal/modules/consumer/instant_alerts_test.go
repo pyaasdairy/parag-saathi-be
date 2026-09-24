@@ -269,6 +269,65 @@ func TestInstantAlertNeverForAStoreThatIsNotClosingByTheClock(t *testing.T) {
 	none("round the clock")
 }
 
+// ── the closing alert offers an extension only when one is possible ───────
+//
+// Before: STORE_INSTANT_CLOSING always said "extend by 30 min, 1 h or 2 h",
+// also for a close at or past the 02:00 cap (an 18:00-02:00 window, a lane
+// already extended to 02:00, a 22:00-06:00 window), where extend answers 422
+// EXTEND_TOO_LATE.
+
+const ihNoExtendMessage = "It cannot be extended any further. Orders already placed are not affected."
+
+func TestInstantAlertOffersAnExtensionOnlyWhenOneIsPossible(t *testing.T) {
+	w, done, _, _ := ihAlertWorld(t)
+	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	ctx := context.Background()
+	store := w.storeID.Hex()
+	latest := func(at time.Time, headline, message string) {
+		t.Helper()
+		w.svc.instantAlertsTick(ctx, at)
+		notes := ihNotes(t, w, w.mgr.PartyID)
+		if len(notes) == 0 {
+			t.Fatalf("%s: no alert", at.In(istZone).Format("01-02 15:04"))
+		}
+		n := notes[len(notes)-1]
+		if n.TemplateKey != templateStoreInstantClosing || n.Params["headline"] != headline || n.Params["message"] != message {
+			t.Fatalf("%s: %s %q / %q, want %q / %q", at.In(istZone).Format("01-02 15:04"), n.TemplateKey, n.Params["headline"], n.Params["message"], headline, message)
+		}
+	}
+
+	// 18:00-02:00 closes at the cap: no extension is offered, and none is possible.
+	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000, InstantOpenMin: 1080, InstantCloseMin: 120})
+	latest(ihAt(24+1, 45), "Instant delivery closes at 2:00 AM", ihNoExtendMessage)
+	ihClock(w, ihAt(24+1, 50))
+	if code, e := ihOp(t, w, w.mgr, store, "extend", 30); code != 422 || e["code"] != "EXTEND_TOO_LATE" {
+		t.Fatalf("extend at 01:50 in an 18:00-02:00 window: %d %v", code, e)
+	}
+
+	// 22:00-06:00 closes past the cap.
+	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000, InstantOpenMin: 1320, InstantCloseMin: 360})
+	latest(ihAt(48+5, 45), "Instant delivery closes at 6:00 AM", ihNoExtendMessage)
+
+	// 07:00-22:00 already extended to 02:00: the alert before 02:00 offers none.
+	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000})
+	ihClock(w, ihAt(72+21, 50))
+	for _, want := range []time.Time{ihAt(96, 0), ihAt(96+2, 0)} {
+		if code, v := ihOp(t, w, w.mgr, store, "extend", 120); code != 200 || v["instantExtendedUntil"] != ihUTC(want) {
+			t.Fatalf("extend 120: %d %v, want %s", code, v["instantExtendedUntil"], ihUTC(want))
+		}
+	}
+	latest(ihAt(96+1, 45), "Instant delivery closes at 2:00 AM", ihNoExtendMessage)
+
+	// Unchanged where an extension is possible: 22:00, and an extended close before 02:00.
+	latest(ihAt(120+21, 45), "Instant delivery closes at 10:00 PM", ihClosingMessage)
+	ihClock(w, ihAt(120+21, 50))
+	if code, v := ihOp(t, w, w.mgr, store, "extend", 60); code != 200 {
+		t.Fatalf("extend 60: %d %v", code, v)
+	}
+	latest(ihAt(120+22, 45), "Instant delivery closes at 11:00 PM", ihClosingMessage)
+}
+
 // ── two instances ticking at once, then a restart: still exactly one ──────
 
 func TestInstantAlertIdempotentAcrossConcurrentTicksAndARestart(t *testing.T) {

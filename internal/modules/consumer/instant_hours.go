@@ -100,6 +100,25 @@ func instantClosesAt(z *zone, now time.Time) (time.Time, bool) {
 	return at.In(istZone), !at.IsZero()
 }
 
+// instantExtendBase is where an extension asked for at `now` would start (the
+// later of now, the close of the hours window now is in or last left, and the
+// current extension) and the latest it may run to: 02:00 IST the morning after
+// that window opened. base >= limit means no extension is possible.
+func instantExtendBase(z *zone, now time.Time) (base, limit time.Time) {
+	openAt, closeAt, _ := hoursWindowAt(z, now)
+	base = now
+	if closeAt.After(base) {
+		base = closeAt
+	}
+	if z.InstantExtendedUntil != nil && z.InstantExtendedUntil.After(base) {
+		base = *z.InstantExtendedUntil
+	}
+	oIST := openAt.In(istZone)
+	limit = time.Date(oIST.Year(), oIST.Month(), oIST.Day(), 0, 0, 0, 0, istZone).
+		AddDate(0, 0, 1).Add(instantExtendCapMin * time.Minute)
+	return base, limit
+}
+
 // ── repository ──────────────────────────────────────────────────────────────
 
 // setInstantOverride stores tonight's override on a store's zone: exactly one
@@ -163,17 +182,7 @@ func (s *service) extendInstant(ctx context.Context, actor auth.Actor, storeID s
 	if z.InstantPaused {
 		return nil, errUnprocessable("INSTANT_PAUSED", "instant is switched off for this store; turn it back on in the Zone tab first")
 	}
-	openAt, closeAt, _ := hoursWindowAt(z, now)
-	base := now
-	if closeAt.After(base) {
-		base = closeAt
-	}
-	if z.InstantExtendedUntil != nil && z.InstantExtendedUntil.After(base) {
-		base = *z.InstantExtendedUntil
-	}
-	oIST := openAt.In(istZone)
-	limit := time.Date(oIST.Year(), oIST.Month(), oIST.Day(), 0, 0, 0, 0, istZone).
-		AddDate(0, 0, 1).Add(instantExtendCapMin * time.Minute)
+	base, limit := instantExtendBase(z, now)
 	if !base.Before(limit) {
 		return nil, errUnprocessable("EXTEND_TOO_LATE", "instant can stay open until 2:00 AM at the latest")
 	}

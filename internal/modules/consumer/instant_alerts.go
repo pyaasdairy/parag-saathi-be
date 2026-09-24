@@ -24,7 +24,9 @@ import (
 //
 //   - STORE_INSTANT_CLOSING, 15 minutes before the lane closes (the saved
 //     hours' close, or the extended close after an extension, which gets its
-//     own alert): "Instant delivery closes at 10:00 PM" + how to extend;
+//     own alert): "Instant delivery closes at 10:00 PM" + how to extend, or,
+//     when extend would refuse (a close at or past the 02:00 cap), that it
+//     cannot be extended any further;
 //   - STORE_INSTANT_CLOSED, at the close itself (not when extended past it):
 //     "Instant delivery is now closed. It reopens at 7:00 AM."
 //
@@ -52,6 +54,9 @@ const (
 	instantClosedGrace = time.Hour
 
 	instantClosingMessage = "Keep instant open tonight: extend by 30 min, 1 h or 2 h from the Zone tab, or let it close. Orders already placed are not affected."
+	// instantClosingFinalMessage replaces it when extend would answer
+	// EXTEND_TOO_LATE: a close at or past the 02:00 cap.
+	instantClosingFinalMessage = "It cannot be extended any further. Orders already placed are not affected."
 )
 
 // ensureInstantAlertIndexes builds the exactly-once claim index: one alert per
@@ -196,6 +201,9 @@ func (s *service) raiseInstantAlert(ctx context.Context, z *zone, kind string, c
 	if kind == templateStoreInstantClosing {
 		params["headline"] = "Instant delivery closes at " + closeAt.In(istZone).Format("3:04 PM")
 		params["message"] = instantClosingMessage
+		if base, limit := instantExtendBase(z, now); !base.Before(limit) {
+			params["message"] = instantClosingFinalMessage // extend would refuse
+		}
 	} else {
 		reopen := nextInstantOpening(z, now)
 		params["headline"] = "Instant delivery is now closed"
