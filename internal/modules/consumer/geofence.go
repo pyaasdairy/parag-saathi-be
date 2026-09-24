@@ -180,11 +180,18 @@ type zone struct {
 	// switch. When instant is shut the consumer offers only the morning lane.
 	// InstantCloseMin==0 → hours never saved: the 07:00–22:00 IST the store
 	// console shows (effOpenMin/effCloseMin) is what is enforced.
-	InstantOpenMin  int      `bson:"instant_open_min"        json:"instantOpenMin"`
-	InstantCloseMin int      `bson:"instant_close_min"       json:"instantCloseMin"`
-	InstantPaused   bool     `bson:"instant_paused"          json:"instantPaused"`
-	IncludePincodes []string `bson:"include_pincodes,omitempty" json:"includePincodes,omitempty"`
-	ExcludePincodes []string `bson:"exclude_pincodes,omitempty" json:"excludePincodes,omitempty"`
+	InstantOpenMin  int  `bson:"instant_open_min"        json:"instantOpenMin"`
+	InstantCloseMin int  `bson:"instant_close_min"       json:"instantCloseMin"`
+	InstantPaused   bool `bson:"instant_paused"          json:"instantPaused"`
+	// Tonight-only overrides the store manager sets at closing time
+	// (instant_hours.go), both UTC moments that simply expire: an extension keeps
+	// instant open past its hours until InstantExtendedUntil; close-now shuts it
+	// until InstantClosedUntil (the next opening time) WITHOUT the persistent
+	// pause, so it reopens by itself. The console's PUT never touches them.
+	InstantExtendedUntil *time.Time `bson:"instant_extended_until,omitempty" json:"instantExtendedUntil,omitempty"`
+	InstantClosedUntil   *time.Time `bson:"instant_closed_until,omitempty"   json:"instantClosedUntil,omitempty"`
+	IncludePincodes      []string   `bson:"include_pincodes,omitempty" json:"includePincodes,omitempty"`
+	ExcludePincodes      []string   `bson:"exclude_pincodes,omitempty" json:"excludePincodes,omitempty"`
 	// Polygon rings ([]geoPt, lat/lng). Include = an allowed area beyond the
 	// circle (standard); exclude = a hole denied even inside a circle.
 	IncludePolygons [][]geoPt `bson:"include_polygons,omitempty" json:"includePolygons,omitempty"`
@@ -402,6 +409,10 @@ func effCloseMin(z *zone) int {
 // the ones the store console shows (effOpenMin/effCloseMin): a zone that never
 // saved hours (InstantCloseMin==0) is open 07:00–22:00 IST, not round the clock.
 // A store that wants instant all day saves 00:00–24:00 (0..1440).
+//
+// On top of the hours sit the manager's tonight-only overrides: an extension
+// keeps the lane open until InstantExtendedUntil, close-now shuts it until
+// InstantClosedUntil. The persistent pause beats both.
 func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt string) {
 	nowIST := now.In(istZone)
 	cur := nowIST.Hour()*60 + nowIST.Minute()
@@ -412,15 +423,16 @@ func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt st
 	} else { // overnight window (opens in the evening, closes after midnight)
 		withinHours = cur >= openMin || cur < closeMin
 	}
-	if withinHours && !z.InstantPaused {
+	closedNow := z.InstantClosedUntil != nil && now.Before(*z.InstantClosedUntil)
+	extended := z.InstantExtendedUntil != nil && now.Before(*z.InstantExtendedUntil)
+	if !z.InstantPaused && !closedNow && (withinHours || extended) {
 		return true, "", ""
 	}
-	// Next opening moment in IST (today if we are before today's open, else tomorrow).
-	oh, om := openMin/60, openMin%60
-	todayOpen := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), oh, om, 0, 0, istZone)
-	next := todayOpen
-	if !nowIST.Before(todayOpen) {
-		next = todayOpen.Add(24 * time.Hour)
+	// Next opening moment in IST (today if we are before today's open, else
+	// tomorrow); after a close-now, the first opening at or after its end.
+	next := nextInstantOpening(&z, now)
+	if closedNow && z.InstantClosedUntil.After(next) {
+		next = nextInstantOpening(&z, z.InstantClosedUntil.Add(-time.Nanosecond))
 	}
 	day := "today"
 	if next.YearDay() != nowIST.YearDay() || next.Year() != nowIST.Year() {
@@ -833,19 +845,28 @@ func (h *handler) getZone(w http.ResponseWriter, r *http.Request) {
 		// No zone yet → return editable OPEN defaults (not a 404) so the store
 		// console shows a blank editable form instead of an error state.
 		if ae, ok := err.(*apiError); ok && ae.status == http.StatusNotFound {
-			httpx.JSON(w, http.StatusOK, zoneView(nil, storeID))
+			httpx.JSON(w, http.StatusOK, zoneViewAt(nil, storeID, h.svc.now()))
 			return
 		}
 		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
-	httpx.JSON(w, http.StatusOK, zoneView(z, storeID))
+	httpx.JSON(w, http.StatusOK, zoneViewAt(z, storeID, h.svc.now()))
 }
 
 // zoneView emits a zone in BOTH unit systems (metres/camel + km/snake) with a
 // flat center, so the Saathi store console (km/snake) and any metres client read
 // it identically. nil → open defaults for a store with no zone configured yet.
 func zoneView(z *zone, storeID string) map[string]any {
+	return zoneViewAt(z, storeID, time.Now())
+}
+
+// zoneViewAt is zoneView with the instant lane's live state at `now` (additive
+// keys, camel + snake): instantOpenNow; instantClosesAt, when the open lane
+// closes (null when shut or open round the clock); and tonight's overrides
+// instantExtendedUntil / instantClosedUntil while they still run (RFC3339 UTC,
+// else null).
+func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
 	if z == nil {
 		return map[string]any{
 			"storeId": storeID, "active": false, "configured": false,
@@ -858,10 +879,29 @@ func zoneView(z *zone, storeID string) map[string]any {
 			"monsoon_enabled": false, "monsoon_rupees": 15,
 			"instantOpenMin": 420, "instantCloseMin": 1320, "instantPaused": false,
 			"instant_open_min": 420, "instant_close_min": 1320, "instant_paused": false,
+			"instantOpenNow": false, "instant_open_now": false,
+			"instantClosesAt": nil, "instant_closes_at": nil,
+			"instantExtendedUntil": nil, "instant_extended_until": nil,
+			"instantClosedUntil": nil, "instant_closed_until": nil,
 		}
 	}
 	c := z.centerPt()
+	openNow, _, _ := instantWindow(*z, now)
+	var closesAt, extendedUntil, closedUntil any
+	if at, ok := instantClosesAt(z, now); ok {
+		closesAt = at.UTC().Format(time.RFC3339)
+	}
+	if z.InstantExtendedUntil != nil && now.Before(*z.InstantExtendedUntil) {
+		extendedUntil = z.InstantExtendedUntil.UTC().Format(time.RFC3339)
+	}
+	if z.InstantClosedUntil != nil && now.Before(*z.InstantClosedUntil) {
+		closedUntil = z.InstantClosedUntil.UTC().Format(time.RFC3339)
+	}
 	return map[string]any{
+		"instantOpenNow": openNow, "instant_open_now": openNow,
+		"instantClosesAt": closesAt, "instant_closes_at": closesAt,
+		"instantExtendedUntil": extendedUntil, "instant_extended_until": extendedUntil,
+		"instantClosedUntil": closedUntil, "instant_closed_until": closedUntil,
 		"storeId": z.StoreID, "active": z.Active, "configured": true,
 		"center":          map[string]float64{"lat": c.Lat, "lng": c.Lng},
 		"standardRadiusM": z.StandardRadiusM, "instantRadiusM": z.InstantRadiusM,
@@ -893,5 +933,5 @@ func (h *handler) putZone(w http.ResponseWriter, r *http.Request) {
 	// Echo the SAME view shape as GET — the Saathi console re-hydrates its form
 	// from this response, and the raw struct (GeoJSON center, metre radii)
 	// blanked the pin + radii after every Save.
-	httpx.JSON(w, http.StatusOK, zoneView(z, chi.URLParam(r, "storeId")))
+	httpx.JSON(w, http.StatusOK, zoneViewAt(z, chi.URLParam(r, "storeId"), h.svc.now()))
 }

@@ -434,6 +434,11 @@ func Register(r chi.Router, d *deps.Deps) {
 				// area (instant + standard circles, include/exclude pincodes + polygons).
 				sm.Get("/stores/{storeId}/zone", h.getZone)
 				sm.Put("/stores/{storeId}/zone", h.putZone)
+				// Tonight-only instant overrides at closing time (instant_hours.go):
+				// keep instant open 30/60/120 min longer, or close it until the
+				// next opening time without the persistent pause.
+				sm.Post("/stores/{storeId}/zone/instant/extend", h.extendInstant)
+				sm.Post("/stores/{storeId}/zone/instant/close-now", h.closeInstantNow)
 			})
 
 			// Where riders collect stock before a round. Both consoles read it;
