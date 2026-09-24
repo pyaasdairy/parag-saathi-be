@@ -259,14 +259,29 @@ func (s *service) answerComplaint(ctx context.Context, filter bson.D, in complai
 	return &updated, nil
 }
 
-// updateComplaint answers the complaint the operator names by its reference -
-// the code the member quotes on the phone.
+// updateComplaint answers the complaint the operator names: by its reference
+// (the code the member quotes on the phone) or by its complaint id (cmp_...,
+// the row's own id on the queue). A reference is unique PER MEMBER only (rule
+// 1), so one that two members hold is refused rather than answered on
+// whichever row comes first: the resolution is read by the member verbatim.
 func (s *service) updateComplaint(ctx context.Context, ref string, in complaintUpdateInput) (*complaint, error) {
-	ref = strings.ToUpper(strings.TrimSpace(ref))
+	ref = strings.TrimSpace(ref)
+	if strings.HasPrefix(ref, "cmp_") {
+		return s.answerComplaint(ctx, bson.D{{Key: "complaint_id", Value: ref}}, in)
+	}
+	ref = strings.ToUpper(ref)
 	if ref == "" {
 		return nil, errBadRequest("a complaint reference is required")
 	}
-	return s.answerComplaint(ctx, bson.D{{Key: "ref", Value: ref}}, in)
+	byRef := bson.D{{Key: "ref", Value: ref}}
+	n, err := s.repo.complaints().CountDocuments(ctx, byRef, options.Count().SetLimit(2))
+	if err != nil {
+		return nil, errInternal("could not check the complaint register")
+	}
+	if n > 1 {
+		return nil, errConflict("AMBIGUOUS_REF", "more than one member holds this reference; answer it by its complaint id")
+	}
+	return s.answerComplaint(ctx, byRef, in)
 }
 
 // listAllComplaints is the support queue, newest first, optionally filtered

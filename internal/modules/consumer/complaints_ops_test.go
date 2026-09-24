@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 func opsComplaintCall(t *testing.T, w *chainWorld, method, path, body string) (int, map[string]any) {
@@ -72,5 +73,62 @@ func TestOpsComplaintRoutesSpeakTheOperatorEnvelope(t *testing.T) {
 		if code != c.status || !ok || e["code"] != c.code || e["message"] == "" || e["message"] == nil {
 			t.Errorf("%s %s: %d %v, want %d {error:{code:%s,message}}", c.method, c.path, code, body, c.status, c.code)
 		}
+	}
+}
+
+// R4-05: a ref is unique PER MEMBER (the app mints PYS- plus five letters, so
+// two members hold the same code after a few thousand complaints), but the
+// operator PATCH resolved by ref alone and FindOneAndUpdate took whichever row
+// came first: the resolution the member reads verbatim, and E-06, could reach
+// the wrong customer. A ref two members share is now refused, and the
+// globally unique complaint id (cmp_...) names the row exactly.
+func TestOpsComplaintSharedRefIsRefusedAndTheIDIsExact(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	a := w.customer(t, "9000005502", 0)
+	b := w.customer(t, "9000005503", 0)
+	ca, err := w.svc.fileComplaint(ctx, a, complaintInput{Ref: "PYS-AAAAA", Category: "late", Detail: "a's complaint"})
+	if err != nil {
+		t.Fatalf("file a: %v", err)
+	}
+	cb, err := w.svc.fileComplaint(ctx, b, complaintInput{Ref: "PYS-AAAAA", Category: "missing", Detail: "b's complaint"})
+	if err != nil {
+		t.Fatalf("file b: %v", err)
+	}
+
+	code, body := opsComplaintCall(t, w, http.MethodPatch, "/ops/complaints/PYS-AAAAA", `{"status":"resolved","resolution":"Refunded to your wallet."}`)
+	if e, _ := body["error"].(map[string]any); code != http.StatusConflict || e["code"] != "AMBIGUOUS_REF" {
+		t.Fatalf("a ref two members share: %d %v, want 409 AMBIGUOUS_REF", code, body)
+	}
+	for _, cid := range []primitive.ObjectID{a, b} {
+		mine, _ := w.svc.listComplaints(ctx, cid)
+		if len(mine) != 1 || mine[0].Status != complaintOpen || mine[0].Resolution != "" {
+			t.Fatalf("a refused update changed a member's complaint: %+v", mine)
+		}
+	}
+
+	code, body = opsComplaintCall(t, w, http.MethodPatch, "/ops/complaints/"+cb.ID, `{"status":"resolved","resolution":"Refunded to your wallet."}`)
+	if row, _ := body["data"].(map[string]any); code != http.StatusOK || row["id"] != cb.ID {
+		t.Fatalf("update by complaint id: %d %v", code, body)
+	}
+	mineA, _ := w.svc.listComplaints(ctx, a)
+	mineB, _ := w.svc.listComplaints(ctx, b)
+	if mineA[0].Status != complaintOpen || mineA[0].Resolution != "" || mineB[0].Status != complaintResolved {
+		t.Fatalf("the id must reach exactly its own row: a=%+v b=%+v", mineA[0], mineB[0])
+	}
+	if n := len(crmEventsOf(t, w.db, a, "complaint.resolved")); n != 0 {
+		t.Fatalf("E-06 went to the wrong member: %d events", n)
+	}
+	if n := len(crmEventsOf(t, w.db, b, "complaint.resolved")); n != 1 {
+		t.Fatalf("complaint.resolved for the member resolved: %d", n)
+	}
+	_ = ca
+	// A ref only one member holds still resolves by ref, as before.
+	if _, err := w.svc.fileComplaint(ctx, a, complaintInput{Ref: "PYS-SOLO1", Category: "late", Detail: "only mine"}); err != nil {
+		t.Fatalf("file solo: %v", err)
+	}
+	if code, body := opsComplaintCall(t, w, http.MethodPatch, "/ops/complaints/pys-solo1", `{"status":"in_review"}`); code != http.StatusOK {
+		t.Fatalf("a unique ref: %d %v", code, body)
 	}
 }

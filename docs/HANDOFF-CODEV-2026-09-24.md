@@ -803,7 +803,9 @@ to the GTG review; the Mongo database list is back to the four names.
 `?status=`, unknown status -> 400; `{data:[...]}` envelope, newest first, limit 500) and
 `PATCH /consumer/ops/complaints/{ref}` `{status, resolution}` (resolution written verbatim
 to the member; `status: resolved` emits `complaint.resolved` through `answerComplaint`)
-exist at `module.go:355-356` in the STORE_MANAGER/SUPER_ADMIN group; Saathi has no caller
+exist at `module.go:355-356` in the STORE_MANAGER/SUPER_ADMIN group (the `{ref}` segment
+also takes the row's complaint id `cmp_...`, and a ref two members share answers 409
+`AMBIGUOUS_REF`, so the screen should send the row's `id`); Saathi has no caller
 (`grep -rn ops/complaints lib/` is empty; source: 06). Starting point: `lib/api/store_console_api.dart`
 (same `ApiClient` unwrap of `{data}`), a list + resolve screen under the store console.
 Acceptance: an operator resolves a complaint the consumer harness filed and the consumer's
