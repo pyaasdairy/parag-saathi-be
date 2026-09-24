@@ -985,6 +985,9 @@
    "category": "transactional",
    "delivery": {
     "primary": "whatsapp",
+    "parallel": [
+     "push"
+    ],
     "fallback": [
      {
       "channel": "sms",
