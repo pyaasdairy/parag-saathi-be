@@ -156,7 +156,7 @@ services:
       # -- Referrals + Founding Family (referrals.go, founding.go) --
       # Money in PAISE; the ERP's FOUNDING-99 / DELIVERY-FEE prices win over
       # the fallbacks once the Dolibarr sync sees them. See .env.example.
-      - key: REFERRAL_REWARD_PAISE # Rs 100 to each side on the first delivery
+      - key: REFERRAL_REWARD_PAISE # Rs 100 to each side on the first paid delivery; 0 stops paying
         value: "10000"
       - key: FOUNDING_PRICE_MONTH_PAISE # Rs 99 seat and monthly bill
         value: "9900"
