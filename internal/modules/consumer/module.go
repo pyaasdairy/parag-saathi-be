@@ -113,6 +113,18 @@ func Register(r chi.Router, d *deps.Deps) {
 		defer cancel()
 		svc.ensureCRMIndexes(ctx)
 	}()
+	// Task lines written by the pre-union backend carry no product_id or
+	// variant; copy them from the order for every task a console still shows
+	// (task_items_backfill.go). Idempotent and non-fatal, like the indexes.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if n, err := svc.backfillLegacyTaskItems(ctx); err != nil {
+			log.Warn("legacy task items backfill failed (continuing)", "err", err)
+		} else if n > 0 {
+			log.Info("legacy task items backfilled with product_id and variant", "tasks", n)
+		}
+	}()
 	go svc.crmWorker(context.Background())
 	// Second recovery net for captured-but-unconfirmed payments (the first is
 	// the webhook above). Inert without a real Razorpay key secret.
