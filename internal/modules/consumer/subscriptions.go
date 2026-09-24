@@ -874,7 +874,7 @@ func (s *service) patchSubscriptionAt(ctx context.Context, consumerID primitive.
 //                then the store delivery task is created. From here edits no
 //                longer touch it: a change made after noon applies to the day
 //                after tomorrow. An unfunded preview is retried every tick
-//                until its day passes.
+//                until its route leaves (05:00 on its day), then expires.
 //   05:00-07:30  The morning route delivers; money settles on delivery.
 //   later        MISSED - a locked order whose day passed with no delivery is
 //                closed (closeMissedSubscriptionOrders) so it never reads as
@@ -893,6 +893,19 @@ func lockedThroughDay(now time.Time) string {
 		return addDaysIST(today, 1)
 	}
 	return today
+}
+
+// routeStartHourIST is the hour (IST) a delivery day's morning route leaves
+// the store (the 05:00-07:30 window). From it the day is past locking.
+const routeStartHourIST = 5
+
+// routeStartFor is the instant a delivery day's morning route leaves.
+func routeStartFor(dayISO string) time.Time {
+	d, ok := parseDay(dayISO)
+	if !ok {
+		return time.Time{}
+	}
+	return d.Add(routeStartHourIST * time.Hour)
 }
 
 // firstEditableDay is the first delivery day still open to changes at now.
@@ -1157,6 +1170,15 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 // enforced (unfunded -> left for the next tick), then locked with its store
 // task. Returns whether this call locked it.
 func (s *service) lockSubPreview(ctx context.Context, o *order, sub *subscription, now time.Time) bool {
+	// A day whose morning route has left is past locking: the preview
+	// expires. Retried until then (an unfunded preview at the cut-off, a
+	// member topping up in the night) it still makes the round; after it, a
+	// task minted for a round already gone was closed as missed the next noon
+	// and the member told the day was missed about 30 hours later.
+	if rs := routeStartFor(o.ScheduledFor); !rs.IsZero() && !now.Before(rs) {
+		s.cancelScheduledSubOrder(ctx, o)
+		return false
+	}
 	// The tick runs every 15 minutes, so it can reach a day after its lock
 	// moment has passed. A member change stamped after that moment belongs to
 	// the next editable day (the noon rule), so the preview locks as it
