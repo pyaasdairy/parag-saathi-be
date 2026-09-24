@@ -81,6 +81,10 @@ func (r *repository) raiseLowStock(ctx context.Context, storeID string, body low
 			}},
 			{Key: "status", Value: domain.NotificationQueued},
 			{Key: "queued_at", Value: now},
+			// Deliberate re-arm: a raise carries a NEW low set (Saathi's store
+			// home posts only when the low SKUs or their counts change), so
+			// the admin's alert turns unread again with the new summary.
+			// POST /notifications/{id}/read treats this null as unread.
 			{Key: "read_at", Value: nil},
 		}}}
 		if _, err := r.notifications.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true)); err != nil {

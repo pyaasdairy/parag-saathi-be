@@ -207,12 +207,20 @@ func (r *repository) listNotificationsForParty(ctx context.Context, partyID prim
 // (the party filter makes cross-party reads impossible by construction) and
 // returns the updated document. Already-read documents are returned as-is —
 // the operation is idempotent; a foreign or unknown id is NotFound.
+//
+// Unread is read_at MISSING or NULL: the identity/platformops writers leave
+// it out, while the operator alerts (STORE_LOW_STOCK, STORE_INSTANT_CLOSING /
+// _CLOSED, the CRM operator notices) write an explicit read_at: null. The
+// update is a pipeline $ifNull, which treats both alike and keeps the FIRST
+// read time on concurrent/repeated reads. ($min could not: BSON orders null
+// below every date, so $min kept the null and those alerts never read.)
 func (r *repository) markNotificationRead(ctx context.Context, id, partyID primitive.ObjectID, now time.Time) (*StoredNotification, error) {
 	var n StoredNotification
 	err := r.notifications.FindOneAndUpdate(ctx,
 		bson.D{{Key: "_id", Value: id}, {Key: "party_id", Value: partyID}},
-		// $min keeps the FIRST read time on concurrent/repeated reads.
-		bson.D{{Key: "$min", Value: bson.D{{Key: "read_at", Value: now}}}},
+		mongo.Pipeline{bson.D{{Key: "$set", Value: bson.D{
+			{Key: "read_at", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$read_at", now}}}},
+		}}}},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	).Decode(&n)
 	if errors.Is(err, mongo.ErrNoDocuments) {
