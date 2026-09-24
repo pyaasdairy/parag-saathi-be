@@ -18,7 +18,9 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
   meanwhile (an order cancelled, a plan changed back, a failure undone, a failed
   payment paid by a retry). Scheduled triggers fire on the first tick at or after the time shown.
   Every message is claimed exactly once per (trigger, member, IST day, order or
-  complaint), so two orders on one day each get their own message.
+  complaint), so two orders on one day each get their own message; a trigger
+  capped per event (per_order, per_complaint, per_credit, ...) claims its order or
+  complaint once whatever the day, so a replay on a later day sends nothing.
 - **Channels, in order.** The first is the primary; `+x` runs in parallel; `then x` is a
   fallback taken only when the channel before it is unavailable or refused. The in-app
   inbox is not listed because it ALWAYS gets the message (except human_call-only E-05,

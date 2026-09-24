@@ -474,6 +474,18 @@ func (s *service) crmClaimDispatch(ctx context.Context, t crmTrigger, consumerID
 // order, a per_complaint trigger once per complaint; scope "" is the plain
 // per-day claim every scheduled trigger keeps.
 func (s *service) crmClaimDispatchScoped(ctx context.Context, t crmTrigger, consumerID primitive.ObjectID, day, scope string) (*crmDispatchRow, bool) {
+	// A trigger capped per event (per_order, per_complaint, per_credit ...)
+	// speaks once per scope, whatever the day: the same product event drained
+	// again on a later IST day (a lease handed back across midnight, an emitter
+	// retry) is already handled. The day stays in the key for everything else.
+	if scope != "" && crmCapPerEvent(t) {
+		n, err := s.repo.crmDispatchCol().CountDocuments(ctx, bson.D{
+			{Key: "trigger_id", Value: t.ID}, {Key: "consumer_id", Value: consumerID}, {Key: "scope_key", Value: scope},
+		}, options.Count().SetLimit(1))
+		if err != nil || n > 0 {
+			return nil, false
+		}
+	}
 	row := &crmDispatchRow{
 		TriggerID: t.ID, ConsumerID: consumerID, ISTDay: day, ScopeKey: scope,
 		Category: t.Category, Template: t.Template.String(), Status: "CLAIMED", CreatedAt: time.Now().UTC(),
@@ -746,6 +758,19 @@ func (s *service) crmStandardParams(ctx context.Context, consumerID primitive.Ob
 		p["DATE"] = o.FirstDeliveryAt.In(istZone).AddDate(0, 0, crmOfferConfig().Pack2GraceDays).Format("2 Jan")
 	}
 	return p
+}
+
+// crmCapPerEvent reports a frequency cap that counts per product event (one
+// message per order, complaint, credit, failure, plan, line or change), as
+// opposed to per day, per quarter or a running total.
+func crmCapPerEvent(t crmTrigger) bool {
+	for _, k := range []string{"per_order", "per_order_line", "per_complaint", "per_credit", "per_failure",
+		"per_subscription", "per_event", "per_change", "per_flag"} {
+		if _, ok := t.FrequencyCap[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func crmCapLimit(t crmTrigger) int {
