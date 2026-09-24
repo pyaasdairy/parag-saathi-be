@@ -36,17 +36,6 @@ func chainBackdateSubscription(t *testing.T, w *chainWorld, sub *subscription, a
 	sub.ChangedAt, sub.CreatedAt = at, at
 }
 
-// chainStampChange sets only the change moment: the tests drive the sweep on
-// a simulated clock, while pause/resume/patch stamp the real one.
-func chainStampChange(t *testing.T, w *chainWorld, subID string, at time.Time) {
-	t.Helper()
-	if _, err := w.db.Collection(collSubscriptions).UpdateOne(context.Background(),
-		bson.D{{Key: "subscription_id", Value: subID}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "changed_at", Value: at.UTC()}}}}); err != nil {
-		t.Fatalf("stamp: %v", err)
-	}
-}
-
 func istDayAt(day string, hour, min int) time.Time {
 	d, ok := parseDay(day)
 	if !ok {
@@ -150,16 +139,15 @@ func TestNoonLockLifecycle(t *testing.T) {
 
 	// 10:00: a qty edit reconciles the preview; the store sees it as upcoming.
 	qty := 3
-	if _, err := w.svc.patchSubscription(ctx, cid, sub.SubscriptionID, struct {
+	if _, err := w.svc.patchSubscriptionAt(ctx, cid, sub.SubscriptionID, struct {
 		Qty          *int             `json:"qty"`
 		Frequency    *string          `json:"frequency"`
 		DeliverySlot *string          `json:"delivery_slot"`
 		StartDate    *string          `json:"start_date"`
 		Vacations    *[]vacationRange `json:"vacations"`
-	}{Qty: &qty}); err != nil {
+	}{Qty: &qty}, istDayAt(D, 10, 0)); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 10, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 10, 0))
 	prev = liveSubOrder(t, w, sub.SubscriptionID, D1)
 	if prev.Items[0].Qty != 3 || prev.Total != 87 || prev.SubLockedAt != "" {
@@ -192,16 +180,15 @@ func TestNoonLockLifecycle(t *testing.T) {
 
 	// 13:00: a qty edit after noon leaves tomorrow alone, moves the day after.
 	qty = 1
-	if _, err := w.svc.patchSubscription(ctx, cid, sub.SubscriptionID, struct {
+	if _, err := w.svc.patchSubscriptionAt(ctx, cid, sub.SubscriptionID, struct {
 		Qty          *int             `json:"qty"`
 		Frequency    *string          `json:"frequency"`
 		DeliverySlot *string          `json:"delivery_slot"`
 		StartDate    *string          `json:"start_date"`
 		Vacations    *[]vacationRange `json:"vacations"`
-	}{Qty: &qty}); err != nil {
+	}{Qty: &qty}, istDayAt(D, 13, 0)); err != nil {
 		t.Fatalf("patch 2: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 13, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 13, 0))
 	if o := liveSubOrder(t, w, sub.SubscriptionID, D1); o.Items[0].Qty != 3 {
 		t.Fatalf("an edit after noon changed tomorrow's locked order: %+v", o.Items)
@@ -212,10 +199,9 @@ func TestNoonLockLifecycle(t *testing.T) {
 
 	// 14:00: pause after noon. Tomorrow still delivers; the day after is
 	// cancelled and its day released.
-	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "pause"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, cid, sub.SubscriptionID, "pause", istDayAt(D, 14, 0)); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 14, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 14, 0))
 	if o := liveSubOrder(t, w, sub.SubscriptionID, D1); o == nil || o.Status != "placed" {
 		t.Fatalf("a pause after noon must not touch tomorrow: %+v", o)
@@ -225,10 +211,9 @@ func TestNoonLockLifecycle(t *testing.T) {
 	}
 	// 15:00: resume after noon. Nothing new for tomorrow (already live);
 	// the day after tomorrow comes back, once.
-	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "resume"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, cid, sub.SubscriptionID, "resume", istDayAt(D, 15, 0)); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D, 15, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 15, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 15, 15))
 	for _, day := range []string{D1, D2} {
@@ -244,18 +229,16 @@ func TestNoonLockLifecycle(t *testing.T) {
 	// A pause BEFORE noon does take tomorrow: on D1 at 09:00 pause, D2's
 	// preview goes and its claim is released; resume at 10:00 brings it back;
 	// the D1 morning's own order is untouched throughout.
-	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "pause"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, cid, sub.SubscriptionID, "pause", istDayAt(D1, 9, 0)); err != nil {
 		t.Fatalf("pause 2: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D1, 9, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D1, 9, 0))
 	if liveSubOrder(t, w, sub.SubscriptionID, D2) != nil {
 		t.Fatalf("a pause before noon must cancel tomorrow's preview")
 	}
-	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "resume"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, cid, sub.SubscriptionID, "resume", istDayAt(D1, 10, 0)); err != nil {
 		t.Fatalf("resume 2: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, istDayAt(D1, 10, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D1, 10, 0))
 	if o := liveSubOrder(t, w, sub.SubscriptionID, D2); o == nil || o.SubLockedAt != "" {
 		t.Fatalf("a resume before noon re-previews tomorrow: %+v", o)
@@ -523,21 +506,18 @@ func TestNoonLockStepIgnoresEditsAfterTheCutOff(t *testing.T) {
 	}
 
 	// 11:55: one member pauses before the cut-off.
-	if _, err := w.svc.setSubscriptionStatus(ctx, earlyCID, early.SubscriptionID, "pause"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, earlyCID, early.SubscriptionID, "pause", istDayAt(D, 11, 55)); err != nil {
 		t.Fatalf("pause 11:55: %v", err)
 	}
-	chainStampChange(t, w, early.SubscriptionID, istDayAt(D, 11, 55))
 	// 12:05: one pauses and one doubles the qty, after the cut-off, and no
 	// tick has run since 09:00.
-	if _, err := w.svc.setSubscriptionStatus(ctx, pausedCID, paused.SubscriptionID, "pause"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, pausedCID, paused.SubscriptionID, "pause", istDayAt(D, 12, 5)); err != nil {
 		t.Fatalf("pause 12:05: %v", err)
 	}
-	chainStampChange(t, w, paused.SubscriptionID, istDayAt(D, 12, 5))
 	two := 2
-	if _, err := w.svc.patchSubscription(ctx, editedCID, edited.SubscriptionID, patch{Qty: &two}); err != nil {
+	if _, err := w.svc.patchSubscriptionAt(ctx, editedCID, edited.SubscriptionID, patch{Qty: &two}, istDayAt(D, 12, 5)); err != nil {
 		t.Fatalf("patch 12:05: %v", err)
 	}
-	chainStampChange(t, w, edited.SubscriptionID, istDayAt(D, 12, 5))
 
 	// 12:15: the first tick after noon.
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 15))

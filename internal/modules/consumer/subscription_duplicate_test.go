@@ -62,15 +62,13 @@ func TestSimpleDeliverySweepNeverDuplicatesADay(t *testing.T) {
 	}
 	// A pause after noon spares tomorrow (locked) and cancels the day after,
 	// releasing its claim; resuming schedules the day after again — once.
-	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "pause"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, cid, sub.SubscriptionID, "pause", base.Add(3*time.Hour)); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, base.Add(3*time.Hour))
 	w.svc.sweepSubscriptionOrders(ctx, base.Add(3*time.Hour))
-	if _, err := w.svc.setSubscriptionStatus(ctx, cid, sub.SubscriptionID, "resume"); err != nil {
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, cid, sub.SubscriptionID, "resume", base.Add(3*time.Hour+15*time.Minute)); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	chainStampChange(t, w, sub.SubscriptionID, base.Add(3*time.Hour+15*time.Minute))
 	w.svc.sweepSubscriptionOrders(ctx, base.Add(3*time.Hour+15*time.Minute))
 	w.svc.sweepSubscriptionOrders(ctx, base.Add(3*time.Hour+30*time.Minute))
 	for _, day := range []string{tomorrow, dayAfter} {
