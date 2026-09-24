@@ -12,6 +12,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -53,6 +54,11 @@ func TestCRMD09DeliveryFailedReachesTheMember(t *testing.T) {
 		t.Fatalf("storeCancelDelivery: %v", err)
 	}
 	w.svc.crmProcessEvents(ctx)
+	// D-09 waits out the rider's undo window (PT15M) before it is sent.
+	if got := crmDispatchScopes(t, w.db, cid, "D-09"); len(got) != 0 {
+		t.Fatalf("D-09 must wait the undo window: %v", got)
+	}
+	w.svc.crmFireDueSchedules(ctx, time.Now().Add(riderUndoWindow+time.Minute))
 
 	got := crmDispatchScopes(t, w.db, cid, "D-09")
 	if len(got) != 2 || got[o1.OrderID] != "SENT" || got[o2.OrderID] != "SENT" {
@@ -116,5 +122,60 @@ func TestCRMD09DeliveryFailedReachesTheMember(t *testing.T) {
 	}
 	if got := crmDispatchScopes(t, w.db, cid, "D-06"); len(got) != 0 {
 		t.Fatalf("D-06 must not fire for a failed order: %v", got)
+	}
+}
+
+// R1-04: a rider who mis-taps "not delivered" can undo it for 15 minutes,
+// which walks the order back to out_for_delivery. D-09 used to go out on the
+// next worker tick, so the member read "Not delivered ... call support" next
+// to "Delivered" for the same order. D-09 now waits out the undo window and is
+// dropped when the order is live again by the time it comes due.
+func TestCRMD09WithdrawnWhenTheRiderUndoesTheFailure(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000007602", 1000)
+	w.svc.crmProcessEvents(ctx)
+
+	o, err := w.svc.createOrder(ctx, cid.Hex(), orderInput{
+		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Variant: "500ml", Qty: 2, Price: 35}},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
+		Lane: "instant", Priority: "normal", Geo: &geoPoint{Lat: 26.7712, Lng: 81.0123},
+	})
+	if err != nil {
+		t.Fatalf("createOrder: %v", err)
+	}
+	task := chainTaskFor(t, w, o.OrderID)
+	if _, err := w.svc.claimOfferedDelivery(ctx, w.rider, task.ID); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := w.svc.pickupDelivery(ctx, w.rider, task.ID); err != nil {
+		t.Fatalf("pickup: %v", err)
+	}
+	if _, err := w.svc.failDelivery(ctx, w.rider, task.ID, "CUSTOMER_UNAVAILABLE | rang twice | photo=nd/a.jpg"); err != nil {
+		t.Fatalf("failDelivery: %v", err)
+	}
+	w.svc.crmProcessEvents(ctx) // the worker's next tick, well inside the undo window
+	if code := riderUndo(t, w, task.ID); code != 200 {
+		t.Fatalf("rider undo: %d", code)
+	}
+	if st := w.orderByID(t, o.OrderID).Status; st != "out_for_delivery" {
+		t.Fatalf("order after the undo: %q", st)
+	}
+	if _, err := w.svc.deliverDelivery(ctx, w.rider, task.ID, deliverInput{ProofPhoto: "https://x/p.jpg", Geo: &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true}); err != nil {
+		t.Fatalf("deliver after the undo: %v", err)
+	}
+	w.svc.crmProcessEvents(ctx)
+	w.svc.crmFireDueSchedules(ctx, time.Now().Add(riderUndoWindow+time.Minute))
+
+	if n := inboxCount(t, w.db, cid, "D-09"); n != 0 {
+		t.Fatalf("D-09 reached the member for an order that was then delivered: %d rows", n)
+	}
+	if n := inboxCount(t, w.db, cid, "D-06"); n != 1 {
+		t.Fatalf("D-06 rows = %d, want 1", n)
+	}
+	rows := crmScheduleRows(t, w.db, cid, "D-09")
+	if len(rows) != 1 || rows[0].Status != "SKIPPED" {
+		t.Fatalf("the D-09 schedule must be skipped once the order is live again: %+v", rows)
 	}
 }

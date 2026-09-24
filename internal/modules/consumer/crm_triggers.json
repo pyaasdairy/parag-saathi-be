@@ -1478,7 +1478,7 @@
    "phase": 1,
    "kind": "event",
    "event": "order.failed",
-   "delay": "PT0S",
+   "delay": "PT15M",
    "conditions": [],
    "segments": [
     "*"
@@ -1507,7 +1507,7 @@
    "corrections": [
     "C-01"
    ],
-   "note": "Added 24 September 2026. The backend emits order.failed when a rider marks a task not delivered or the store cancels it; the in-app inbox always carries this, then push, WhatsApp, SMS. Money moves only at delivery, so 'nothing has been charged' is always true. [REASON] is the rider's picklist label only, never the evidence remark."
+   "note": "Added 24 September 2026. The backend emits order.failed when a rider marks a task not delivered or the store cancels it; the in-app inbox always carries this, then push, WhatsApp, SMS. Money moves only at delivery, so 'nothing has been charged' is always true. [REASON] is the rider's picklist label only, never the evidence remark. Held for the rider's 15-minute undo window (delay PT15M) and dropped at fire time when the order is no longer cancelled (an undo or a store reassign walked it back)."
   },
   {
    "id": "E-01",

@@ -165,11 +165,24 @@ func (s *service) crmFireSchedule(ctx context.Context, row crmSchedule, now time
 
 // crmEventStale reports whether the product event a delayed trigger was
 // queued for has been undone meanwhile: the order it names is cancelled (or
-// gone). The failure topics are exempt, since a cancelled order is exactly
-// what they announce.
+// gone). The failure topics are exempt from that rule, since a cancelled
+// order is exactly what they announce; order.failed is the reverse (below).
 func crmEventStale(e *crmEventCtx) (bool, string) {
 	switch e.ev.Topic {
-	case "order.failed", "order.line_cancelled":
+	case "order.line_cancelled":
+		return false, ""
+	case "order.failed":
+		// D-09 is held through the rider's undo window. The failure it
+		// announces is stale once the order is no longer cancelled: the rider
+		// undid the marking or the store reassigned the task (both walk the
+		// order back), and it may already be delivered.
+		o := e.order()
+		if o == nil {
+			return true, "order no longer exists"
+		}
+		if o.Status != "cancelled" {
+			return true, fmt.Sprintf("order %s is %s again: the failure was undone", o.OrderID, o.Status)
+		}
 		return false, ""
 	}
 	if id, _ := e.ev.Payload["order_id"].(string); strings.TrimSpace(id) == "" {
