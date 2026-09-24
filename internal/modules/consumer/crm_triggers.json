@@ -2604,7 +2604,9 @@
    "event": "serviceability.checked",
    "delay": "PT0S",
    "conditions": [
-    "serviceability.in_zone == false"
+    "serviceability.in_zone == false",
+    "serviceability.has_orders == false",
+    "serviceability.has_serviceable_address == false"
    ],
    "segments": [
     "waitlist_out_of_area"

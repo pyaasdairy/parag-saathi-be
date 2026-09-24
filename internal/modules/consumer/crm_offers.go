@@ -492,9 +492,7 @@ func (s *service) crmSelfEnrol(ctx context.Context, consumerID primitive.ObjectI
 	if !sv.Serviceable {
 		// W-08 (serviceability.checked): the signed-in member asked and the
 		// answer is no; the trigger's per_customer cap makes it one message ever.
-		s.emitCRMEvent(ctx, "serviceability.checked", consumerID, map[string]any{
-			"in_zone": false, "pincode": addr.Pincode, "source": "enrol",
-		})
+		s.crmEmitOutOfArea(ctx, consumerID, addr.Pincode, "enrol")
 		return nil, errUnprocessable("NOT_SERVICEABLE", "we don't deliver to this address yet — join the waitlist and the offer stays available for you")
 	}
 	// Abuse hash + audit fields derive from the STORED address so a self and a
@@ -506,6 +504,58 @@ func (s *service) crmSelfEnrol(ctx context.Context, consumerID primitive.ObjectI
 		in.AssetType = "self"
 	}
 	return s.crmEnrolCore(ctx, "self:"+consumerID.Hex(), acct, addr, in, "self", time.Now())
+}
+
+// crmEmitOutOfArea writes serviceability.checked {in_zone: false} for a
+// signed-in member whose check came back out of zone (the self-enrol refusal,
+// the waitlist form sent with a session). W-08 answers it with "We don't
+// deliver to your area yet ... the only message you'll get from us", which is
+// true only for a member we cannot serve, so the payload carries the two
+// facts its conditions read, decided now:
+//
+//   - has_orders: the member has any order at all (orders are only taken
+//     where we deliver, so they have been served somewhere);
+//   - has_serviceable_address: a saved address with a pin inside a zone
+//     today (a member checking a far pin may live where we deliver).
+//
+// A fact that cannot be read is left out, and W-08's condition on it fails
+// closed: no message. Inert (no reads, no event) unless CRM_ENABLED.
+func (s *service) crmEmitOutOfArea(ctx context.Context, consumerID primitive.ObjectID, pincode, source string) {
+	if !crmEnabled() {
+		return
+	}
+	payload := map[string]any{"in_zone": false, "pincode": pincode, "source": source}
+	if n, err := s.repo.orders.CountDocuments(ctx, bson.D{{Key: "user_id", Value: consumerID.Hex()}},
+		options.Count().SetLimit(1)); err == nil {
+		payload["has_orders"] = n > 0
+	}
+	if ok, err := s.crmHasServiceableAddress(ctx, consumerID); err == nil {
+		payload["has_serviceable_address"] = ok
+	}
+	s.emitCRMEvent(ctx, "serviceability.checked", consumerID, payload)
+}
+
+// crmHasServiceableAddress reports whether any of the member's saved
+// addresses has a pin the serviceability engine serves today. An address
+// without a usable pin is skipped; a failed read is an error.
+func (s *service) crmHasServiceableAddress(ctx context.Context, consumerID primitive.ObjectID) (bool, error) {
+	addrs, err := s.repo.listAddresses(ctx, consumerID)
+	if err != nil {
+		return false, err
+	}
+	for _, a := range addrs {
+		if a.Lat == nil || a.Lng == nil || !coordsSane(*a.Lat, *a.Lng) {
+			continue
+		}
+		sv, serr := s.serviceability(ctx, *a.Lat, *a.Lng, a.Pincode)
+		if serr != nil {
+			return false, serr
+		}
+		if sv.Serviceable {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // crmEnrolCore is the single enrolment state machine both entries share,

@@ -955,13 +955,13 @@ func (h *handler) joinWaitlist(w http.ResponseWriter, r *http.Request) {
 	// serviceability.checked (W-08) needs a member to write to. This route is
 	// app-key gated, not JWT gated, so the identity comes ONLY from a valid
 	// bearer token the app happens to send - never from the posted phone,
-	// which anyone could name.
+	// which anyone could name. The event carries whether the member has
+	// orders or a serviceable saved address: W-08 is only for a member we
+	// cannot serve, not one who checked a far pin.
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		if id, _, err := h.svc.parseAccessToken(strings.TrimPrefix(auth, "Bearer ")); err == nil {
 			if cid, cerr := primitive.ObjectIDFromHex(id); cerr == nil {
-				h.svc.emitCRMEvent(r.Context(), "serviceability.checked", cid, map[string]any{
-					"in_zone": false, "pincode": strings.TrimSpace(body.Pincode), "source": "waitlist",
-				})
+				h.svc.crmEmitOutOfArea(r.Context(), cid, strings.TrimSpace(body.Pincode), "waitlist")
 			}
 		}
 	}

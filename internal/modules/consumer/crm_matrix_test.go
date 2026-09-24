@@ -246,7 +246,8 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 			return cid, map[string]any{"order_id": stageOrder(cid, "morning", "delivered"), "rating": int32(5)}
 		}, crmMatrixInbox},
 		"W-08": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
-			return member(0), map[string]any{"in_zone": false, "pincode": "999999", "source": "enrol"}
+			return member(0), map[string]any{"in_zone": false, "pincode": "999999", "source": "enrol",
+				"has_orders": false, "has_serviceable_address": false}
 		}, crmMatrixInbox},
 		// Founding Family (founding.go): the unlock pair and the seat held,
 		// with the payloads unlockFoundingFarm and joinFoundingFamily write.

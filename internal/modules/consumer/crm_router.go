@@ -384,6 +384,18 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 			return v, nil
 		}
 		return nil, fmt.Errorf("payload carries no in_zone")
+	case "serviceability.has_orders":
+		// W-08: decided when the check was made (crmEmitOutOfArea); an event
+		// without it fails closed.
+		if v, ok := p["has_orders"].(bool); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no has_orders")
+	case "serviceability.has_serviceable_address":
+		if v, ok := p["has_serviceable_address"].(bool); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no has_serviceable_address")
 	case "credit.account":
 		if v, ok := p["account"].(string); ok && v != "" {
 			return v, nil

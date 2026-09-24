@@ -42,7 +42,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		"order.line_cancelled": {"order_id": "ord_1", "line_id": "item_1", "labelled_product": label,
 			"amount": float64(35), "before_delivery": true},
 		"delivery.delayed":       {"order_id": "ord_1", "labelled_product": label, "new_eta_known": true, "eta": "about 7:52 am"},
-		"serviceability.checked": {"in_zone": false, "pincode": "226030"},
+		"serviceability.checked": {"in_zone": false, "pincode": "226030", "source": "waitlist", "has_orders": false, "has_serviceable_address": false},
 		// Founding Family (founding.go) and referrals (referrals.go), as the
 		// emitters write them.
 		"founding.farm_unlocked": {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(0), "unlocked_packs": "", "first_delivery_label": "tomorrow"},

@@ -27,6 +27,7 @@ var crmKnownFactKeys = map[string]bool{
 	"before_delivery": true, "serviceability.in_zone": true, "credit.account": true, "order.contains_promotional_line": true,
 	"member.started": true, "complaint.refundable_amount": true, "complaint.has_order": true,
 	"tomorrow.delivery_blocked": true, "offer.pack1_tomorrow": true,
+	"serviceability.has_orders": true, "serviceability.has_serviceable_address": true,
 }
 
 func TestCRMCondConfigLinesParseOnKnownFacts(t *testing.T) {
