@@ -1187,7 +1187,8 @@ func (s *service) crmSweepTomorrowShortfall(ctx context.Context, now time.Time) 
 
 // crmSkipNoticeFor reports whether D-07 speaks to this member about day:
 // the noon lock skipped it and said so (a subscription.day_skipped event
-// whose tomorrow_blocked holds, the D-07 condition), and D-07 is not
+// whose tomorrow_blocked holds), nothing else still arrives that morning
+// (the D-07 condition reads it again at send time), and D-07 is not
 // switched off.
 func (s *service) crmSkipNoticeFor(ctx context.Context, consumerID primitive.ObjectID, day string) bool {
 	if s.deps.Flags != nil && s.crmTriggerKilled(ctx, "D-07") {
@@ -1199,7 +1200,11 @@ func (s *service) crmSkipNoticeFor(ctx context.Context, consumerID primitive.Obj
 		{Key: "payload.day", Value: day},
 		{Key: "payload.tomorrow_blocked", Value: true},
 	}, options.Count().SetLimit(1))
-	return err == nil && n > 0
+	if err != nil || n == 0 {
+		return false
+	}
+	due, derr := s.memberMorningDeliveryDue(ctx, consumerID.Hex(), day)
+	return derr == nil && !due
 }
 
 // crmPlanCostOn is what the LOCK will ask the wallet for one plan's delivery

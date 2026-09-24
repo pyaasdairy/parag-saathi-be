@@ -388,12 +388,23 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 		return day == istDay(e.sentAt().Add(24*time.Hour)), nil
 	case "tomorrow.delivery_blocked":
 		// subscription.day_skipped (D-07): the skipped day is tomorrow as the
-		// lock saw it and no free Welcome Litre pack still arrives that
-		// morning; the emitter decides it (skipSubPreview).
-		if v, ok := p["tomorrow_blocked"].(bool); ok {
-			return v, nil
+		// lock saw it and nothing else arrives that morning; the emitter
+		// decides it once the member's day is decided (tellDaySkipped). A
+		// catch-up after an outage decides one plan at a time, so another plan
+		// locked for that day after the event was written is read again here.
+		v, ok := p["tomorrow_blocked"].(bool)
+		if !ok {
+			return nil, fmt.Errorf("payload carries no tomorrow_blocked")
 		}
-		return nil, fmt.Errorf("payload carries no tomorrow_blocked")
+		if !v {
+			return false, nil
+		}
+		day, _ := p["day"].(string)
+		due, err := e.s.memberMorningDeliveryDue(e.ctx, e.ev.ConsumerID.Hex(), day)
+		if err != nil {
+			return nil, err
+		}
+		return !due, nil
 	}
 	return nil, fmt.Errorf("unknown condition key %q", key)
 }

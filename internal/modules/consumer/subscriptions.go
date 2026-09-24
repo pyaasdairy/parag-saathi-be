@@ -1427,6 +1427,7 @@ func (s *service) decideMemberDay(ctx context.Context, userID, day string, previ
 		}
 	}
 	locked := 0
+	var skipped []daySkip
 	for _, c := range cands {
 		free := freeDay && orderIsTrialLine(c.o)
 		cost := round2(lockCharge(c.o, free))
@@ -1439,9 +1440,21 @@ func (s *service) decideMemberDay(ctx context.Context, userID, day string, previ
 			avail = round2(avail - cost)
 			continue
 		}
-		s.skipSubPreview(ctx, c.o, c.sub, round2(cost-avail), now)
+		if shortfall := round2(cost - avail); s.skipSubPreview(ctx, c.o, shortfall, now) {
+			skipped = append(skipped, daySkip{o: c.o, sub: c.sub, shortfall: shortfall})
+		}
 	}
+	// Told once the whole day is decided: a plan funded after a skipped one
+	// (a cheaper newer plan) is locked by now.
+	s.tellDaySkipped(ctx, userID, day, skipped, now)
 	return locked
+}
+
+// daySkip is one preview this call closed as a skipped day.
+type daySkip struct {
+	o         *order
+	sub       *subscription
+	shortfall float64
 }
 
 // lockCandidate is one preview decideMemberDay funds, with its plan.
@@ -1531,15 +1544,10 @@ func (s *service) lockSubOrder(ctx context.Context, o *order, trialFree bool, no
 // skipSubPreview closes a preview the member's noon wallet could not cover:
 // cancelled by "wallet_short" (guarded on a still-unlocked, placed preview,
 // so it can never race a lock into two outcomes), the day claim KEPT so the
-// day is never previewed again, no task, no money. subscription.day_skipped
-// tells the CRM (D-07): the next morning the plan delivers (resume_label, the
-// message's [DATE]), and whether the member is to be told "no delivery
-// tomorrow" at all (tomorrow_blocked: the day IS tomorrow as the lock sees it,
-// not a day a catch-up reached after an outage, and no free Welcome Litre
-// pack still arrives that morning - CH-03). One message per member and day
-// (scope_key), however many of their plans were skipped. Returns whether
-// this call closed it.
-func (s *service) skipSubPreview(ctx context.Context, o *order, sub *subscription, shortfall float64, now time.Time) bool {
+// day is never previewed again, no task, no money. The member is told by
+// tellDaySkipped once their whole day is decided. Returns whether this call
+// closed it.
+func (s *service) skipSubPreview(ctx context.Context, o *order, shortfall float64, now time.Time) bool {
 	if _, err := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
 		bson.D{
 			{Key: "status", Value: "cancelled"},
@@ -1554,20 +1562,43 @@ func (s *service) skipSubPreview(ctx context.Context, o *order, sub *subscriptio
 	}
 	s.log.InfoContext(ctx, "noon lock: day skipped - the wallet at 12:00 did not cover it",
 		"subscription", o.SubscriptionID, "day", o.ScheduledFor, "shortfall", shortfall)
-	if cid, err := primitive.ObjectIDFromHex(o.UserID); err == nil && crmEnabled() {
-		day := o.ScheduledFor
+	return true
+}
+
+// tellDaySkipped emits subscription.day_skipped for each preview this call
+// closed, once the member's whole day is decided. The CRM (D-07) reads from
+// it the next morning the plan delivers (resume_label, the message's [DATE])
+// and whether the member is to be told "no delivery tomorrow" at all
+// (tomorrow_blocked): the day IS tomorrow as the lock sees it (not a day a
+// catch-up reached after an outage), the plan is still active (one paused or
+// cancelled after the cut-off has no morning to resume), and nothing else
+// comes that morning: no other plan's locked order, no one-off morning
+// order, no free Welcome Litre pack (CH-03; memberMorningDeliveryDue, read
+// from the orders so every replica answers alike). One message per member
+// and day (scope_key), however many of their plans were skipped.
+func (s *service) tellDaySkipped(ctx context.Context, userID, day string, skipped []daySkip, now time.Time) {
+	if len(skipped) == 0 || !crmEnabled() {
+		return
+	}
+	cid, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return
+	}
+	blocked := day == istDay(now.Add(24*time.Hour))
+	if blocked {
+		due, derr := s.memberMorningDeliveryDue(ctx, userID, day)
+		// A read that fails claims nothing; B-02 is then judged as usual.
+		blocked = derr == nil && !due
+	}
+	for _, k := range skipped {
 		s.emitCRMEvent(ctx, "subscription.day_skipped", cid, map[string]any{
-			"subscription_id": o.SubscriptionID, "day": day,
-			"reason": orderCancelledByWalletShort, "shortfall": shortfall,
-			"resume_label": crmDayLabel(subscriptionResumeDay(sub, day), now),
-			// A plan paused or cancelled after the cut-off (the day was decided
-			// as previewed) has no morning to resume: nothing to tell.
-			"tomorrow_blocked": sub != nil && sub.Status == "active" &&
-				day == istDay(now.Add(24*time.Hour)) && !s.freePackDue(ctx, o.UserID, day),
-			"scope_key": "day_skipped:" + day,
+			"subscription_id": k.o.SubscriptionID, "day": day,
+			"reason": orderCancelledByWalletShort, "shortfall": k.shortfall,
+			"resume_label":     crmDayLabel(subscriptionResumeDay(k.sub, day), now),
+			"tomorrow_blocked": blocked && k.sub != nil && k.sub.Status == "active",
+			"scope_key":        "day_skipped:" + day,
 		})
 	}
-	return true
 }
 
 // noonLockDecided reports whether the noon lock has decided the latest day
@@ -1598,16 +1629,31 @@ func subscriptionResumeDay(sub *subscription, skipped string) string {
 	return addDaysIST(skipped, 1)
 }
 
-// freePackDue reports a live Welcome Litre pack order the member still gets
-// on day: that morning is not "no delivery".
-func (s *service) freePackDue(ctx context.Context, userID, day string) bool {
+// memberMorningDeliveryDue reports whether the member still gets a morning
+// delivery on day: a subscription order locked for it, or a one-off morning
+// order or free Welcome Litre pack dated for it, not cancelled or failed. A
+// preview no lock has decided is not one yet. A day skipped for one plan is
+// not "no delivery" (D-07) while any of these still arrives.
+func (s *service) memberMorningDeliveryDue(ctx context.Context, userID, day string) (bool, error) {
 	n, err := s.repo.orders.CountDocuments(ctx, bson.D{
 		{Key: "user_id", Value: userID},
-		{Key: "offer_pack", Value: bson.D{{Key: "$gt", Value: 0}}},
-		{Key: "delivery_date", Value: day},
-		{Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}},
+		{Key: "status", Value: bson.D{{Key: "$in", Value: memberDayCommittedStatuses}}},
+		{Key: "lane", Value: bson.D{{Key: "$ne", Value: "instant"}}},
+		{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "delivery_date", Value: day}},
+				bson.D{{Key: "scheduled_for", Value: day}},
+			}}},
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "sub_locked_at", Value: bson.D{{Key: "$gt", Value: ""}}}},
+				bson.D{{Key: "subscription_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}},
+			}}},
+		}},
 	}, options.Count().SetLimit(1))
-	return err == nil && n > 0
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // lockPreviewsBeforeChange runs the LOCK for every day of this plan whose

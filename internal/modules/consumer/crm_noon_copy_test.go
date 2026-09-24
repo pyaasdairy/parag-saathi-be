@@ -219,3 +219,84 @@ func TestCRMNoonCopyFF01NamesTheFirstOpenMorning(t *testing.T) {
 		}
 	}
 }
+
+// nr-2: D-07 says "No delivery tomorrow", so it is only for a member who
+// gets no morning delivery tomorrow at all. A member whose older plan is
+// locked, whose one-off morning order is reserved first, or whose other
+// plan a catch-up locks after this one was skipped still gets milk
+// tomorrow: no D-07, and B-02 is judged for them as for anyone else.
+func TestCRMNoonCopyNoD07WhenAnotherDeliveryArrivesTomorrow(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1 := addDaysIST(D, 1)
+	long := istDayAt(addDaysIST(D, -3), 9, 0)
+
+	// A: Rs 60 covers the older plan (2 x Rs 29), not the newer (Rs 35).
+	twoPlans := w.customer(t, "9000013501", 60)
+	aOld := walletLockPlan(t, w, twoPlans, "taaza-500ml", 2, D1, long)
+	aNew := walletLockPlan(t, w, twoPlans, "gold-500ml", 1, D1, long.Add(time.Hour))
+	// B: a one-off morning order for tomorrow (Rs 35 + Rs 15), then a plan
+	// the rest (Rs 20) cannot pay.
+	oneOff := w.customer(t, "9000013502", 70)
+	bSub := walletLockPlan(t, w, oneOff, "taaza-500ml", 2, D1, long)
+	if _, err := w.svc.createOrderAt(ctx, oneOff.Hex(), morningOrderFor(D1), istDayAt(D, 11, 0)); err != nil {
+		t.Fatalf("one-off order: %v", err)
+	}
+	// C (control): one plan, an empty wallet: nothing comes tomorrow.
+	nothing := w.customer(t, "9000013503", 0)
+	cSub := walletLockPlan(t, w, nothing, "taaza-500ml", 2, D1, long)
+
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+
+	// D: the server was down all morning, so the 12:05 tick catches this
+	// member's day up one plan at a time: the older plan (Rs 57) is skipped
+	// on Rs 30, then the newer one (Rs 29) is locked.
+	catchUp := w.customer(t, "9000013504", 30)
+	dOld := walletLockPlan(t, w, catchUp, "taaza-1l", 1, D1, long)
+	dNew := walletLockPlan(t, w, catchUp, "taaza-500ml", 1, D1, long.Add(time.Hour))
+
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 5))
+	assertLocked(t, w, aOld, D1)
+	assertSkipped(t, w, aNew, D1)
+	assertSkipped(t, w, bSub, D1)
+	assertSkipped(t, w, cSub, D1)
+	assertSkipped(t, w, dOld, D1)
+	assertLocked(t, w, dNew, D1)
+
+	w.svc.crmProcessEventsAt(ctx, istDayAt(D, 12, 6))
+	w.svc.crmProcessSchedules(ctx, istDayAt(D, 12, 20))
+
+	for _, c := range []struct {
+		name string
+		cid  primitive.ObjectID
+		d07  string
+		b02  int
+	}{
+		{"older plan locked", twoPlans, "", 1},
+		{"one-off order reserved", oneOff, "", 1},
+		{"nothing comes", nothing, "No delivery tomorrow - your wallet was short at 12 noon. Recharge by 12 noon tomorrow and your milk resumes 8 Oct.", 0},
+		{"a catch-up locked the other plan", catchUp, "", 1},
+	} {
+		bodies := inboxBodies(t, w, c.cid, "D-07")
+		switch {
+		case c.d07 == "" && len(bodies) != 0:
+			t.Errorf("%s: told %q although a delivery still arrives tomorrow", c.name, bodies)
+		case c.d07 != "" && (len(bodies) != 1 || bodies[0] != c.d07):
+			t.Errorf("%s: D-07 bodies %q, want [%q]", c.name, bodies, c.d07)
+		}
+		if n := inboxCount(t, w.db, c.cid, "B-02"); n != c.b02 {
+			t.Errorf("%s: %d B-02 rows, want %d (dispatch %v)", c.name, n, c.b02, crmDispatchStatuses(t, w.db, c.cid, "B-02"))
+		}
+	}
+	// The lock itself says so for the plain cases.
+	for _, cid := range []primitive.ObjectID{twoPlans, oneOff} {
+		for _, e := range daySkippedEvents(t, w, cid) {
+			p, _ := e["payload"].(bson.M)
+			if p["tomorrow_blocked"] != false {
+				t.Errorf("%s: day_skipped tomorrow_blocked = %v, want false", cid.Hex(), p["tomorrow_blocked"])
+			}
+		}
+	}
+}
