@@ -144,6 +144,14 @@ func (s *service) crmFireSchedule(ctx context.Context, row crmSchedule, now time
 	if !ok {
 		return "SKIPPED", "trigger no longer in the config"
 	}
+	// Erasure deletes the member's pending rows; one queued by a tick racing
+	// the erasure must still never write an inbox row for an erased id.
+	if acct, err := s.repo.findAccountByID(ctx, row.ConsumerID); err != nil || acct == nil {
+		if err == nil || crmErrCode(err) == "NOT_FOUND" {
+			return "SKIPPED", "account erased"
+		}
+		return "SKIPPED", "account lookup failed"
+	}
 	ev := crmEvent{ID: row.EventID, Topic: row.Topic, ConsumerID: row.ConsumerID, Payload: row.Payload}
 	e := &crmEventCtx{s: s, ctx: ctx, ev: ev}
 	if stale, why := crmEventStale(e); stale {

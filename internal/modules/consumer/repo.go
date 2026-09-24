@@ -239,6 +239,10 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 		db.Collection(collCRMDispatch), db.Collection(collCRMEvents),
 		// The human_call queue names the member, their phone and the event.
 		db.Collection(collCRMCallbacks),
+		// Delayed messages still waiting (crm_schedule.go) hold the member's
+		// id and the event payload, and would write a fresh inbox row for
+		// the erased id when they came due.
+		db.Collection(collCRMSchedules),
 		// Consent audit trail is consumer-keyed PII too — DPDP erasure takes
 		// the evidence rows with the account (r.consents above already covers
 		// the current-state docs, including the derived "promotional" one).
