@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -416,6 +417,143 @@ func TestInstantReopenUndoesACloseNow(t *testing.T) {
 	j := strings.Index(s, `sm.Post("/stores/{storeId}/zone/instant/reopen", h.reopenInstant)`)
 	if i < 0 || j < 0 || j < i || strings.Contains(s[i:j], "})") {
 		t.Fatalf("the reopen route is not mounted beside close-now in the STORE_MANAGER group")
+	}
+}
+
+// ihOpRaw posts a raw body to an instant route as the given operator, on the
+// service clock; safe off the test goroutine (it never calls t).
+func ihOpRaw(w *chainWorld, actor auth.Actor, storeID, op, body string) (int, map[string]any) {
+	h := &handler{svc: w.svc}
+	req := httptest.NewRequest(http.MethodPost, "/stores/"+storeID+"/zone/instant/"+op, strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("storeId", storeID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	req = req.WithContext(auth.WithActor(req.Context(), actor))
+	rec := httptest.NewRecorder()
+	h.extendInstant(rec, req)
+	var env struct {
+		Data  map[string]any `json:"data"`
+		Error map[string]any `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	if env.Error != nil {
+		return rec.Code, env.Error
+	}
+	return rec.Code, env.Data
+}
+
+// ── two extends at once both count; a retried request counts once ─────────
+//
+// Before: extend read the zone, worked out the new close and wrote it
+// unchecked. Two managers tapping +60 together at 21:50 ended at 23:00, one
+// tap lost; and a retry of the same request (a timeout, then the same POST
+// again) added its minutes a second time.
+
+func TestInstantExtendConcurrentAndRetried(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	ctx := context.Background()
+	store := w.storeID.Hex()
+	mgr2 := primitive.NewObjectID()
+	if _, err := w.db.Collection("parties").InsertOne(ctx, bson.D{{Key: "_id", Value: mgr2}, {Key: "phone", Value: "+919900000079"}}); err != nil {
+		t.Fatalf("manager 2: %v", err)
+	}
+	if _, err := w.db.Collection("role_assignments").InsertOne(ctx, bson.D{
+		{Key: "party_id", Value: mgr2}, {Key: "role_code", Value: "STORE_MANAGER"},
+		{Key: "status", Value: "ACTIVE"}, {Key: "org_unit_id", Value: w.storeID},
+	}); err != nil {
+		t.Fatalf("manager 2 role: %v", err)
+	}
+	second := auth.Actor{PartyID: mgr2.Hex(), Kind: "role", RoleCode: "STORE_MANAGER"}
+	reset := func() {
+		t.Helper()
+		ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000})
+		if _, err := w.db.Collection(collStoreZones).UpdateOne(ctx, bson.D{{Key: "store_id", Value: store}}, bson.D{{Key: "$unset", Value: bson.D{
+			{Key: "instant_extended_until", Value: ""}, {Key: "instant_closed_until", Value: ""}, {Key: "instant_extend_requests", Value: ""},
+		}}}); err != nil {
+			t.Fatalf("reset: %v", err)
+		}
+	}
+	// together runs each (actor, body) at the same moment and answers the codes.
+	together := func(calls []struct {
+		actor auth.Actor
+		body  string
+	}) []int {
+		codes := make([]int, len(calls))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, c := range calls {
+			wg.Add(1)
+			go func(i int, actor auth.Actor, body string) {
+				defer wg.Done()
+				<-start
+				codes[i], _ = ihOpRaw(w, actor, store, "extend", body)
+			}(i, c.actor, c.body)
+		}
+		close(start)
+		wg.Wait()
+		return codes
+	}
+	storedUntil := func() time.Time {
+		t.Helper()
+		z := ihStoredZone(t, w, store)
+		if z.InstantExtendedUntil == nil {
+			return time.Time{}
+		}
+		return *z.InstantExtendedUntil
+	}
+	ihClock(w, ihAt(21, 50))
+
+	// Two managers, +60 each, at the same moment: both count (22:00 + 2 h).
+	lost := 0
+	for run := 0; run < 10; run++ {
+		reset()
+		codes := together([]struct {
+			actor auth.Actor
+			body  string
+		}{{w.mgr, `{"minutes":60}`}, {second, `{"minutes":60}`}})
+		if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
+			t.Fatalf("run %d: codes %v", run, codes)
+		}
+		if !storedUntil().Equal(ihAt(24, 0)) {
+			lost++
+		}
+	}
+	if lost != 0 {
+		t.Fatalf("two simultaneous +60 extends: %d of 10 runs lost one (stored %v, want midnight)", lost, storedUntil().In(istZone))
+	}
+
+	// A retried request (same request_id) counts once; a new one stacks.
+	reset()
+	if code, v := ihOpRaw(w, w.mgr, store, "extend", `{"minutes":60,"request_id":"tap-1"}`); code != http.StatusOK || v["instantExtendedUntil"] != ihUTC(ihAt(23, 0)) {
+		t.Fatalf("tap-1: %d %v", code, v)
+	}
+	if code, v := ihOpRaw(w, w.mgr, store, "extend", `{"minutes":60,"request_id":"tap-1"}`); code != http.StatusOK || v["instantExtendedUntil"] != ihUTC(ihAt(23, 0)) {
+		t.Fatalf("tap-1 retried: %d %v, want 23:00 unchanged", code, v)
+	}
+	// The same retry racing itself still counts once.
+	together([]struct {
+		actor auth.Actor
+		body  string
+	}{{w.mgr, `{"minutes":60,"requestId":"tap-2"}`}, {w.mgr, `{"minutes":60,"requestId":"tap-2"}`}})
+	if u := storedUntil(); !u.Equal(ihAt(24, 0)) {
+		t.Fatalf("tap-2 twice at once: stored %v, want midnight", u.In(istZone))
+	}
+	// A new request, and one with no request_id, stack as before.
+	if code, v := ihOpRaw(w, w.mgr, store, "extend", `{"minutes":60,"request_id":"tap-3"}`); code != http.StatusOK || v["instantExtendedUntil"] != ihUTC(ihAt(24+1, 0)) {
+		t.Fatalf("tap-3: %d %v", code, v)
+	}
+	if code, v := ihOpRaw(w, w.mgr, store, "extend", `{"minutes":30}`); code != http.StatusOK || v["instantExtendedUntil"] != ihUTC(ihAt(24+1, 30)) {
+		t.Fatalf("no request_id: %d %v", code, v)
+	}
+	// An over-long request_id is refused before anything is written.
+	long := strings.Repeat("x", 101)
+	if code, e := ihOpRaw(w, w.mgr, store, "extend", `{"minutes":30,"request_id":"`+long+`"}`); code != http.StatusUnprocessableEntity || e["code"] != "INVALID_REQUEST_ID" {
+		t.Fatalf("long request_id: %d %v", code, e)
+	}
+	if u := storedUntil(); !u.Equal(ihAt(24+1, 30)) {
+		t.Fatalf("a refused request moved the extension: %v", u.In(istZone))
 	}
 }
 

@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -32,6 +33,15 @@ import (
 
 // Extension lengths the console offers, in minutes.
 var instantExtendMinutes = map[int]bool{30: true, 60: true, 120: true}
+
+const (
+	// instantExtendAttempts bounds extend's compare-and-set retries.
+	instantExtendAttempts = 5
+	// instantExtendRequestsKept is how many extend request_ids a zone keeps.
+	instantExtendRequestsKept = 10
+	// instantExtendRequestIDMax is the longest request_id accepted.
+	instantExtendRequestIDMax = 100
+)
 
 // instantExtendCapMin is the latest an extension may run: 02:00 IST.
 const instantExtendCapMin = 120
@@ -153,6 +163,40 @@ func (r *repository) setInstantOverride(ctx context.Context, storeID string, ext
 	return &out, nil
 }
 
+// casInstantExtension stores an extension (clearing any close-now) only if the
+// stored extension is still `expected` (nil: none), recording requestID when
+// given. (nil, nil) means another write got there first.
+func (r *repository) casInstantExtension(ctx context.Context, storeID string, expected *time.Time, until time.Time, requestID, by string, now time.Time) (*zone, error) {
+	filter := bson.D{{Key: "store_id", Value: storeID}}
+	if expected == nil {
+		filter = append(filter, bson.E{Key: "instant_extended_until", Value: nil}) // absent (or null)
+	} else {
+		filter = append(filter, bson.E{Key: "instant_extended_until", Value: expected.UTC()})
+	}
+	update := bson.D{
+		{Key: "$set", Value: bson.D{
+			{Key: "instant_extended_until", Value: until.UTC()},
+			{Key: "updated_by", Value: by}, {Key: "updated_at", Value: now.UTC()},
+		}},
+		{Key: "$unset", Value: bson.D{{Key: "instant_closed_until", Value: ""}}},
+	}
+	if requestID != "" {
+		update = append(update, bson.E{Key: "$push", Value: bson.D{{Key: "instant_extend_requests", Value: bson.D{
+			{Key: "$each", Value: bson.A{requestID}}, {Key: "$slice", Value: -instantExtendRequestsKept},
+		}}}})
+	}
+	var out zone
+	err := r.storeZones.FindOneAndUpdate(ctx, filter, update,
+		options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&out)
+	if isNoDocs(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errInternal("instant override save failed")
+	}
+	return &out, nil
+}
+
 // clearInstantClose removes a close-now (instant_closed_until) and nothing
 // else. Returns the stored zone.
 func (r *repository) clearInstantClose(ctx context.Context, storeID, by string, now time.Time) (*zone, error) {
@@ -192,26 +236,44 @@ func (s *service) instantZoneFor(ctx context.Context, actor auth.Actor, storeID 
 }
 
 // extendInstant keeps the store's instant lane open `minutes` longer tonight.
-func (s *service) extendInstant(ctx context.Context, actor auth.Actor, storeID string, minutes int, now time.Time) (*zone, error) {
-	z, err := s.instantZoneFor(ctx, actor, storeID)
-	if err != nil {
-		return nil, err
+//
+// It is a compare-and-set on the stored extension: two managers extending at
+// the same moment both count, as if one had tapped after the other. An
+// optional requestID (the client mints one per tap and reuses it on a retry)
+// makes a retried request count once: it answers the zone as it is.
+func (s *service) extendInstant(ctx context.Context, actor auth.Actor, storeID string, minutes int, requestID string, now time.Time) (*zone, error) {
+	if len(requestID) > instantExtendRequestIDMax {
+		return nil, errUnprocessable("INVALID_REQUEST_ID", "request_id must be at most 100 characters")
 	}
-	if !instantExtendMinutes[minutes] {
-		return nil, errUnprocessable("INVALID_EXTENSION", "extend instant by 30, 60 or 120 minutes")
+	for attempt := 0; attempt < instantExtendAttempts; attempt++ {
+		z, err := s.instantZoneFor(ctx, actor, storeID)
+		if err != nil {
+			return nil, err
+		}
+		if !instantExtendMinutes[minutes] {
+			return nil, errUnprocessable("INVALID_EXTENSION", "extend instant by 30, 60 or 120 minutes")
+		}
+		if requestID != "" && containsStr(z.InstantExtendRequests, requestID) {
+			return z, nil // a retry of an extension already made
+		}
+		if z.InstantPaused {
+			return nil, errUnprocessable("INSTANT_PAUSED", "instant is switched off for this store; turn it back on in the Zone tab first")
+		}
+		base, limit := instantExtendBase(z, now)
+		if !base.Before(limit) {
+			return nil, errUnprocessable("EXTEND_TOO_LATE", "instant can stay open until 2:00 AM at the latest")
+		}
+		until := base.Add(time.Duration(minutes) * time.Minute)
+		if until.After(limit) {
+			until = limit
+		}
+		out, err := s.repo.casInstantExtension(ctx, storeID, z.InstantExtendedUntil, until, requestID, actor.PartyID, now)
+		if err != nil || out != nil {
+			return out, err
+		}
+		// Another write changed the extension since the read: work it out again.
 	}
-	if z.InstantPaused {
-		return nil, errUnprocessable("INSTANT_PAUSED", "instant is switched off for this store; turn it back on in the Zone tab first")
-	}
-	base, limit := instantExtendBase(z, now)
-	if !base.Before(limit) {
-		return nil, errUnprocessable("EXTEND_TOO_LATE", "instant can stay open until 2:00 AM at the latest")
-	}
-	until := base.Add(time.Duration(minutes) * time.Minute)
-	if until.After(limit) {
-		until = limit
-	}
-	return s.repo.setInstantOverride(ctx, storeID, &until, nil, actor.PartyID, now)
+	return nil, errConflict("INSTANT_BUSY", "instant was being changed at the same moment; try again")
 }
 
 // closeInstantNow shuts the store's instant lane until its next opening time,
@@ -246,20 +308,27 @@ func (s *service) reopenInstant(ctx context.Context, actor auth.Actor, storeID s
 // ── handlers ────────────────────────────────────────────────────────────────
 
 // extendInstant — POST /consumer/stores/{storeId}/zone/instant/extend
-// {minutes: 30|60|120} (STORE_MANAGER, own store). Answers the zone in the
-// GET /zone shape.
+// {minutes: 30|60|120, request_id?} (STORE_MANAGER, own store). Answers the
+// zone in the GET /zone shape; a repeated request_id answers it unchanged.
 func (h *handler) extendInstant(w http.ResponseWriter, r *http.Request) {
 	actor, _ := operatorActor(r)
 	storeID := chi.URLParam(r, "storeId")
 	var body struct {
 		Minutes int `json:"minutes"`
+		// Optional, minted by the client once per tap and reused on a retry.
+		RequestID  string `json:"request_id"`
+		RequestIDC string `json:"requestId"`
 	}
 	if err := decode(r, &body); err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
+	requestID := strings.TrimSpace(body.RequestID)
+	if requestID == "" {
+		requestID = strings.TrimSpace(body.RequestIDC)
+	}
 	now := h.svc.now()
-	z, err := h.svc.extendInstant(r.Context(), actor, storeID, body.Minutes, now)
+	z, err := h.svc.extendInstant(r.Context(), actor, storeID, body.Minutes, requestID, now)
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return

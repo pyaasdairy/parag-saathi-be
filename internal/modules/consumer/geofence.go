@@ -190,8 +190,10 @@ type zone struct {
 	// pause, so it reopens by itself. The console's PUT never touches them.
 	InstantExtendedUntil *time.Time `bson:"instant_extended_until,omitempty" json:"instantExtendedUntil,omitempty"`
 	InstantClosedUntil   *time.Time `bson:"instant_closed_until,omitempty"   json:"instantClosedUntil,omitempty"`
-	IncludePincodes      []string   `bson:"include_pincodes,omitempty" json:"includePincodes,omitempty"`
-	ExcludePincodes      []string   `bson:"exclude_pincodes,omitempty" json:"excludePincodes,omitempty"`
+	// The last few extend request_ids, so a retried extend counts once.
+	InstantExtendRequests []string `bson:"instant_extend_requests,omitempty" json:"-"`
+	IncludePincodes       []string `bson:"include_pincodes,omitempty" json:"includePincodes,omitempty"`
+	ExcludePincodes       []string `bson:"exclude_pincodes,omitempty" json:"excludePincodes,omitempty"`
 	// Polygon rings ([]geoPt, lat/lng). Include = an allowed area beyond the
 	// circle (standard); exclude = a hole denied even inside a circle.
 	IncludePolygons [][]geoPt `bson:"include_polygons,omitempty" json:"includePolygons,omitempty"`
