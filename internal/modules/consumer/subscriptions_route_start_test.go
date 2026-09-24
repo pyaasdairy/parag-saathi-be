@@ -93,3 +93,71 @@ func TestSubscriptionPreviewNotLockedOnceItsRouteStarted(t *testing.T) {
 		t.Fatalf("order.failed for a day that was never locked: %+v", evs)
 	}
 }
+
+// PM-03: the CATCH-UP step (a due day no tick ever previewed, the server down
+// over the preview and the cut-off) had no route-start guard. A boot sweep at
+// 09:30 minted a LOCKED order and a store task for TODAY, whose 05:00 route
+// had already left; the next noon the missed-order close cancelled it and
+// told the member "not delivered" about 30 hours later. Before the route the
+// catch-up still puts the day on the round.
+func TestSubscriptionCatchUpSkipsADayWhoseRouteLeft(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-11-10"
+	D1 := addDaysIST(D, 1)
+	plan := func(phone string) *subscription {
+		t.Helper()
+		cid := w.customer(t, phone, 1000)
+		sub, err := w.svc.createSubscriptionAt(ctx, cid, subscriptionInput{
+			ProductID: "gold-500ml", Variant: "500ml", Qty: 1, Frequency: "daily", StartDate: D,
+		}, istDayAt(addDaysIST(D, -2), 9, 0))
+		if err != nil {
+			t.Fatalf("createSubscription: %v", err)
+		}
+		return sub
+	}
+	early := plan("9000011501") // the server is back at 03:00, before the route
+	late := plan("9000011502")  // the server is back at 09:30, after it
+
+	// No tick ran between the plans' creation and the delivery morning.
+	w.svc.sweepOneSubscription(ctx, early, istDayAt(D, 3, 0))
+	eo := liveSubOrder(t, w, early.SubscriptionID, D)
+	if eo == nil || eo.SubLockedAt == "" {
+		t.Fatalf("a catch-up before the route must still lock the day: %+v", eo)
+	}
+	if tk, _ := w.svc.repo.findDeliveryByOrder(ctx, eo.OrderID); tk == nil {
+		t.Fatalf("the catch-up before the route must mint the store task")
+	}
+
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 30))
+	if n, _ := w.db.Collection(collOrders).CountDocuments(ctx, bson.D{
+		{Key: "subscription_id", Value: late.SubscriptionID}, {Key: "scheduled_for", Value: D},
+	}); n != 0 {
+		o := liveSubOrder(t, w, late.SubscriptionID, D)
+		t.Fatalf("the catch-up minted %d order(s) for %s after its route had left: %+v", n, D, o)
+	}
+	// The plan goes on: D+1 is previewed now and locks at its own cut-off.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 15))
+	if o := liveSubOrder(t, w, late.SubscriptionID, D1); o == nil || o.SubLockedAt == "" {
+		t.Fatalf("the late plan's D+1 must lock as usual: %+v", o)
+	}
+	// The next noon closes nothing of the late plan's and tells it nothing.
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D1, 12, 30))
+	cur, err := w.db.Collection(collOrders).Find(ctx, bson.D{{Key: "subscription_id", Value: late.SubscriptionID}})
+	if err != nil {
+		t.Fatalf("orders: %v", err)
+	}
+	var lateOrders []order
+	if err := cur.All(ctx, &lateOrders); err != nil {
+		t.Fatalf("orders decode: %v", err)
+	}
+	for _, o := range lateOrders {
+		if o.CancelledBy == orderCancelledByMissed {
+			t.Fatalf("the late plan's %s was closed as missed: %+v", o.ScheduledFor, o)
+		}
+		if evs := failedEventsFor(t, w, o.OrderID); len(evs) != 0 {
+			t.Fatalf("order.failed for the late plan's %s: %+v", o.ScheduledFor, evs)
+		}
+	}
+}

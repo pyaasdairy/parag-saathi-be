@@ -1254,6 +1254,13 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 		if sub.claimed(day) || !subscriptionDueOn(sub, day) || !sub.subChangedBefore(lockMomentFor(day)) {
 			continue
 		}
+		// A day whose morning route has left is past catching up, as it is
+		// past locking (lockSubPreview): a task minted for a round already
+		// gone was closed as missed the next noon and the member told the
+		// day was not delivered about 30 hours later. Left unclaimed.
+		if rs := routeStartFor(day); !rs.IsZero() && !now.Before(rs) {
+			continue
+		}
 		addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID)
 		if aerr != nil {
 			continue

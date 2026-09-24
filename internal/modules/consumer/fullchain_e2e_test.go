@@ -336,9 +336,11 @@ func TestFullChainSubscriptionMorningDelivery(t *testing.T) {
 
 	// The morning sweep materialises today's delivery: the catch-up branch,
 	// for a plan that predates today's noon cut-off (a plan created now would
-	// start on the first editable day under the noon rule).
+	// start on the first editable day under the noon rule). The sweep runs at
+	// 04:00, before today's 05:00 route leaves: from then on the catch-up
+	// leaves the day alone, so the wall clock would make this hour-dependent.
 	chainBackdateSubscription(t, w, sub, time.Now().Add(-48*time.Hour))
-	placed := w.svc.sweepSubscriptionOrders(ctx, time.Now())
+	placed := w.svc.sweepSubscriptionOrders(ctx, istDayAt(istToday(time.Now()), 4, 0))
 	if placed < 1 {
 		t.Fatalf("sweep placed %d orders — the morning lane produced nothing", placed)
 	}
