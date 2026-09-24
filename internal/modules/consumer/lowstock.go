@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/pyaas/saathi-backend/internal/domain"
@@ -48,12 +49,33 @@ func (h *handler) lowStock(w http.ResponseWriter, r *http.Request) {
 
 // raiseLowStock resolves the platform admins and upserts (or clears) one
 // STORE_LOW_STOCK notification per admin, keyed on the store id.
+//
+// The alert re-arms (unread again, queued now) only when the low set really
+// changed: a different summary or item count than the row holds, or no row
+// yet. Saathi's store home starts its last-posted key empty, so every app
+// launch or re-login posts the SAME set again; that repeat refreshes the row
+// but leaves the admin's read, its status and its place in the inbox alone.
+// POST /notifications/{id}/read treats the re-armed read_at: null as unread.
 func (r *repository) raiseLowStock(ctx context.Context, storeID string, body lowStockRequest) error {
 	admins, err := r.adminRecipients(ctx)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
+	count := fmt.Sprintf("%d", body.ItemCount)
+	// Every value that comes from the request or the database goes in as a
+	// $literal: this is a pipeline update, where a string starting with "$"
+	// would otherwise be read as a field path.
+	literal := func(v any) bson.D { return bson.D{{Key: "$literal", Value: v}} }
+	// Evaluated against the row as it stood; on an upsert that is the
+	// filter's fields alone, so a first raise always counts as changed.
+	changed := bson.D{{Key: "$or", Value: bson.A{
+		bson.D{{Key: "$ne", Value: bson.A{"$params.summary", literal(body.Summary)}}},
+		bson.D{{Key: "$ne", Value: bson.A{"$params.item_count", literal(count)}}},
+	}}}
+	onChange := func(field string, fresh any) bson.D {
+		return bson.D{{Key: "$cond", Value: bson.A{changed, literal(fresh), "$" + field}}}
+	}
 	for _, a := range admins {
 		filter := bson.D{
 			{Key: "party_id", Value: a.id},
@@ -67,26 +89,22 @@ func (r *repository) raiseLowStock(ctx context.Context, storeID string, body low
 			}
 			continue
 		}
-		update := bson.D{{Key: "$set", Value: bson.D{
+		update := mongo.Pipeline{bson.D{{Key: "$set", Value: bson.D{
 			{Key: "party_id", Value: a.id},
-			{Key: "phone", Value: a.phone},
+			{Key: "phone", Value: literal(a.phone)},
 			{Key: "channel", Value: domain.ChannelApp},
 			{Key: "template_key", Value: templateStoreLowStock},
 			{Key: "language", Value: "hi"},
-			{Key: "params", Value: bson.M{
+			{Key: "params", Value: literal(bson.M{
 				"store_id":   storeID,
 				"store":      body.StoreName,
 				"summary":    body.Summary,
-				"item_count": fmt.Sprintf("%d", body.ItemCount),
-			}},
-			{Key: "status", Value: domain.NotificationQueued},
-			{Key: "queued_at", Value: now},
-			// Deliberate re-arm: a raise carries a NEW low set (Saathi's store
-			// home posts only when the low SKUs or their counts change), so
-			// the admin's alert turns unread again with the new summary.
-			// POST /notifications/{id}/read treats this null as unread.
-			{Key: "read_at", Value: nil},
-		}}}
+				"item_count": count,
+			})},
+			{Key: "status", Value: onChange("status", domain.NotificationQueued)},
+			{Key: "queued_at", Value: onChange("queued_at", now)},
+			{Key: "read_at", Value: onChange("read_at", nil)},
+		}}}}
 		if _, err := r.notifications.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true)); err != nil {
 			return httpx.Internal(fmt.Errorf("upsert low-stock notification: %w", err))
 		}
