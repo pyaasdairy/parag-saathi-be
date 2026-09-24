@@ -783,17 +783,20 @@ func TestCommerceFunnelE2E(t *testing.T) {
 	}
 }
 
-// planFromBeforeNoon dates a campaign plan to 09:00 IST today, before
-// tomorrow's 12:00 cut-off. Pack 2 attaches only to a morning the plan
-// really delivers (the noon rule: a plan created after the cut-off starts
-// the day after tomorrow), so without this the journey's attach steps
-// passed in the morning and failed every afternoon.
+// planFromBeforeNoon makes a campaign plan the one an enrolment at 09:00 IST
+// today would have made: dated before tomorrow's 12:00 cut-off and starting
+// tomorrow. Pack 2 attaches only to a morning the plan really delivers (the
+// noon rule: a plan created after the cut-off starts the day after
+// tomorrow, and from G9 an afternoon enrolment's plan starts then too), so
+// without this the journey's attach steps passed in the morning and failed
+// every afternoon.
 func planFromBeforeNoon(t *testing.T, ctx context.Context, repo *repository, subID string) {
 	t.Helper()
 	ist := time.Now().In(istZone)
 	at := time.Date(ist.Year(), ist.Month(), ist.Day(), 9, 0, 0, 0, istZone).UTC()
 	if _, err := repo.subscriptions.UpdateOne(ctx, bson.D{{Key: "subscription_id", Value: subID}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "created_at", Value: at}, {Key: "changed_at", Value: at}}}}); err != nil {
+		bson.D{{Key: "$set", Value: bson.D{{Key: "created_at", Value: at}, {Key: "changed_at", Value: at},
+			{Key: "start_date", Value: firstEditableDay(at)}}}}); err != nil {
 		t.Fatalf("date the plan: %v", err)
 	}
 }
