@@ -1359,17 +1359,21 @@ func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now t
 	if err != nil || len(previews) == 0 {
 		return 0
 	}
+	return s.decideMemberDay(ctx, userID, day, previews, now)
+}
+
+// decideMemberDay is lockConsumerDay once the member's previews for day are
+// read. The list can be stale by the time the wallet is read: another
+// replica, or a member's change, may lock or skip one of them in between.
+func (s *service) decideMemberDay(ctx context.Context, userID, day string, previews []order, now time.Time) int {
+	lockAt := lockMomentFor(day)
 	if rs := routeStartFor(day); !rs.IsZero() && !now.Before(rs) {
 		for i := range previews {
 			s.cancelScheduledSubOrder(ctx, &previews[i])
 		}
 		return 0
 	}
-	type candidate struct {
-		o   *order
-		sub *subscription
-	}
-	var cands []candidate
+	var cands []lockCandidate
 	for i := range previews {
 		o := &previews[i]
 		sub, serr := s.repo.findSubscriptionByID(ctx, o.SubscriptionID)
@@ -1388,7 +1392,7 @@ func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now t
 			}
 			o = s.refreshSubOrder(ctx, o, sub)
 		}
-		cands = append(cands, candidate{o: o, sub: sub})
+		cands = append(cands, lockCandidate{o: o, sub: sub})
 	}
 	if len(cands) == 0 {
 		return 0
@@ -1414,10 +1418,7 @@ func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now t
 	if cmerr != nil {
 		return 0
 	}
-	for i := range committed {
-		avail -= lockCharge(&committed[i], committed[i].TrialFree)
-	}
-	avail = round2(avail)
+	avail = memberDayBudget(avail, committed, cands)
 	freeDay := false // only a trial line reads the trial (and only then creates its row)
 	for _, c := range cands {
 		if orderIsTrialLine(c.o) {
@@ -1441,6 +1442,33 @@ func (s *service) lockConsumerDay(ctx context.Context, userID, day string, now t
 		s.skipSubPreview(ctx, c.o, c.sub, round2(cost-avail), now)
 	}
 	return locked
+}
+
+// lockCandidate is one preview decideMemberDay funds, with its plan.
+type lockCandidate struct {
+	o   *order
+	sub *subscription
+}
+
+// memberDayBudget is what the wallet as it stood at the lock moment (avail)
+// has left for the candidates: less what the member already owes that day
+// (committed), except a committed order that is itself a candidate. Another
+// decider (a second instance, or a member's change racing the tick) can
+// lock a preview after this call listed it and before it read committed;
+// the candidate loop funds that order already, locked by this call or not,
+// so counting it here too skipped a plan the wallet covered (nr-1, 24 Sep).
+func memberDayBudget(avail float64, committed []order, cands []lockCandidate) float64 {
+	isCand := make(map[string]bool, len(cands))
+	for _, c := range cands {
+		isCand[c.o.OrderID] = true
+	}
+	for i := range committed {
+		if isCand[committed[i].OrderID] {
+			continue
+		}
+		avail -= lockCharge(&committed[i], committed[i].TrialFree)
+	}
+	return round2(avail)
 }
 
 // lockCharge is what the lock asks the wallet for one morning order: what
