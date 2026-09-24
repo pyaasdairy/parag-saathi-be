@@ -107,11 +107,12 @@ func Register(r chi.Router, d *deps.Deps) {
 	// Best-effort: runs in the background, never blocks or fails boot.
 	go resignQRTokens(d, log)
 
-	// Server-owned subscription scheduler (subscriptions.go): every 15 min,
-	// turn today's DUE subscriptions (daily/alternate/weekly, minus vacations)
-	// into morning-lane orders + store delivery tasks — so the store manager's
-	// queue fills even when no consumer opens the app. Exactly-once per
-	// (subscription, IST day); money still settles on delivery.
+	// Server-owned subscription scheduler (subscriptions.go): at boot, every
+	// 15 min and at 12:00:05 IST (the noon lock), turn the DUE subscriptions
+	// (daily/alternate/weekly, minus vacations) into morning-lane orders +
+	// store delivery tasks — so the store manager's queue fills even when no
+	// consumer opens the app. Exactly-once per (subscription, IST day); money
+	// still settles on delivery.
 	go svc.subscriptionOrderWorker(context.Background())
 
 	// Dolibarr ERP integration (dolibarr_sync.go): inbound catalog mirror +

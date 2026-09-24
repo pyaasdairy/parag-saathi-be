@@ -1666,30 +1666,77 @@ func joinAddress(a *address) string {
 	return out
 }
 
-// subscriptionOrderWorker — the background scheduler (no external cron). Ticks
-// every 15 minutes; each tick runs the full lifecycle: it PREVIEWS the first
+// subscriptionOrderWorker — the background scheduler (no external cron). One
+// tick at boot, one every 15 minutes, and one at 12:00:05 IST every day
+// (nextLockWake); each tick runs the full lifecycle: it PREVIEWS the first
 // still-editable day as a visible upcoming order, keeps previews reconciled
 // with subscription edits until their 12:00 IST cut-off the day before, and
-// at the first tick after noon LOCKS tomorrow's (delivery tasks created) — so
-// the store manager's queue is filled by noon the day before the 05:00 route
-// WITHOUT any consumer opening the app. The day-claim + lock guard make every
-// duplicate tick (or replica) a no-op.
+// LOCKS tomorrow's at the noon wake (delivery tasks created, seconds after
+// the cut-off rather than at the next quarter-hour) — so the store manager's
+// queue is filled by noon the day before the 05:00 route WITHOUT any
+// consumer opening the app. The day-claim + lock guard make every duplicate
+// tick (or replica) a no-op, and the lock decides on the wallet at 12:00
+// whichever tick runs it.
 func (s *service) subscriptionOrderWorker(ctx context.Context) {
-	const tick = 15 * time.Minute
-	// Immediate first sweep on boot (covers a server restart mid-morning).
-	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	s.sweepSubscriptionOrders(runCtx, time.Now())
-	cancel()
-	t := time.NewTicker(tick)
+	t := time.NewTicker(15 * time.Minute)
 	defer t.Stop()
+	runSubscriptionWorker(ctx, subscriptionWorkerClock{now: time.Now, ticks: t.C, after: time.After}, s.subscriptionTick)
+}
+
+// subscriptionTick is one worker tick: the full sweep at now, within the
+// tick's time budget.
+func (s *service) subscriptionTick(ctx context.Context, now time.Time) {
+	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	s.sweepSubscriptionOrders(runCtx, now)
+}
+
+// lockWakeSeconds is how far past 12:00:00 IST the worker's noon wake
+// fires: just after the cut-off, so the lock runs at once.
+const lockWakeSeconds = 5
+
+// nextLockWake is the next 12:00:05 IST strictly after now (at 12:00:05
+// itself, tomorrow's). Derived from the clock alone, so a restart recomputes
+// it with no stored state.
+func nextLockWake(now time.Time) time.Time {
+	ist := now.In(istZone)
+	w := time.Date(ist.Year(), ist.Month(), ist.Day(), lockHourIST, 0, lockWakeSeconds, 0, istZone)
+	if !now.Before(w) {
+		w = w.AddDate(0, 0, 1)
+	}
+	return w
+}
+
+// subscriptionWorkerClock is the worker's view of time: the clock, the
+// 15-minute ticker and the one-shot timer the noon wake is armed with.
+// Injected so a test drives the worker without sleeping.
+type subscriptionWorkerClock struct {
+	now   func() time.Time
+	ticks <-chan time.Time
+	after func(time.Duration) <-chan time.Time
+}
+
+// runSubscriptionWorker is the worker loop. The noon wake is armed from the
+// boot clock BEFORE the boot tick runs (a boot at 11:59:30 whose tick runs
+// past noon still wakes at 12:00:05), then re-armed after each wake. One
+// goroutine runs every tick, so ticks never overlap; a ticker tick and the
+// wake landing together simply run one after the other.
+func runSubscriptionWorker(ctx context.Context, clk subscriptionWorkerClock, run func(context.Context, time.Time)) {
+	arm := func() <-chan time.Time {
+		n := clk.now()
+		return clk.after(nextLockWake(n).Sub(n))
+	}
+	wake := arm()
+	run(ctx, clk.now()) // boot: covers a restart mid-morning, and IS the lock after noon
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-t.C:
-			runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			s.sweepSubscriptionOrders(runCtx, now)
-			cancel()
+		case now := <-clk.ticks:
+			run(ctx, now)
+		case now := <-wake:
+			run(ctx, now)
+			wake = arm()
 		}
 	}
 }
