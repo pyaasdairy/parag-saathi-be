@@ -128,8 +128,10 @@ services:
         sync: false
       # MSG91 Flow API for DLT-registered campaign SMS. A trigger absent from
       # CRM_DLT_TEMPLATE_IDS NEVER attempts SMS (unregistered content is a
-      # TRAI violation); the ids come from the founder's DLT registrations.
-      # Format: see .env.example (plain id, or {"en":..,"hi":..} per trigger).
+      # TRAI violation). Values are the MSG91 panel's template ids for the
+      # founder's DLT-registered templates, NOT the 19-digit DLT ids; keys are
+      # trigger ids or template ids. CRM_MSG91_SENDER is optional.
+      # Format: see .env.example.
       - key: CRM_MSG91_AUTHKEY
         sync: false
       - key: CRM_MSG91_SENDER
