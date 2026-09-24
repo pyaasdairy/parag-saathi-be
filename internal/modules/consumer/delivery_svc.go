@@ -25,6 +25,14 @@ import (
 // the nearest Parag Store. Unassigned (no rider) until the store manager assigns
 // one. Best-effort: an order is never blocked if delivery creation fails.
 func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
+	s.createDeliveryForOrderAt(ctx, o, time.Now())
+}
+
+// createDeliveryForOrderAt is createDeliveryForOrder on an explicit clock: the
+// task's stamps and D-01's [ETA] ("tomorrow by 7 am", "8 Oct by 7 am") are
+// worded against when, so an order placed at a fixed IST moment (createOrderAt)
+// names its real day deterministically.
+func (s *service) createDeliveryForOrderAt(ctx context.Context, o *order, when time.Time) {
 	var at *geoPt
 	if o.Geo != nil {
 		at = &geoPt{Lat: o.Geo.Lat, Lng: o.Geo.Lng}
@@ -57,7 +65,7 @@ func (s *service) createDeliveryForOrder(ctx context.Context, o *order) {
 	if o.PaymentMethod == "wallet" || o.PaymentMethod == "prepaid" {
 		payMode = "PREPAID"
 	}
-	now := time.Now().UTC()
+	now := when.UTC()
 	// Instant lane: the task carries a hard ETA anchored to the ORDER's
 	// placed-at (+20 min) — not task-creation time, so a backfilled task keeps
 	// the customer's original promise instead of restarting the clock.
