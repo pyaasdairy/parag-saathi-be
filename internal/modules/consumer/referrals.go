@@ -15,7 +15,9 @@ package consumer
 //	GET  /consumer/referrals        -> [{id, name, status, reward_amount, created_at}]
 //	POST /consumer/referrals/apply  {code}
 //
-// status is "pending" until the referee's first order is delivered, then
+// status is "pending" until the referee's first delivered order that they paid
+// for (spec 5.8: a referral counts only when the friend pays; a Rs 0 promo
+// pack or an order paid from promo money does not), then
 // "credited" (the app's ReferralStatus union: 'pending' | 'credited'; it counts
 // and sums "credited" rows). The reward is REFERRAL_REWARD_PAISE (default the
 // Refer screen's Rs 100) credited as a promo (REWARDS) wallet credit to BOTH
@@ -353,9 +355,9 @@ func (s *service) applyReferral(ctx context.Context, refereeID primitive.ObjectI
 }
 
 // rewardReferralOnDelivery runs from the delivered sync: the referee's first
-// delivered order after the link credits BOTH wallets and flips the
-// referral to credited. Exactly once per referral: each credit is gated by
-// its own ledger ref, and the status flip is guarded on pending, so a
+// delivered order THEY PAID FOR after the link credits BOTH wallets and flips
+// the referral to credited. Exactly once per referral: each credit is gated
+// by its own ledger ref, and the status flip is guarded on pending, so a
 // repeated sync (or two racing ones) can neither pay twice nor emit twice.
 // Best-effort by contract: nothing here may fail a delivery.
 func (s *service) rewardReferralOnDelivery(ctx context.Context, o *order) {
@@ -368,6 +370,11 @@ func (s *service) rewardReferralOnDelivery(ctx context.Context, o *order) {
 	}
 	ref, err := s.repo.findReferralByReferee(ctx, refereeID)
 	if err != nil || ref == nil || ref.Status != referralPending {
+		return
+	}
+	// Spec 5.8: a referral counts only when the friend pays. A delivery that
+	// took none of the referee's own money leaves it pending for the next.
+	if !s.referralPaidDelivery(ctx, refereeID, o) {
 		return
 	}
 	amount := round2(float64(ref.RewardPaise) / 100)
@@ -394,6 +401,30 @@ func (s *service) rewardReferralOnDelivery(ctx context.Context, o *order) {
 	}
 	s.emitCRMEvent(ctx, "referral.rewarded", ref.ReferrerID, payload)
 	s.emitCRMEvent(ctx, "referral.rewarded", ref.RefereeID, payload)
+}
+
+// referralPaidDelivery reports whether the referee paid for this delivered
+// order: a wallet settle that debited money not covered in full by promo
+// (REWARDS) money, or a cash-on-delivery order with a positive total. A Rs 0
+// Welcome Litre pack, a free trial day (its settle row is Rs 0) and an order
+// paid entirely from REWARDS never count; otherwise every throwaway account
+// that applied a code turned free milk into Rs 100 on each side.
+func (s *service) referralPaidDelivery(ctx context.Context, refereeID primitive.ObjectID, o *order) bool {
+	if o.Total <= 0 || o.OfferPack > 0 {
+		return false
+	}
+	if o.PaymentMethod != "wallet" && o.PaymentMethod != "prepaid" {
+		return true // cash on delivery: the rider collected the total at the door
+	}
+	var row walletTxn
+	if err := s.repo.walletTxns.FindOne(ctx, bson.D{
+		{Key: "consumer_id", Value: refereeID},
+		{Key: "ref_id", Value: "delivery:" + o.OrderID},
+		{Key: "type", Value: "DEBIT"},
+	}).Decode(&row); err != nil {
+		return false
+	}
+	return row.Amount > 0 && row.Bucket != "REWARDS"
 }
 
 // creditRewards is the server-authorised promo credit (REWARDS bucket) behind

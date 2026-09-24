@@ -295,3 +295,87 @@ func TestReferralCodeCollisionTieGoesToTheOlderAccount(t *testing.T) {
 		t.Fatalf("the stored-code tie went to %+v, want %s", got, older.Hex())
 	}
 }
+
+// chainDeliver takes a placed order through pickup and a proof-of-delivery
+// drop, settling it exactly as the rider's route does.
+func chainDeliver(t *testing.T, w *chainWorld, orderID string) {
+	t.Helper()
+	tk := chainTaskFor(t, w, orderID)
+	chainOutForDelivery(t, w, tk.ID)
+	if _, err := w.svc.deliverDelivery(context.Background(), w.rider, tk.ID, deliverInput{
+		ProofPhoto: "p.jpg", Geo: &geoPt{Lat: tk.Geo.Lat, Lng: tk.Geo.Lng}, GeofenceOK: true,
+	}); err != nil {
+		t.Fatalf("deliver %s: %v", orderID, err)
+	}
+}
+
+// Spec 5.8: a referral counts only when the friend pays. A Rs 0 Welcome
+// Litre pack and an order paid entirely from promo (REWARDS) money are
+// deliveries the referee never paid for, so they leave the referral pending;
+// the first delivery that takes the referee's own money credits both sides.
+func TestReferralRewardWaitsForAPaidDelivery(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+
+	referrer := w.customer(t, "9000007101", 0)
+	referee := w.customer(t, "9000007102", 0) // no cash yet
+	code, err := w.svc.referralCode(ctx, referrer)
+	if err != nil {
+		t.Fatalf("code: %v", err)
+	}
+	if _, err := w.svc.applyReferral(ctx, referee, code); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	pending := func(step string) {
+		t.Helper()
+		ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
+		rw, _ := w.svc.wallet(ctx, referrer)
+		if ref == nil || ref.Status != referralPending || rw.Rewards != 0 {
+			t.Fatalf("%s: the referral paid out on a delivery the friend did not pay for: %+v referrer rewards %v", step, ref, rw.Rewards)
+		}
+	}
+
+	// 1) The Rs 0 Welcome Litre pack.
+	acct, _ := w.svc.repo.findAccountByID(ctx, referee)
+	addrs, _ := w.svc.repo.listAddresses(ctx, referee)
+	pack, err := w.svc.mintPromoPackOrder(ctx, acct, &addrs[0], addDaysIST(istToday(time.Now()), 1), 1)
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	chainDeliver(t, w, pack.OrderID)
+	pending("Rs 0 promo pack")
+
+	// 2) An order paid in full from promo money.
+	if _, err := w.svc.creditRewards(ctx, referee, 60, "test:promo:7102", "test promo"); err != nil {
+		t.Fatalf("promo: %v", err)
+	}
+	morning := orderInput{
+		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Qty: 1, Price: 35}},
+		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow", Lane: "morning",
+	}
+	promoPaid, err := w.svc.createOrder(ctx, referee.Hex(), morning)
+	if err != nil {
+		t.Fatalf("promo order: %v", err)
+	}
+	chainDeliver(t, w, promoPaid.OrderID)
+	pending("order paid from REWARDS")
+
+	// 3) The first delivery the referee pays for with their own money.
+	if _, err := w.svc.creditTopup(ctx, referee, 500, "test", "test:topup:7102"); err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+	paid, err := w.svc.createOrder(ctx, referee.Hex(), morning)
+	if err != nil {
+		t.Fatalf("paid order: %v", err)
+	}
+	chainDeliver(t, w, paid.OrderID)
+	ref, _ := w.svc.repo.findReferralByReferee(ctx, referee)
+	rw, _ := w.svc.wallet(ctx, referrer)
+	if ref == nil || ref.Status != referralCredited || ref.RewardOrderID != paid.OrderID || rw.Rewards != 100 {
+		t.Fatalf("the first paid delivery must credit the referral: %+v referrer rewards %v", ref, rw.Rewards)
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "ref_id", Value: "referral:" + ref.ID.Hex() + ":referee"}}); n != 1 {
+		t.Fatalf("referee reward rows: %d want 1", n)
+	}
+}
