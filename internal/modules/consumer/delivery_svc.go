@@ -358,6 +358,11 @@ func (s *service) backfillMissingDeliveries(ctx context.Context) {
 // storeRiders returns the store's riders with workload + distance to a specific
 // delivery (when deliveryID given) so the manager can pick the nearest tier.
 func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, deliveryID string) ([]riderSummary, error) {
+	return s.storeRidersAt(ctx, actor, storeID, deliveryID, time.Now())
+}
+
+// storeRidersAt is storeRiders with "today" read at now.
+func (s *service) storeRidersAt(ctx context.Context, actor auth.Actor, storeID, deliveryID string, now time.Time) ([]riderSummary, error) {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
 	}
@@ -385,7 +390,7 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 		storeGeo = *dest
 	}
 	all, _ := s.repo.listDeliveriesByStore(ctx, storeID)
-	today := time.Now().UTC().Format("2006-01-02")
+	today := istToday(now) // the store's day is the IST day the route runs on
 	out := make([]riderSummary, 0, len(riderIDs))
 	for _, rid := range riderIDs {
 		name, phone := s.repo.riderName(ctx, rid)
@@ -405,7 +410,7 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 			if d.Status == "ACCEPTED" || d.Status == "OUT_FOR_DELIVERY" {
 				active++
 			}
-			if d.Status == "DELIVERED" && len(d.DeliveredAt) >= 10 && d.DeliveredAt[:10] == today {
+			if d.Status == "DELIVERED" && deliveredOnISTDay(d.DeliveredAt, today) {
 				done++
 			}
 			// Freshest GPS ping across the rider's tasks = their live position.
@@ -434,6 +439,18 @@ func (s *service) storeRiders(ctx context.Context, actor auth.Actor, storeID, de
 		})
 	}
 	return out, nil
+}
+
+// deliveredOnISTDay reports whether a task's delivered_at (RFC3339) falls on
+// the IST day `day`. The morning route runs 05:00-07:30 IST, and a stop
+// before 05:30 IST is still the previous day in UTC, so comparing the stored
+// UTC date dropped the round's first deliveries from "completed today". An
+// unparsable stamp falls back to its leading date.
+func deliveredOnISTDay(deliveredAt, day string) bool {
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(deliveredAt)); err == nil {
+		return istToday(t) == day
+	}
+	return len(deliveredAt) >= 10 && deliveredAt[:10] == day
 }
 
 // tierFor returns the smallest 15/30/60 km band a distance falls in. 0 means
