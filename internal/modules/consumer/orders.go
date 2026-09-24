@@ -274,7 +274,7 @@ type orderInput struct {
 }
 
 func (s *service) createOrder(ctx context.Context, userID string, in orderInput) (*order, error) {
-	return s.createOrderAt(ctx, userID, in, time.Now())
+	return s.createOrderAt(ctx, userID, in, s.now())
 }
 
 // createOrderAt is createOrder on an explicit clock: the delivery-date window
@@ -364,12 +364,13 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	}
 	// SERVICEABILITY: the order is judged by the SAME decision GET /serviceability
 	// gives the app (serviceability(), every env override included) at the order's
-	// delivery point, and refused only where that answer is a definitive no. With
-	// no point, or no answer (a lookup error), it goes through as before: like
-	// serviceability itself, ordering never goes dark on missing data.
+	// delivery point and at the order's own moment (the instant hours), and
+	// refused only where that answer is a definitive no. With no point, or no
+	// answer (a lookup error), it goes through as before: like serviceability
+	// itself, ordering never goes dark on missing data.
 	var sv *serviceabilityResult
 	if pt, pincode, ok := s.orderDeliveryPoint(ctx, userID, in); ok {
-		if res, sErr := s.serviceability(ctx, pt.Lat, pt.Lng, pincode); sErr == nil {
+		if res, sErr := s.serviceabilityAt(ctx, pt.Lat, pt.Lng, pincode, at); sErr == nil {
 			sv = res
 		}
 	}

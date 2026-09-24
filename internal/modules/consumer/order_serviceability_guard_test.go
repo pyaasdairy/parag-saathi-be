@@ -9,9 +9,11 @@ package consumer
 // task at the Lucknow store; the Delhi one sat OFFERED with a 20-minute ETA
 // outside every rider's 15 km offer pool, stuck for good.
 //
-// Every zone here is drawn explicitly, with no instant hours (instant_close_min
-// 0 = open round the clock) and not paused, so no verdict depends on the time
-// the suite runs. Orders go through createOrderAt on a fixed 09:00 IST clock.
+// Every zone here is drawn explicitly, with instant hours saved as 00:00-24:00
+// (open round the clock) and not paused, so no verdict depends on the time the
+// suite runs. (Unsaved hours, instant_close_min 0, now mean the 07:00-22:00 the
+// console shows: instant_hours_test.go.) Orders go through createOrderAt on a
+// fixed 09:00 IST clock.
 
 import (
 	"context"
@@ -37,9 +39,13 @@ var guardDelhi = geoPt{Lat: 28.6139, Lng: 77.2090}
 
 const guardInstantMsg = "Instant delivery doesn't reach this address yet. Choose a morning delivery instead."
 
-// guardZone draws the store's zone: an instant circle inside a standard one.
+// guardZone draws the store's zone: an instant circle inside a standard one,
+// with instant hours saved as round the clock unless the test names its own.
 func guardZone(t *testing.T, w *chainWorld, z zone) {
 	t.Helper()
+	if z.InstantCloseMin == 0 {
+		z.InstantOpenMin, z.InstantCloseMin = 0, 1440
+	}
 	z.StoreID, z.Active = w.storeID.Hex(), true
 	z.Center = newGeoPoint(guardCenter.Lat, guardCenter.Lng)
 	if _, err := w.svc.repo.upsertZone(context.Background(), &z); err != nil {

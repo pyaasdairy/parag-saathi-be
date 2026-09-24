@@ -32,9 +32,9 @@ func TestInstantWindow_PausedAndNoHours(t *testing.T) {
 	if open, label, _ := instantWindow(zp, istAt(10, 0)); open || label != "tomorrow at 7:00 AM" {
 		t.Fatalf("paused@10:00 should be closed, resume tomorrow 7AM; got open=%v label=%q", open, label)
 	}
-	// No hours configured (close==0) → 24h instant unless manually paused.
-	if open, _, _ := instantWindow(zone{}, istAt(3, 0)); !open {
-		t.Fatalf("no-hours zone should be 24h open; got closed at 03:00")
+	// No hours saved (close==0) → the 07:00-22:00 the console shows, so 03:00 is shut.
+	if open, label, _ := instantWindow(zone{}, istAt(3, 0)); open || label != "today at 7:00 AM" {
+		t.Fatalf("no-hours zone@03:00 should be closed, resume today 7AM; got open=%v label=%q", open, label)
 	}
 	// No hours + paused → closed, default resume 07:00 IST.
 	if open, label, _ := instantWindow(zone{InstantPaused: true}, istAt(3, 0)); open || label != "today at 7:00 AM" {
@@ -53,6 +53,54 @@ func TestInstantWindow_Overnight(t *testing.T) {
 	}
 	if open, label, _ := instantWindow(z, istAt(12, 0)); open || label != "today at 10:00 PM" {
 		t.Fatalf("noon should be closed, resume today 10PM; got open=%v label=%q", open, label)
+	}
+}
+
+// A zone whose hours were never saved (instant_close_min 0) keeps the hours the
+// store console shows for it, 07:00-22:00 IST, instead of an invisible 24 h.
+func TestInstantWindow_UnsavedHoursAreTheConsoleHours(t *testing.T) {
+	z := zone{InstantRadiusM: 2500, StandardRadiusM: 8000}
+	for _, c := range []struct {
+		h, m  int
+		open  bool
+		label string
+	}{
+		{6, 59, false, "today at 7:00 AM"},
+		{7, 0, true, ""},
+		{21, 59, true, ""},
+		{22, 0, false, "tomorrow at 7:00 AM"},
+		{22, 1, false, "tomorrow at 7:00 AM"},
+		{23, 59, false, "tomorrow at 7:00 AM"},
+	} {
+		open, label, at := instantWindow(z, istAt(c.h, c.m))
+		if open != c.open || label != c.label {
+			t.Fatalf("%02d:%02d: open=%v label=%q, want open=%v label=%q", c.h, c.m, open, label, c.open, c.label)
+		}
+		if !c.open && at == "" {
+			t.Fatalf("%02d:%02d: a closed lane names the moment it resumes", c.h, c.m)
+		}
+	}
+	// What the console shows is what is enforced.
+	if effOpenMin(&z) != 420 || effCloseMin(&z) != 1320 {
+		t.Fatalf("console hours for an unsaved zone: %d-%d", effOpenMin(&z), effCloseMin(&z))
+	}
+}
+
+// Saved hours are enforced exactly as before, and a store that wants instant
+// round the clock saves 00:00-24:00 (0..1440), which the PUT already accepts.
+func TestInstantWindow_SavedHoursUnchanged(t *testing.T) {
+	z := zone{InstantOpenMin: 480, InstantCloseMin: 1200} // 08:00-20:00
+	if open, _, _ := instantWindow(z, istAt(19, 59)); !open {
+		t.Fatalf("19:59 inside saved 08:00-20:00 should be open")
+	}
+	if open, label, _ := instantWindow(z, istAt(20, 1)); open || label != "tomorrow at 8:00 AM" {
+		t.Fatalf("20:01 after saved close: open=%v label=%q", open, label)
+	}
+	allDay := zone{InstantOpenMin: 0, InstantCloseMin: 1440}
+	for _, hm := range [][2]int{{0, 0}, {3, 0}, {22, 1}, {23, 59}} {
+		if open, _, _ := instantWindow(allDay, istAt(hm[0], hm[1])); !open {
+			t.Fatalf("saved 00:00-24:00 should be open at %02d:%02d", hm[0], hm[1])
+		}
 	}
 }
 

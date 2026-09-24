@@ -178,7 +178,8 @@ type zone struct {
 	MonsoonRupees  int  `bson:"monsoon_rupees"          json:"monsoonRupees"`
 	// Instant delivery hours (minutes since IST midnight) + a manual "closed now"
 	// switch. When instant is shut the consumer offers only the morning lane.
-	// InstantCloseMin==0 → no hours gating (legacy zones stay 24h instant).
+	// InstantCloseMin==0 → hours never saved: the 07:00–22:00 IST the store
+	// console shows (effOpenMin/effCloseMin) is what is enforced.
 	InstantOpenMin  int      `bson:"instant_open_min"        json:"instantOpenMin"`
 	InstantCloseMin int      `bson:"instant_close_min"       json:"instantCloseMin"`
 	InstantPaused   bool     `bson:"instant_paused"          json:"instantPaused"`
@@ -380,7 +381,8 @@ func (r *repository) upsertWaitlist(ctx context.Context, w waitlistEntry) error 
 // ── Service ─────────────────────────────────────────────────────────────────
 
 // effOpenMin/effCloseMin give a zone's INSTANT hours, defaulting a never-configured
-// zone (close==0) to 07:00–22:00 IST so the store console shows sensible times.
+// zone (close==0) to 07:00–22:00 IST. The console shows these and instantWindow
+// enforces these, so what the store manager sees is what the app offers.
 func effOpenMin(z *zone) int {
 	if z.InstantCloseMin == 0 {
 		return 420
@@ -396,22 +398,19 @@ func effCloseMin(z *zone) int {
 }
 
 // instantWindow decides whether a store's INSTANT lane is open right now (IST) and,
-// when shut, a human "resumes …" label + the RFC3339 resume moment. A zone that
-// never set hours (InstantCloseMin==0) is 24h instant unless manually paused (then
-// it resumes at the 07:00 IST default).
+// when shut, a human "resumes …" label + the RFC3339 resume moment. The hours are
+// the ones the store console shows (effOpenMin/effCloseMin): a zone that never
+// saved hours (InstantCloseMin==0) is open 07:00–22:00 IST, not round the clock.
+// A store that wants instant all day saves 00:00–24:00 (0..1440).
 func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt string) {
 	nowIST := now.In(istZone)
 	cur := nowIST.Hour()*60 + nowIST.Minute()
-	openMin, closeMin := z.InstantOpenMin, z.InstantCloseMin
-	withinHours := true
-	if closeMin > 0 {
-		if openMin < closeMin {
-			withinHours = cur >= openMin && cur < closeMin
-		} else { // overnight window (opens in the evening, closes after midnight)
-			withinHours = cur >= openMin || cur < closeMin
-		}
-	} else {
-		openMin = 420 // no hours set → default resume 07:00 IST when manually paused
+	openMin, closeMin := effOpenMin(&z), effCloseMin(&z)
+	var withinHours bool
+	if openMin < closeMin {
+		withinHours = cur >= openMin && cur < closeMin
+	} else { // overnight window (opens in the evening, closes after midnight)
+		withinHours = cur >= openMin || cur < closeMin
 	}
 	if withinHours && !z.InstantPaused {
 		return true, "", ""
@@ -433,6 +432,13 @@ func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt st
 // serviceability answers "can we deliver here, and how fast?" for a coordinate
 // (+ optional pincode). Defaults OPEN when no active zone is configured.
 func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode string) (*serviceabilityResult, error) {
+	return s.serviceabilityAt(ctx, lat, lng, pincode, s.now())
+}
+
+// serviceabilityAt is serviceability at an explicit moment: the instant hours
+// are an IST wall-clock rule, so the order guard asks at the order's own
+// moment and tests drive a fixed one.
+func (s *service) serviceabilityAt(ctx context.Context, lat, lng float64, pincode string, now time.Time) (*serviceabilityResult, error) {
 	if !coordsSane(lat, lng) {
 		return nil, errBadRequest("lat/lng are out of range")
 	}
@@ -511,7 +517,7 @@ func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode 
 		// Instant hours / manual close (IST): if this store would offer instant but
 		// it is shut right now, drop instant and tell the consumer when it resumes.
 		if res.Instant {
-			if openNow, label, at := instantWindow(bestZone, time.Now()); !openNow {
+			if openNow, label, at := instantWindow(bestZone, now); !openNow {
 				res.Instant = false
 				res.InstantClosed = true
 				res.InstantResumesLabel = label

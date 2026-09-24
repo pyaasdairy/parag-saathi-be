@@ -109,6 +109,18 @@ type service struct {
 	// built; module.go marks one missing when its boot build fails.
 	foundingIdx indexGuard
 	referralIdx indexGuard
+	// clock is the service's "now" for the instant hours (orders, the
+	// serviceability answer, the store's extend / close-now): nil is the wall
+	// clock; tests pin a fixed moment. Read it through now().
+	clock func() time.Time
+}
+
+// now is the service clock: the wall clock unless a test pinned one.
+func (s *service) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
 }
 
 func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
