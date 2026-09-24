@@ -179,10 +179,19 @@ func TestFoundingFamilyJoinUnlockStopAndPricing(t *testing.T) {
 	if f0["id"] != "gonard-dairy" || f0["status"] != farmFilling || f0["claimed"] != 0.0 || f0["unlocks_at"] != 2.0 || f0["note"] != nil {
 		t.Fatalf("farm row: %v", f0)
 	}
+	// delivery_fee is what a non-member really pays per morning delivery:
+	// nothing while FOUNDING_PYAAS_NONMEMBER_FEE is off, so the app's line
+	// (level1 + fee) * 30 - (level3 * 30 + 99) never promises a saving on a
+	// Rs 5 fee nobody is charged (it hides the line when there is none).
 	sav, _ := view["savings"].(map[string]any)
-	if sav["level1_per_litre"] != 85.0 || sav["level3_per_litre"] != 83.0 || sav["delivery_fee"] != 5.0 {
+	if sav["level1_per_litre"] != 85.0 || sav["level3_per_litre"] != 83.0 || sav["delivery_fee"] != 0.0 {
 		t.Fatalf("savings: %v", sav)
 	}
+	w.svc.deps.Cfg.FoundingPyaasNonMemberFee = true
+	if sv := w.svc.foundingSavings(ctx); sv == nil || sv.DeliveryFee != 5 {
+		t.Fatalf("savings with the non-member fee switched on: %+v", sv)
+	}
+	w.svc.deps.Cfg.FoundingPyaasNonMemberFee = false
 
 	// A short wallet: WALLET_SHORT names the shortfall and carries it as a field.
 	poor := w.customer(t, "9000009002", 60)

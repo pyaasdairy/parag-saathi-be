@@ -588,8 +588,18 @@ func (s *service) foundingSavings(ctx context.Context) *foundingSavingsView {
 		}
 	}
 	l3, _ := ix.memberPriceFor(sku, "")
+	// delivery_fee is the fee a non-member actually pays per delivery, the
+	// saving the app adds to the price gap: DELIVERY-FEE only once the
+	// founder has switched it on (spec 5.3, FOUNDING_PYAAS_NONMEMBER_FEE),
+	// else nothing. Sending Rs 5 while no non-member is charged it made the
+	// join screen promise "1 L a day saves Rs 111 a month" to a daily
+	// subscriber who in fact pays Rs 39 more as a member.
+	fee := 0.0
+	if s.deps.Cfg.FoundingPyaasNonMemberFee {
+		fee = s.foundingDeliveryFee(ctx)
+	}
 	return &foundingSavingsView{
-		Level1PerLitre: round2(l1), Level3PerLitre: round2(l3), DeliveryFee: s.foundingDeliveryFee(ctx),
+		Level1PerLitre: round2(l1), Level3PerLitre: round2(l3), DeliveryFee: fee,
 	}
 }
 
