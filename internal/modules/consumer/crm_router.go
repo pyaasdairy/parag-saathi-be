@@ -82,11 +82,23 @@ func (s *service) crmRouteGenericAt(ctx context.Context, ev crmEvent, now time.T
 			continue
 		}
 		if d := crmTriggerDelay(t); d > 0 {
-			s.crmEnqueueSchedule(ctx, t, ev, now.Add(d))
+			s.crmEnqueueSchedule(ctx, t, ev, crmDelayBase(ev, now).Add(d))
 			continue
 		}
 		s.crmFireTrigger(ctx, t, e, now)
 	}
+}
+
+// crmDelayBase is the instant a trigger's delay counts from: when the event
+// happened, not the tick that drained it, so a stalled or spun-down worker does
+// not push every delayed message back by its backlog. An event with no time,
+// or one stamped after the tick's clock (a test driving its own clock), counts
+// from the tick.
+func crmDelayBase(ev crmEvent, now time.Time) time.Time {
+	if ev.CreatedAt.IsZero() || ev.CreatedAt.After(now) {
+		return now
+	}
+	return ev.CreatedAt
 }
 
 // crmFireTrigger renders and dispatches one trigger for one event whose

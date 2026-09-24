@@ -81,6 +81,7 @@ func TestCRMDelayHonouredWithFakeClock(t *testing.T) {
 	t0 := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 9, 0, 0, 0, istZone)
 	for _, cid := range []primitive.ObjectID{waits, shops} {
 		w.svc.emitCRMEvent(ctx, "user.registered", cid, map[string]any{})
+		crmStampEvents(t, w, cid, t0) // the sign-ups happen on the test's clock
 	}
 
 	// The draining tick queues, it does not send.
@@ -147,6 +148,7 @@ func TestCRMDelayHonouredWithFakeClock(t *testing.T) {
 	// The lease of a dead worker is handed back after ten minutes.
 	late := w.customer(t, "9000007303", 0)
 	w.svc.emitCRMEvent(ctx, "user.registered", late, map[string]any{})
+	crmStampEvents(t, w, late, t0)
 	w.svc.crmProcessEventsAt(ctx, t0)
 	if _, err := w.db.Collection(collCRMSchedules).UpdateOne(ctx,
 		bson.D{{Key: "consumer_id", Value: late}},
@@ -160,6 +162,36 @@ func TestCRMDelayHonouredWithFakeClock(t *testing.T) {
 	w.svc.crmProcessSchedules(ctx, t0.Add(2*time.Hour+11*time.Minute))
 	if got := crmDispatchStatuses(t, w.db, late, "A-01"); len(got) != 1 || got[0] != "SENT" {
 		t.Fatalf("a dead lease must be recovered and fired: %v", got)
+	}
+}
+
+// R1-12: the delay is measured from the EVENT, not from the worker tick that
+// drains it. A worker that stalled (or a spun-down instance) used to push every
+// delayed message back by the backlog: an event drained 30 minutes late queued
+// A-01 at 2 h 30 m after the sign-up.
+func TestCRMDelayCountsFromTheEvent(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000007311", 0)
+	nowIST := time.Now().In(istZone)
+	signedUp := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 9, 0, 0, 0, istZone)
+	w.svc.emitCRMEvent(ctx, "user.registered", cid, map[string]any{"source": "otp"})
+	crmStampEvents(t, w, cid, signedUp)
+	w.svc.crmProcessEventsAt(ctx, signedUp.Add(30*time.Minute)) // the worker was 30 min behind
+	rows := crmScheduleRows(t, w.db, cid, "A-01")
+	if len(rows) != 1 || !rows[0].DueAt.Equal(signedUp.Add(2*time.Hour).UTC()) {
+		t.Fatalf("A-01 due at %v, want event time + PT2H = %v", rows, signedUp.Add(2*time.Hour).UTC())
+	}
+}
+
+// crmStampEvents sets when a member's outbox events happened, so a test that
+// drives the worker with its own clock has the events on that clock too.
+func crmStampEvents(t *testing.T, w *chainWorld, cid primitive.ObjectID, at time.Time) {
+	t.Helper()
+	if _, err := w.db.Collection(collCRMEvents).UpdateMany(context.Background(), bson.D{{Key: "consumer_id", Value: cid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "created_at", Value: at.UTC()}}}}); err != nil {
+		t.Fatalf("stamp events: %v", err)
 	}
 }
 
