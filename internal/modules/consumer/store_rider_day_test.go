@@ -71,9 +71,12 @@ func TestStoreRidersCompletedTodayIsIST(t *testing.T) {
 	}
 }
 
-// Verification (no behaviour change): the rider's today is today's stops and
-// overdue open ones; a later day's stop, even assigned today, is not in the
-// route header, the complete guard or the pickup sheet.
+// The rider's today is every stop due today, whatever its state and
+// whenever it was assigned, plus overdue open ones; a later day's stop, even
+// assigned today, is not in the route header, the complete guard or the
+// pickup sheet. Under the noon lock today's stops are routinely assigned the
+// afternoon before, so one already delivered or failed this morning must
+// still count (nr-4, 24 Sep: the header read "1 stop, 0 delivered").
 func TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
@@ -85,6 +88,9 @@ func TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays(t *testing.T) {
 	seedRiderTask(t, w, "dlv_overdue", "ASSIGNED", Dm1, istDayAt(addDaysIST(D, -2), 15, 0), zero, "taaza-500ml")
 	seedRiderTask(t, w, "dlv_today", "ASSIGNED", D, istDayAt(Dm1, 15, 0), zero, "gold-500ml")
 	seedRiderTask(t, w, "dlv_tomorrow", "ASSIGNED", D1, istDayAt(D, 14, 0), zero, "gold-1l")
+	// Today's stops assigned yesterday afternoon and already finished.
+	seedRiderTask(t, w, "dlv_today_done", "DELIVERED", D, istDayAt(Dm1, 15, 0), istDayAt(D, 6, 0), "chai-500ml")
+	seedRiderTask(t, w, "dlv_today_failed", "FAILED", D, istDayAt(Dm1, 15, 0), zero, "shakti-500ml")
 
 	tasks, err := w.svc.repo.riderRouteTasksForDay(ctx, rider, D)
 	if err != nil {
@@ -94,11 +100,11 @@ func TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays(t *testing.T) {
 	for _, tk := range tasks {
 		ids[tk.ID] = true
 	}
-	if !ids["dlv_overdue"] || !ids["dlv_today"] || ids["dlv_tomorrow"] {
-		t.Fatalf("today's route %v: want the overdue and today's stops, not tomorrow's", ids)
+	if !ids["dlv_overdue"] || !ids["dlv_today"] || !ids["dlv_today_done"] || !ids["dlv_today_failed"] || ids["dlv_tomorrow"] {
+		t.Fatalf("today's route %v: want the overdue stop and all of today's, not tomorrow's", ids)
 	}
-	if sum := riderSummariseRoute(tasks); sum.Pending != 2 {
-		t.Fatalf("today's header pending %d, want 2", sum.Pending)
+	if sum := riderSummariseRoute(tasks); sum.Total != 4 || sum.Pending != 2 || sum.Delivered != 1 || sum.NotDelivered != 1 {
+		t.Fatalf("today's header %+v, want total 4, pending 2, delivered 1, not delivered 1", sum)
 	}
 	// The complete guard refuses while the overdue stop is open.
 	if err := w.svc.repo.riderCompleteRouteDay(ctx, rider, D); err == nil {
@@ -115,6 +121,11 @@ func TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays(t *testing.T) {
 	joined := strings.Join(names, ",")
 	if !strings.Contains(joined, "taaza-500ml") || !strings.Contains(joined, "gold-500ml") || strings.Contains(joined, "gold-1l") {
 		t.Fatalf("today's pickup sheet %q: want the overdue and today's crates, not tomorrow's", joined)
+	}
+	// The crates of today's finished stops were carried too: the sheet does
+	// not shrink as the morning's stops are delivered.
+	if !strings.Contains(joined, "chai-500ml") || !strings.Contains(joined, "shakti-500ml") {
+		t.Fatalf("today's pickup sheet %q: want the crates of today's delivered and failed stops", joined)
 	}
 	// The session the sheet opens carries the same lines.
 	sess, err := w.svc.repo.riderInventorySessionForDay(ctx, rider, D)
