@@ -76,7 +76,7 @@ type foundingFarm struct {
 	PhotoURL      string     `bson:"photo_url,omitempty"`
 	UnlocksAt     int        `bson:"unlocks_at"`
 	Claimed       int        `bson:"claimed"`
-	NextLine      int        `bson:"next_line,omitempty"` // last line number handed out; never decreases (claimFarmSeat)
+	NextLine      int        `bson:"next_line,omitempty"` // last line number handed out; never decreases (takeFarmLine)
 	Status        string     `bson:"status"`
 	UnlockedPacks string     `bson:"unlocked_packs,omitempty"`
 	UnlockedAt    *time.Time `bson:"unlocked_at,omitempty"`
@@ -325,16 +325,15 @@ func (r *repository) upsertFoundingFarm(ctx context.Context, f foundingFarm, upd
 }
 
 // claimFarmSeat takes the next seat on a FILLING farm with room left and
-// returns the farm as it stands after the claim: claimed is the live seat
-// count, next_line the member's line number. (nil, nil) when the farm is
-// unlocked or full - claims are closed.
+// returns the farm as it stands after the claim (claimed is the live seat
+// count). (nil, nil) when the farm is unlocked or full - claims are closed.
 //
-// The two counters differ because a seat can be given back (a waiting member
-// who stops, a failed debit) while the number cannot: the line number is the
-// member's identity on the card, so next_line only ever goes up. A farm row
-// from before next_line existed continues from its seat count. One pipeline
-// update, so both counters move atomically ("$claimed" is the pre-update
-// value in both expressions).
+// The line number is NOT taken here: a seat can be given back (a double tap
+// that loses to ALREADY_MEMBER, a failed debit, a waiting member who stops)
+// while a number cannot, so the number is handed out by takeFarmLine only
+// once the join has gone through. The claim only makes sure next_line
+// exists: a farm row from before it existed continues from its seat count
+// ("$claimed" is the pre-update value).
 func (r *repository) claimFarmSeat(ctx context.Context, farmID string) (*foundingFarm, error) {
 	after := options.After
 	var f foundingFarm
@@ -345,9 +344,7 @@ func (r *repository) claimFarmSeat(ctx context.Context, farmID string) (*foundin
 		},
 		bson.A{bson.D{{Key: "$set", Value: bson.D{
 			{Key: "claimed", Value: bson.D{{Key: "$add", Value: bson.A{"$claimed", 1}}}},
-			{Key: "next_line", Value: bson.D{{Key: "$add", Value: bson.A{
-				bson.D{{Key: "$max", Value: bson.A{bson.D{{Key: "$ifNull", Value: bson.A{"$next_line", 0}}}, "$claimed"}}}, 1,
-			}}}},
+			{Key: "next_line", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$next_line", "$claimed"}}}},
 			{Key: "updated_at", Value: time.Now().UTC()},
 		}}}},
 		options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&f)
@@ -358,6 +355,24 @@ func (r *repository) claimFarmSeat(ctx context.Context, farmID string) (*foundin
 		return nil, errInternal("farm claim failed")
 	}
 	return &f, nil
+}
+
+// takeFarmLine hands out the farm's next line number. next_line is the last
+// number handed out and only ever goes up: the number is the member's
+// identity on the card, so it is never given twice.
+func (r *repository) takeFarmLine(ctx context.Context, farmID string) (int, error) {
+	after := options.After
+	var f foundingFarm
+	err := r.foundingFarms().FindOneAndUpdate(ctx, bson.D{{Key: "_id", Value: farmID}},
+		bson.D{
+			{Key: "$inc", Value: bson.D{{Key: "next_line", Value: 1}}},
+			{Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now().UTC()}}},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&f)
+	if err != nil {
+		return 0, errInternal("farm line failed")
+	}
+	return f.NextLine, nil
 }
 
 // releaseFarmSeat gives a seat back (a join whose debit failed, or a waiting
@@ -622,10 +637,11 @@ func walletShortError(short float64) *apiError {
 // operations, so a failure at any step leaves nothing dangling:
 //
 //  1. checks (open, farm, standing, wallet balance);
-//  2. the seat (atomic, guarded on filling and room left) - the line number;
+//  2. the seat (atomic, guarded on filling and room left);
 //  3. the member row (insert, or a stopped member re-joins in place);
 //  4. the debit; a short wallet here releases the seat and the row;
-//  5. the unlock when the seat was the last one, else the seat notification.
+//  5. the line number, only now that the join has gone through;
+//  6. the unlock when the seat was the last one, else the seat notification.
 func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.ObjectID, farmID string) (*foundingMemberView, error) {
 	open, _, err := s.foundingOpen(ctx)
 	if err != nil {
@@ -688,14 +704,13 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 	if seat == nil {
 		return nil, errFarmUnlocked
 	}
-	line := seat.NextLine
 
 	var m *foundingMember
 	inserted := false
 	if existing == nil {
 		m = &foundingMember{
 			ID: primitive.NewObjectID(), ConsumerID: consumerID, FarmID: farmID, Status: memberWaiting,
-			LineNumber: line, JoinedAt: now, Joins: 1, UpdatedAt: now,
+			JoinedAt: now, Joins: 1, UpdatedAt: now,
 		}
 		if _, ierr := s.repo.foundingMembers().InsertOne(ctx, m); ierr != nil {
 			s.repo.releaseFarmSeat(ctx, farmID)
@@ -719,7 +734,7 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 		m, err = s.repo.updateFoundingMember(ctx, existing.ID,
 			bson.D{
 				{Key: "status", Value: memberWaiting}, {Key: "farm_id", Value: farmID},
-				{Key: "line_number", Value: line}, {Key: "joined_at", Value: now}, {Key: "joins", Value: existing.Joins + 1},
+				{Key: "line_number", Value: 0}, {Key: "joined_at", Value: now}, {Key: "joins", Value: existing.Joins + 1},
 			},
 			unset,
 			bson.D{{Key: "status", Value: memberStopped}})
@@ -755,6 +770,15 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 			return nil, walletShortError(price - wv2.Available)
 		}
 		return nil, derr
+	}
+
+	// The join went through: only now is a line number handed out, so a
+	// losing double tap or a failed join never burns one.
+	if line, lerr := s.repo.takeFarmLine(ctx, farmID); lerr != nil {
+		s.log.WarnContext(ctx, "founding family: line number not assigned", "member", m.ID.Hex(), "farm", farmID, "err", lerr)
+	} else if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
+		bson.D{{Key: "line_number", Value: line}}, nil, bson.D{{Key: "farm_id", Value: farmID}}); upd != nil {
+		m = upd
 	}
 
 	if seat.Claimed >= seat.UnlocksAt {

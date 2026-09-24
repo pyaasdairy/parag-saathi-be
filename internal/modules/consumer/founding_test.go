@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -946,4 +947,82 @@ func TestFoundingBillingWorkerBillsAtBoot(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	stop()
+}
+
+// A line number is handed out only to a join that went through: a double
+// tap (the losing request hits ALREADY_MEMBER) or a join that fails used to
+// burn the number it had taken with the seat, so the first home on a farm
+// could see #2..#5 on its card and the next joiner #6.
+func TestFoundingLineNumbersSkipNothing(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	if _, err := w.svc.upsertFoundingFarms(ctx, []foundingFarmInput{
+		{ID: "farm-a", Name: "Farm A", Farmer: "A", UnlocksAt: 100},
+		{ID: "farm-b", Name: "Farm B", Farmer: "B", UnlocksAt: 100},
+	}, "test"); err != nil {
+		t.Fatalf("farms: %v", err)
+	}
+	lineOf := func(cid primitive.ObjectID) int {
+		t.Helper()
+		m, err := w.svc.repo.findFoundingMember(ctx, cid)
+		if err != nil || m == nil {
+			t.Fatalf("member: %v", err)
+		}
+		return m.LineNumber
+	}
+	race := func(n int, join func(i int)) {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				join(i)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+	}
+
+	// (a) five taps by one member on an empty farm: line 1, the next home 2.
+	x := w.customer(t, "9000009131", 500)
+	race(5, func(int) { _, _ = w.svc.joinFoundingFamily(ctx, x, "farm-a") })
+	if got := lineOf(x); got != 1 {
+		t.Fatalf("(a) the only member of farm A holds line %d, want 1", got)
+	}
+	z := w.customer(t, "9000009132", 500)
+	if _, err := w.svc.joinFoundingFamily(ctx, z, "farm-a"); err != nil {
+		t.Fatalf("(a) second home: %v", err)
+	}
+	if got := lineOf(z); got != 2 {
+		t.Fatalf("(a) the second home on farm A holds line %d, want 2", got)
+	}
+
+	// (b) one member taps two farms at once: one join wins, the other fails,
+	// and the farm it failed on still starts at line 1.
+	y := w.customer(t, "9000009133", 500)
+	farms := []string{"farm-b", "farm-a"}
+	race(2, func(i int) { _, _ = w.svc.joinFoundingFamily(ctx, y, farms[i]) })
+	ym, _ := w.svc.repo.findFoundingMember(ctx, y)
+	if ym == nil {
+		t.Fatalf("(b) neither join went through")
+	}
+	// y on farm-a took line 3 there, so farm-b is still at 1; y on farm-b
+	// leaves farm-a at x=1, z=2, so its next home is 3.
+	other, want := "farm-b", 1
+	if ym.FarmID == "farm-b" {
+		other, want = "farm-a", 3
+	}
+	v := w.customer(t, "9000009134", 500)
+	if _, err := w.svc.joinFoundingFamily(ctx, v, other); err != nil {
+		t.Fatalf("(b) join %s: %v", other, err)
+	}
+	if got := lineOf(v); got != want {
+		t.Fatalf("(b) the next home on %s holds line %d, want %d (y is on %s line %d)", other, got, want, ym.FarmID, ym.LineNumber)
+	}
+	if f, _ := w.svc.repo.findFoundingFarm(ctx, "farm-a"); f.Claimed != 3 {
+		t.Fatalf("farm A seats: %d want 3", f.Claimed)
+	}
 }
