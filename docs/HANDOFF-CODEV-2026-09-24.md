@@ -1078,8 +1078,9 @@ design is the stage 2b design note. Every time-dependent test runs on an injecte
   decide the same. Less what the member already owes that day: subscription orders already
   locked and wallet-paid one-off morning orders dated that day (G7; a one-off is fixed once
   its day's cut-off has passed). Each order costs what the door will take: a 2+2 free trial
-  day costs Rs 0 (decision 9), and the locked order's `trial_free` follows the trial as read
-  at the lock.
+  day costs Rs 0 (decision 9), and the locked order's `trial_free` follows the trial as it
+  stood at 12:00:00 (days charged at the door after the lock moment are played back out,
+  `phaseAsOf`; 10.3).
 - Covered: locked, store task minted, D-01 as before. Not covered: the preview is closed at
   once as `cancelled`, `cancelled_by: "wallet_short"`, `skipped_at`; **the day claim is
   kept** (never re-previewed), no task, no money; `subscription.day_skipped` is emitted
@@ -1109,16 +1110,18 @@ design is the stage 2b design note. Every time-dependent test runs on an injecte
 **CRM** (`crm_triggers.json`, `docs/CRM-MESSAGES.md` updated):
 
 - **D-07** is live on `subscription.day_skipped` (condition `tomorrow.delivery_blocked ==
-  true`: the skipped day is tomorrow, the plan is active, and no free Welcome Litre pack still
-  arrives that morning). Once per member and day (`scope_key: day_skipped:<day>`). Channels:
+  true`: the skipped day is tomorrow, the plan is active, and nothing else still arrives that
+  morning: no other plan's locked order, no one-off morning order, no free Welcome Litre
+  pack; 10.3). Once per member and day (`scope_key: day_skipped:<day>`). Channels:
   sms, +whatsapp, +push, inbox always. Body: "No delivery tomorrow - your wallet was short at
   12 noon. Recharge by 12 noon tomorrow and your milk resumes 8 Oct." [DATE] is the next
   morning the plan delivers after the skipped one (the day after tomorrow for a daily plan),
   whose own cut-off is never before 12 noon tomorrow, so the deadline is true for every
   cadence.
-- **B-02** claims its day only once no preview for tomorrow is still undecided (from 13:00
-  regardless), so it always runs after the lock; it is not sent to a member D-07 reached at
-  that noon. It stays on the CRM minute tick (it fires within a minute of the 12:00:05 lock):
+- **B-02** claims its day only once a subscription sweep has run tomorrow's lock and
+  catch-up to the end (`consumer_noon_locks`, 10.3), and then once no preview for tomorrow is
+  still undecided (from 13:00 regardless), so it always runs after the lock, also after a
+  boot or wake past noon; it is not sent to a member D-07 reached at that noon. It stays on the CRM minute tick (it fires within a minute of the 12:00:05 lock):
   the subscription worker's boot tick can run before the CRM claim indexes are built, and a
   claim without its unique index could send the day twice.
 - **A-05** "One step left — recharge your Wallet and your morning milk starts [DATE]."
@@ -1234,8 +1237,9 @@ script still says "tomorrow".
 store's queue gains tomorrow's funded orders as tasks dated tomorrow with the pack size and
 the dated slot, and Upcoming moves on to the day after
 (`TestStoreSeesTomorrowsLockedOrdersAfterTheLock`); the rider's today (`/route/today`, the
-`/route/complete` guard, `/inventory/today` and its session) is today's stops plus overdue
-open ones, never a later day's (`bd68a11`; `TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays`);
+`/route/complete` guard, `/inventory/today` and its session) is every stop due today,
+whatever its state and whenever it was assigned (10.3), plus overdue open ones, never a
+later day's (`bd68a11`; `TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays`);
 five racing sweeps (two instances at 12:00:05, a restart at 12:14:59) and three racing CRM
 ticks leave one task per funded order, one skip and one `day_skipped` per short member and
 one B-02 (`TestConcurrentNoonSweeps`). Fixed: `GET /stores/{id}/riders` `completed_today`
@@ -1302,3 +1306,34 @@ the plan-variant and dry-run W-01 tests enrol at a fixed morning.
 - The `/upcoming` trims the design offered as optional (skip the task lookup for previews,
   one `$in` address read) were not made; the poll is as `813099a` left it.
 - `awaiting_funds` on `/upcoming` stays (true only in the seconds before the lock tick).
+
+### 10.3 Review fixes (nr), 24 Sep evening
+
+| commit | what |
+|---|---|
+| `109858d` | nr-1: two deciders racing one member-day (a second instance at 12:00:05, or a member's change racing the tick) no longer count one plan's order twice, so a plan the wallet covers is never skipped (`memberDayBudget`) |
+| `042f098` | nr-2: D-07's `tomorrow_blocked` is decided once the member's whole day is decided, and only when no live morning order arrives that day (`memberMorningDeliveryDue`: a locked plan order, a one-off morning order, a Welcome Litre pack); the D-07 condition and B-02 read it again at send time |
+| `460c441` | nr-3: B-02 waits until a sweep has run tomorrow's noon lock to the end. From noon, step 4b of `sweepSubscriptionOrders` writes `consumer_noon_locks {_id: <tomorrow>, ran_at}` once LOCK and CATCH-UP finished inside the tick's budget; `crmWalletHealthSweep` claims `B-02-SWEEP` only once that row exists. After a boot at 13:30 (or a wake at 12:30 with nothing previewed) a skipped member got B-02 and D-07; now D-07 alone |
+| `a25262f` | nr-4: the rider's today counts every stop whose `delivery_date` is today, so a stop assigned the afternoon before and delivered or failed this morning stays in the header, the complete guard and the pickup sheet |
+| `1972c77` | nr-7: the lock prices a 2+2 trial day by the trial as it stood at 12:00. Each delivered trial day is stamped `at` when it is charged at the door, and `phaseAsOf` plays the days charged after the lock moment back out, as `walletAsOf` does for the wallet |
+
+- New collection `consumer_noon_locks`: one row per day, `_id` the day; no index needed,
+  only the B-02 gate reads it. If no sweep after noon completes (every tick over its
+  2-minute budget, or the worker not running), B-02 does not go out that day: it needs the
+  lock to have run.
+- A trial charge written before `1972c77` has no `at` and counts as before any lock. A
+  trial stop marked after 12:00 counts from the next lock. The door still charges by the
+  trial as it stands at delivery, so a trial stop that lands between 12:00 and the next
+  morning can make the door's price differ from the lock's (before this, the same held
+  between the tick and the morning).
+- Changed because the rule changed: `TestCRMWelcomeLitreE2E` (7d) and
+  `TestCRMMatrixEveryLiveTriggerFires` judge B-02 without driving the lock, so they record
+  the lock as run (`noonLockRanAt`).
+- Tests: `TestNoonLockCountsAPlanAnotherDeciderLockedOnce`,
+  `TestRacingNoonLocksStaggeredFundBothPlans`, `TestMemberDayBudgetCountsACandidateOnce`,
+  `TestConcurrentNoonSweeps` (a member whose wallet covers both plans),
+  `TestCRMNoonCopyNoD07WhenAnotherDeliveryArrivesTomorrow`,
+  `TestCRMNoonCopyB02WaitsForTheLockAfterABootPastNoon`,
+  `TestRiderTodayKeepsOverdueStopsAndLeavesLaterDays` (extended),
+  `TestWalletLockReadsTheTrialAsOfNoon`, `TestTrialChargeStampsTheDeliveredDay`,
+  `TestTrialPhaseAsOfReplaysTheLedger`.
