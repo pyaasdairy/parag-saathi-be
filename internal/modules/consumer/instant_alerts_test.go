@@ -101,6 +101,7 @@ func ihZoneFor(t *testing.T, w *chainWorld, storeID primitive.ObjectID, z zone) 
 func TestInstantAlertClosingAndClosedOncePerStorePerDay(t *testing.T) {
 	w, done, storeB, mgrB := ihAlertWorld(t)
 	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "") // the flag gives store B an instant lane
 	ctx := context.Background()
 	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000}) // store A, 07:00-22:00 as shown
 	ihZoneFor(t, w, storeB, zone{StandardRadiusM: 8000})            // store B: no instant radius
@@ -221,6 +222,7 @@ func TestInstantAlertAfterAnExtension(t *testing.T) {
 func TestInstantAlertNeverForAStoreThatIsNotClosingByTheClock(t *testing.T) {
 	w, done, _, _ := ihAlertWorld(t)
 	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "") // the flag gives a zone with no instant radius a lane
 	ctx := context.Background()
 	store := w.storeID.Hex()
 	evening := []time.Time{ihAt(21, 45), ihAt(21, 50), ihAt(22, 0), ihAt(22, 10)}
@@ -326,6 +328,68 @@ func TestInstantAlertOffersAnExtensionOnlyWhenOneIsPossible(t *testing.T) {
 		t.Fatalf("extend 60: %d %v", code, v)
 	}
 	latest(ihAt(120+22, 45), "Instant delivery closes at 11:00 PM", ihClosingMessage)
+}
+
+// ── INSTANT_TEST_OPEN: the widened lane is the manager's to extend or close ─
+//
+// With the flag on, instant is offered wherever a zone serves, even a zone
+// drawn with no instant radius, and the hours close that lane at 22:00.
+// Before, it got no closing alert and extend / close-now answered 422
+// INSTANT_NOT_CONFIGURED, so it closed silently. Flag off, a zone with no
+// instant radius has no instant lane at all: unchanged.
+
+func TestInstantFlagWidenedLaneGetsTheAlertAndTheOverrides(t *testing.T) {
+	w, done, _, _ := ihAlertWorld(t)
+	defer done()
+	ctx := context.Background()
+	store := w.storeID.Hex()
+	ihZone(t, w, zone{StandardRadiusM: 8000}) // no instant radius, hours never saved
+
+	// Flag off: no lane, no alert, nothing to extend or close (as before).
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	w.svc.instantAlertsTick(ctx, ihAt(21, 45))
+	w.svc.instantAlertsTick(ctx, ihAt(22, 0))
+	if n := len(ihNotes(t, w, w.mgr.PartyID)); n != 0 {
+		t.Fatalf("flag off, no instant radius: %d alerts", n)
+	}
+	ihClock(w, ihAt(21, 50))
+	for _, op := range []string{"extend", "close-now"} {
+		if code, e := ihOp(t, w, w.mgr, store, op, 60); code != 422 || e["code"] != "INSTANT_NOT_CONFIGURED" {
+			t.Fatalf("flag off, %s: %d %v", op, code, e)
+		}
+	}
+
+	// Flag on: the widened lane closes at 22:00 and the manager is asked first.
+	t.Setenv("INSTANT_TEST_OPEN", "true")
+	if sv := ihInstantAt(t, w, ihAt(24+21, 44)); !sv.Instant {
+		t.Fatalf("flag on, 21:44: the flag widens instant here: %+v", sv)
+	}
+	w.svc.instantAlertsTick(ctx, ihAt(24+21, 45))
+	notes := ihNotes(t, w, w.mgr.PartyID)
+	if len(notes) != 1 || notes[0].TemplateKey != templateStoreInstantClosing ||
+		notes[0].Params["headline"] != "Instant delivery closes at 10:00 PM" || notes[0].Params["message"] != ihClosingMessage {
+		t.Fatalf("flag on, 21:45: %+v", notes)
+	}
+	ihClock(w, ihAt(24+21, 50))
+	if code, v := ihOp(t, w, w.mgr, store, "extend", 60); code != 200 || v["instantExtendedUntil"] != ihUTC(ihAt(24+23, 0)) {
+		t.Fatalf("flag on, extend 60: %d %v", code, v)
+	}
+	if sv := ihInstantAt(t, w, ihAt(24+22, 30)); !sv.Instant || sv.InstantClosed {
+		t.Fatalf("flag on, 22:30 inside the extension: %+v", sv)
+	}
+	w.svc.instantAlertsTick(ctx, ihAt(24+22, 45))
+	w.svc.instantAlertsTick(ctx, ihAt(24+23, 0))
+	if a, b := ihCount(t, w, w.mgr.PartyID, templateStoreInstantClosing), ihCount(t, w, w.mgr.PartyID, templateStoreInstantClosed); a != 2 || b != 1 {
+		t.Fatalf("flag on, after the extended close: %d closing, %d closed; want 2 and 1", a, b)
+	}
+	// Close-now works on it too, and reopens by itself at the next opening.
+	ihClock(w, ihAt(48+12, 0))
+	if code, v := ihOp(t, w, w.mgr, store, "close-now", 0); code != 200 || v["instantClosedUntil"] != ihUTC(ihAt(72+7, 0)) {
+		t.Fatalf("flag on, close-now: %d %v", code, v)
+	}
+	if sv := ihInstantAt(t, w, ihAt(48+12, 5)); sv.Instant || !sv.InstantClosed || sv.InstantResumesLabel != "tomorrow at 7:00 AM" {
+		t.Fatalf("flag on, after close-now: %+v", sv)
+	}
 }
 
 // ── two instances ticking at once, then a restart: still exactly one ──────

@@ -155,7 +155,8 @@ func (r *repository) setInstantOverride(ctx context.Context, storeID string, ext
 // ── service ─────────────────────────────────────────────────────────────────
 
 // instantZoneFor loads the manager's own zone and refuses a store with no
-// instant lane to act on.
+// instant lane to act on (zoneHasInstantLane: an instant radius, or any
+// served zone while INSTANT_TEST_OPEN widens instant to it).
 func (s *service) instantZoneFor(ctx context.Context, actor auth.Actor, storeID string) (*zone, error) {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
@@ -164,7 +165,7 @@ func (s *service) instantZoneFor(ctx context.Context, actor auth.Actor, storeID 
 	if err != nil {
 		return nil, err
 	}
-	if z == nil || z.InstantRadiusM <= 0 {
+	if z == nil || !zoneHasInstantLane(z, instantTestOpenOn()) {
 		return nil, errUnprocessable("INSTANT_NOT_CONFIGURED", "this store has no instant delivery area yet; draw it on the Zone tab first")
 	}
 	return z, nil

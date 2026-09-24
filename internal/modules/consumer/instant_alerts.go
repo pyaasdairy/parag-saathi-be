@@ -17,10 +17,11 @@ import (
 
 // THE CLOSING ALERT (founder, 24 Sep): at closing time the store manager is
 // asked to keep instant open or let it close, instead of the lane closing
-// silently. A light one-minute worker writes, for every active zone whose
-// instant lane has a radius and is not paused, into the operator inbox that
-// Saathi's bell already polls (GET /notifications/me), on the STORE_LOW_STOCK
-// model (lowstock.go: channel APP, status QUEUED, unread):
+// silently. A light one-minute worker writes, for every active zone that has
+// an instant lane (zoneHasInstantLane: an instant radius, or any served zone
+// while INSTANT_TEST_OPEN widens instant to it) that is not paused, into the
+// operator inbox that Saathi's bell already polls (GET /notifications/me), on
+// the STORE_LOW_STOCK model (lowstock.go: channel APP, status QUEUED, unread):
 //
 //   - STORE_INSTANT_CLOSING, 15 minutes before the lane closes (the saved
 //     hours' close, or the extended close after an extension, which gets its
@@ -31,7 +32,7 @@ import (
 //     "Instant delivery is now closed. It reopens at 7:00 AM."
 //
 // Recipients: every ACTIVE STORE_MANAGER of that store (role_assignments). No
-// alert for a paused lane, a zone without an instant radius, an inactive zone
+// alert for a paused lane, a zone without an instant lane, an inactive zone
 // or store, a lane the manager closed themselves (close-now), or hours saved
 // as 00:00-24:00 (the lane never closes). Exactly once per (store, kind,
 // closing moment): a claim row under a unique index is inserted first, so two
@@ -112,9 +113,10 @@ func (s *service) instantAlertsTick(ctx context.Context, now time.Time) {
 		s.log.Warn("instant closing alerts: zone list failed", slog.Any("err", err))
 		return
 	}
+	testOpen := instantTestOpenOn()
 	for i := range zones {
 		z := &zones[i]
-		if z.InstantRadiusM <= 0 || z.InstantPaused {
+		if !zoneHasInstantLane(z, testOpen) || z.InstantPaused {
 			continue
 		}
 		kind, closeAt, due := instantAlertDue(z, now)
@@ -128,7 +130,7 @@ func (s *service) instantAlertsTick(ctx context.Context, now time.Time) {
 	}
 }
 
-// instantAlertDue decides, for one unpaused zone with an instant radius, which
+// instantAlertDue decides, for one unpaused zone with an instant lane, which
 // alert (if any) is due at now and the closing moment it is about.
 func instantAlertDue(z *zone, now time.Time) (kind string, closeAt time.Time, due bool) {
 	if open, _, _ := instantWindow(*z, now); open {

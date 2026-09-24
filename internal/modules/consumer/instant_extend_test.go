@@ -169,6 +169,7 @@ func TestInstantExtendKeepsInstantOpenUntilTheNewTime(t *testing.T) {
 func TestInstantExtendRefusals(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "") // the flag widens instant to a zone with no instant radius
 	store := w.storeID.Hex()
 	ihClock(w, ihAt(21, 50))
 

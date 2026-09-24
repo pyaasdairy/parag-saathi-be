@@ -404,6 +404,24 @@ func effCloseMin(z *zone) int {
 	return z.InstantCloseMin
 }
 
+// instantTestOpenOn reads the INSTANT_TEST_OPEN testing shortcut (see
+// serviceabilityAt): "true" widens instant to every serviceable point.
+func instantTestOpenOn() bool {
+	return strings.EqualFold(os.Getenv("INSTANT_TEST_OPEN"), "true")
+}
+
+// zoneHasInstantLane reports whether a zone offers instant anywhere, hours
+// aside: a zone with an instant radius does; with INSTANT_TEST_OPEN on, so
+// does any zone that serves standard, because serviceability then offers
+// instant at every point the zone serves (still gated by its hours). This is
+// the lane the manager is alerted about and may extend or close.
+func zoneHasInstantLane(z *zone, testOpen bool) bool {
+	if z.InstantRadiusM > 0 {
+		return true
+	}
+	return testOpen && (z.StandardRadiusM > 0 || len(z.IncludePincodes) > 0 || len(z.IncludePolygons) > 0)
+}
+
 // withinInstantHours reports whether the IST wall-clock minute of t falls
 // inside the zone's instant hours (overnight windows wrap past midnight; open
 // == close, or 00:00-24:00, is all day).
@@ -483,7 +501,7 @@ func (s *service) serviceabilityAt(ctx context.Context, lat, lng float64, pincod
 	// the point is serviceable, so the ⚡ Instant tab can be exercised before a
 	// store manager has drawn an instant zone. OFF by default → production still
 	// gates instant strictly on the store's instant radius.
-	instantTestOpen := strings.EqualFold(os.Getenv("INSTANT_TEST_OPEN"), "true")
+	instantTestOpen := instantTestOpenOn()
 
 	zones, err := s.repo.listActiveZones(ctx)
 	if err != nil {
