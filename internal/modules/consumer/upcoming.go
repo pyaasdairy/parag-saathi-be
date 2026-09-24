@@ -56,6 +56,12 @@ type upcomingRow struct {
 	Unit           string         `json:"unit"`
 	Items          []upcomingItem `json:"items"`
 	Source         string         `json:"source"`
+	// AwaitingFunds marks a subscription preview whose noon cut-off has
+	// passed without it locking: the wallet did not cover it, and it ships
+	// only if the member tops up before its day. LocksAt is a preview's
+	// cut-off (RFC3339 UTC; "" on a scheduled one-off order). Additive keys.
+	AwaitingFunds bool   `json:"awaiting_funds"`
+	LocksAt       string `json:"locks_at"`
 }
 
 // scheduledOneOffOrders: still-open one-time morning orders whose picked
@@ -161,7 +167,12 @@ func (s *service) storeUpcomingAt(ctx context.Context, actor auth.Actor, storeID
 			if day == "" {
 				day = tomorrow
 			}
-			rows = append(rows, s.upcomingRowFor(ctx, o, day, batch.source))
+			row := s.upcomingRowFor(ctx, o, day, batch.source)
+			if batch.source == upcomingSourceSubscription {
+				row.LocksAt = lockMomentFor(day).UTC().Format(time.RFC3339)
+				row.AwaitingFunds = day <= lockedThroughDay(now)
+			}
+			rows = append(rows, row)
 		}
 	}
 	return rows, nil

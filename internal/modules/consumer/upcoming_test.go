@@ -194,3 +194,57 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 		t.Fatalf("floor should be null when unknown: %s", rec.Body.String())
 	}
 }
+
+// From noon the upcoming window holds tomorrow's previews the lock could not
+// fund beside the day after tomorrow's editable ones. Each row now says
+// which it is: awaiting_funds (past its cut-off, ships only if the member
+// tops up) and locks_at, the preview's noon cut-off, so the manager does not
+// pack for a preview that will not ship.
+func TestStoreUpcomingFlagsPreviewsAwaitingFunds(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+	plan := func(phone string, fund float64) *subscription {
+		cid := w.customer(t, phone, fund)
+		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		if err != nil {
+			t.Fatalf("createSubscription: %v", err)
+		}
+		chainBackdateSubscription(t, w, sub, istDayAt(D, 8, 0))
+		return sub
+	}
+	funded := plan("9000006101", 500)
+	short := plan("9000006102", 0)
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 0))
+
+	rows, err := w.svc.storeUpcomingAt(ctx, w.mgr, w.storeID.Hex(), istDayAt(D, 12, 30))
+	if err != nil {
+		t.Fatalf("storeUpcoming: %v", err)
+	}
+	raw, _ := json.Marshal(rows)
+	var wire []map[string]any
+	_ = json.Unmarshal(raw, &wire)
+	want := map[string]struct {
+		awaiting bool
+		locksAt  string
+	}{
+		liveSubOrder(t, w, short.SubscriptionID, D1).OrderID:  {true, istDayAt(D, 12, 0).UTC().Format(time.RFC3339)},
+		liveSubOrder(t, w, short.SubscriptionID, D2).OrderID:  {false, istDayAt(D1, 12, 0).UTC().Format(time.RFC3339)},
+		liveSubOrder(t, w, funded.SubscriptionID, D2).OrderID: {false, istDayAt(D1, 12, 0).UTC().Format(time.RFC3339)},
+	}
+	if len(wire) != len(want) {
+		t.Fatalf("rows: %s", raw)
+	}
+	for _, r := range wire {
+		exp, ok := want[r["order_id"].(string)]
+		if !ok {
+			t.Fatalf("unexpected row %v", r)
+		}
+		if r["awaiting_funds"] != exp.awaiting || r["locks_at"] != exp.locksAt {
+			t.Fatalf("row %s %s: awaiting_funds=%v locks_at=%v, want %v %s", r["order_id"], r["delivery_date"], r["awaiting_funds"], r["locks_at"], exp.awaiting, exp.locksAt)
+		}
+	}
+}
