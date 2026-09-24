@@ -1089,9 +1089,13 @@ func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm st
 	// the cut-off it names (crmSweepTomorrowShortfall). Right AFTER the noon
 	// lock, not before it: the sweep must know whether the lock skipped
 	// tomorrow (D-07 then speaks instead), so the day's sweep is claimed only
-	// once no preview for tomorrow is still undecided, and from 13:00 in any
-	// case (a lock that cannot run must not silence B-02 for the day).
-	if hm >= "12:00" && (hm >= "13:00" || s.noonLockDecided(ctx, now)) {
+	// once a subscription sweep has run tomorrow's lock to the end
+	// (noonLockRan: after a boot past noon this CRM tick can come first, and
+	// a day never previewed leaves no undecided preview to wait on), and then
+	// once no preview for tomorrow is still undecided, or from 13:00 in any
+	// case (one member's lock that keeps failing must not silence B-02 for
+	// everyone).
+	if hm >= "12:00" && s.noonLockRan(ctx, lockedThroughDay(now)) && (hm >= "13:00" || s.noonLockDecided(ctx, now)) {
 		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-02-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
 			s.crmSweepTomorrowShortfall(ctx, now)
 		}

@@ -1259,7 +1259,9 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 	//    re-checked against the live subscription, funded from the wallet as
 	//    it stood at 12:00:00 oldest plan first, then locked with its store
 	//    task, or closed as a skipped day when the wallet did not cover it.
+	lockScanned := false
 	if due, err := s.repo.listUnlockedSubOrders(ctx, bson.D{{Key: "$lte", Value: lockedThrough}}); err == nil {
+		lockScanned = true
 		for _, md := range subMemberDays(due) {
 			placed += s.lockConsumerDay(ctx, md.userID, md.day, now)
 		}
@@ -1272,6 +1274,12 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 	}
 	for i := range subs {
 		placed += s.sweepOneSubscription(ctx, &subs[i], now)
+	}
+	// 4b) From noon, once LOCK and CATCH-UP have run to the end within the
+	//     tick's budget, record that tomorrow's lock ran: the evidence B-02
+	//     waits for, so a member the lock skips is told by D-07 alone.
+	if lockedThrough > today && lockScanned && ctx.Err() == nil {
+		s.markNoonLockRan(ctx, lockedThrough, now)
 	}
 
 	// 5) RECONCILE — the still-editable previews (every day from the first
@@ -1613,6 +1621,37 @@ func (s *service) noonLockDecided(ctx context.Context, now time.Time) bool {
 		{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
 	}, options.Count().SetLimit(1))
 	return err == nil && n == 0
+}
+
+// collNoonLocks holds one row per delivery day whose noon lock a
+// subscription sweep has run to the end (LOCK and CATCH-UP); _id is the day.
+const collNoonLocks = "consumer_noon_locks"
+
+// markNoonLockRan records that a sweep at now has run day's noon lock
+// (sweepSubscriptionOrders step 4b). The first run's time is kept; a
+// replica's duplicate is a no-op. A failed write is logged and the next
+// tick writes it.
+func (s *service) markNoonLockRan(ctx context.Context, day string, now time.Time) {
+	_, err := s.repo.orders.Database().Collection(collNoonLocks).UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: day}},
+		bson.D{{Key: "$setOnInsert", Value: bson.D{{Key: "ran_at", Value: now.UTC()}}}},
+		options.Update().SetUpsert(true))
+	if err != nil && !mongo.IsDuplicateKeyError(err) {
+		s.log.WarnContext(ctx, "noon lock: could not record that the lock ran - B-02 waits for the next tick",
+			"day", day, "err", err)
+	}
+}
+
+// noonLockRan reports whether a sweep has run day's noon lock to the end.
+// B-02 needs this positive evidence: after a boot or wake past noon the CRM
+// tick can run before the worker's boot tick, and with no preview left
+// undecided (a day never previewed, which the catch-up decides) nothing
+// else shows that tomorrow is still to be decided (nr-3, 24 Sep). A read
+// error answers false; the caller asks again on its next tick.
+func (s *service) noonLockRan(ctx context.Context, day string) bool {
+	n, err := s.repo.orders.Database().Collection(collNoonLocks).CountDocuments(ctx,
+		bson.D{{Key: "_id", Value: day}}, options.Count().SetLimit(1))
+	return err == nil && n > 0
 }
 
 // subscriptionResumeDay is the first morning after a skipped day that the

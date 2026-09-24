@@ -350,6 +350,9 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 		t.Fatalf("B-01 must not repeat within the day: %d", n)
 	}
 	// 17:00: ₹50 cannot cover tomorrow's ₹70 → the critical B-02 cut-off alert.
+	// B-02 waits for the day's noon lock (nr-3); it is recorded as run here,
+	// not driven, so B-02 judges this member on its own.
+	noonLockRanAt(t, svc, time.Date(bday.Year(), bday.Month(), bday.Day(), 12, 0, 5, 0, istZone))
 	svc.crmProcessSchedules(ctx, time.Date(bday.Year(), bday.Month(), bday.Day(), 17, 5, 0, 0, istZone))
 	if n := inboxCount(t, db, nAcct.ID, "B-02"); n != 1 {
 		t.Fatalf("B-02 shortfall alert = %d rows, want 1", n)
@@ -358,6 +361,7 @@ func TestCRMWelcomeLitreE2E(t *testing.T) {
 	// critical B-02 fires again — the spec's critical_exempt_from_daily_cap.
 	nday := time.Date(bday.Year(), bday.Month(), bday.Day(), 17, 5, 0, 0, istZone).AddDate(0, 0, 1)
 	svc.crmProcessSchedules(ctx, time.Date(nday.Year(), nday.Month(), nday.Day(), 9, 5, 0, 0, istZone))
+	noonLockRanAt(t, svc, time.Date(nday.Year(), nday.Month(), nday.Day(), 12, 0, 5, 0, istZone))
 	svc.crmProcessSchedules(ctx, nday)
 	if n := inboxCount(t, db, nAcct.ID, "B-01"); n != 1 {
 		t.Fatalf("B-01 repeated inside its 7-day cycle: %d", n)

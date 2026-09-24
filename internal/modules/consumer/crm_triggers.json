@@ -863,7 +863,7 @@
     "critical_exempt_from_daily_cap": true
    },
    "success_metric": "save_rate_delivery_retained",
-   "note": "RE-TIMED for the 12:00 cut-off. Fires right after the 12:00 lock on D-2 has decided D-1 (the first scheduler tick once no preview for D-1 is still undecided, at the latest 13:00), telling the customer to recharge by 12:00 noon on D-1 for delivery on D. Not sent to a member D-07 told at the same noon that D-1 was skipped (one clear message). The playbook assumed an evening cut-off; the earlier 17:00 re-time was replaced by the lock itself (owner, 24 Sep).",
+   "note": "RE-TIMED for the 12:00 cut-off. Fires right after the 12:00 lock on D-2 has decided D-1 (the first scheduler tick once a subscription sweep has run the lock for D-1 to the end and no preview for D-1 is still undecided, or from 13:00 once that sweep has run: after a boot past noon the CRM tick can come before the lock, and a day never previewed leaves nothing undecided to wait on), telling the customer to recharge by 12:00 noon on D-1 for delivery on D. Not sent to a member D-07 told at the same noon that D-1 was skipped (one clear message). The playbook assumed an evening cut-off; the earlier 17:00 re-time was replaced by the lock itself (owner, 24 Sep).",
    "corrections": [
     "CH-03"
    ],

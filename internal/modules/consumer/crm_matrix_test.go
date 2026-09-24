@@ -361,7 +361,8 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 	}
 	w.svc.crmProcessSchedules(ctx, at(10, 45))
 
-	// ── 5) B-02 at noon, W-10 at 18:00 ──
+	// ── 5) B-02 once the noon lock has run (recorded, not driven: nr-3), W-10 at 18:00 ──
+	noonLockRanAt(t, w.svc, at(12, 0).Add(5*time.Second))
 	w.svc.crmProcessSchedules(ctx, at(12, 5))
 	w.svc.crmProcessSchedules(ctx, at(18, 5))
 

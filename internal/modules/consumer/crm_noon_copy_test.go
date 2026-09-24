@@ -300,3 +300,71 @@ func TestCRMNoonCopyNoD07WhenAnotherDeliveryArrivesTomorrow(t *testing.T) {
 		}
 	}
 }
+
+// nr-3: after a boot or wake past noon (a deploy, a restart after an outage,
+// or the free plan's instance woken by the first request), the CRM minute
+// tick can run before the subscription worker's boot tick has locked
+// tomorrow. B-02 waits for positive evidence that this noon's lock ran, so a
+// member the lock then skips gets D-07 alone, never B-02 as well.
+func TestCRMNoonCopyB02WaitsForTheLockAfterABootPastNoon(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	plan := func(phone string, fund float64, D string) primitive.ObjectID {
+		t.Helper()
+		cid := w.customer(t, phone, fund)
+		walletLockPlan(t, w, cid, "taaza-500ml", 2, addDaysIST(D, 1), istDayAt(addDaysIST(D, -3), 9, 0)) // Rs 58 a morning
+		return cid
+	}
+	counts := func(cid primitive.ObjectID) (int, int) {
+		return inboxCount(t, w.db, cid, "D-07"), inboxCount(t, w.db, cid, "B-02")
+	}
+
+	// (a) Previews made at 09:00; the server is down from 11:00 to 13:30.
+	const Da = "2026-10-06"
+	short := plan("9000013601", 0, Da)   // D+1 skipped at the lock: D-07 only
+	enough := plan("9000013602", 80, Da) // D+1 locked, Rs 22 left for D+2: B-02
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(Da, 9, 0))
+	boot := istDayAt(Da, 13, 30)
+	w.svc.crmProcessSchedules(ctx, boot) // the CRM tick gets there first
+	for _, cid := range []primitive.ObjectID{short, enough} {
+		if _, b02 := counts(cid); b02 != 0 {
+			t.Fatalf("13:30 boot: B-02 went out before the noon lock ran (%s)", cid.Hex())
+		}
+	}
+	w.svc.sweepSubscriptionOrders(ctx, boot) // the worker's boot tick: the lock
+	w.svc.crmProcessEventsAt(ctx, boot.Add(time.Minute))
+	w.svc.crmProcessSchedules(ctx, boot.Add(time.Minute))
+	if d07, b02 := counts(short); d07 != 1 || b02 != 0 {
+		t.Errorf("13:30 boot, skipped member: D-07 %d, B-02 %d, want 1 and 0", d07, b02)
+	}
+	if d07, b02 := counts(enough); d07 != 0 || b02 != 1 {
+		t.Errorf("13:30 boot, funded member short for D+2: D-07 %d, B-02 %d, want 0 and 1", d07, b02)
+	}
+
+	// (b) Asleep since the day before (no preview at all); woken at 12:30.
+	const Db = "2026-10-13"
+	asleep := plan("9000013603", 0, Db)
+	wake := istDayAt(Db, 12, 30)
+	w.svc.crmProcessSchedules(ctx, wake)
+	if _, b02 := counts(asleep); b02 != 0 {
+		t.Fatalf("12:30 wake: B-02 went out before the noon lock ran")
+	}
+	w.svc.sweepSubscriptionOrders(ctx, wake) // catch-up: tomorrow skipped
+	w.svc.crmProcessEventsAt(ctx, wake.Add(time.Minute))
+	w.svc.crmProcessSchedules(ctx, wake.Add(time.Minute))
+	if d07, b02 := counts(asleep); d07 != 1 || b02 != 0 {
+		t.Errorf("12:30 wake: D-07 %d, B-02 %d, want 1 and 0", d07, b02)
+	}
+}
+
+// noonLockRanAt records that the subscription worker ran the noon lock at
+// at, the evidence B-02 waits for (nr-3), for a test that judges B-02 on
+// its own without driving the lock.
+func noonLockRanAt(t *testing.T, svc *service, at time.Time) {
+	t.Helper()
+	svc.markNoonLockRan(context.Background(), lockedThroughDay(at), at)
+	if !svc.noonLockRan(context.Background(), lockedThroughDay(at)) {
+		t.Fatalf("the noon lock for %s was not recorded", lockedThroughDay(at))
+	}
+}
