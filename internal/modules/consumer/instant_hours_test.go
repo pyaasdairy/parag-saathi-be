@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -142,26 +143,19 @@ func TestInstantHoursSavedHoursUnchanged(t *testing.T) {
 
 // ── 3) INSTANT_TEST_OPEN keeps exactly the interaction it had ──────────────
 //
-// Today: with a zone drawn, the flag widens instant to wherever the point is
-// serviceable and the store's hours still gate that widened lane; with no
-// zone drawn, the flag offers instant with no hours at all.
+// With a zone drawn, the flag widens instant to wherever the point is
+// serviceable and the store's hours still gate that widened lane. (With no
+// zone drawn it now follows the console's 07:00-22:00 as well: test 6.)
 
 func TestInstantHoursKeepTheInstantTestOpenInteraction(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
 	ctx := context.Background()
 	p5 := pointAtBearing(guardCenter, 5000, 0) // standard circle only
-
-	// No zone drawn: the flag's instant is not hours-gated (unchanged).
 	t.Setenv("INSTANT_TEST_OPEN", "true")
-	p1 := pointAtBearing(guardCenter, 1000, 0)
-	sv, err := w.svc.serviceabilityAt(ctx, p1.Lat, p1.Lng, "", ihAt(23, 30))
-	if err != nil || !sv.DefaultOpen || !sv.Instant || sv.InstantClosed {
-		t.Fatalf("no zone, flag on, 23:30: %+v %v", sv, err)
-	}
 
 	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000}) // hours never saved
-	sv, err = w.svc.serviceabilityAt(ctx, p5.Lat, p5.Lng, "", ihAt(21, 59))
+	sv, err := w.svc.serviceabilityAt(ctx, p5.Lat, p5.Lng, "", ihAt(21, 59))
 	if err != nil || !sv.Instant || sv.InstantClosed {
 		t.Fatalf("flag on, 5 km, 21:59: the flag widens instant; got %+v %v", sv, err)
 	}
@@ -289,5 +283,121 @@ func TestInstantHoursPausedLabelNamesNoTime(t *testing.T) {
 	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000})
 	if sv, err := w.svc.serviceabilityAt(ctx, p1.Lat, p1.Lng, "", ihAt(23, 0)); err != nil || sv.InstantResumesLabel != "tomorrow at 7:00 AM" {
 		t.Fatalf("closed by the hours at 23:00: %+v %v", sv, err)
+	}
+}
+
+// ── 6) no zone drawn, INSTANT_TEST_OPEN on: the console's 07:00-22:00 ──────
+//
+// ICR-02. Before: with the flag on and no zone drawn, /serviceability offered
+// instant round the clock (the app promised "20 min" at 11 PM and the order
+// guard took it), while the Zone tab shows such a store 07:00-22:00 (the
+// defaults zoneViewAt(nil) sends). The no-zone lane now follows those hours
+// on /serviceability and in the order guard. Flag off: nothing changes. A
+// store with no zone still gets no closing alert and has nothing to extend or
+// close: those controls come with the zone.
+
+func TestInstantHoursNoZoneFlagLaneFollowsTheConsoleHours(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	if err := w.svc.repo.ensureInstantAlertIndexes(context.Background()); err != nil {
+		t.Fatalf("alert index: %v", err)
+	}
+	ctx := context.Background()
+	store := w.storeID.Hex()
+	p1 := pointAtBearing(guardCenter, 1000, 0) // inside the 5 km no-zone fence
+	p6 := pointAtBearing(guardCenter, 6000, 0) // outside it
+	seven := ihUTC(ihAt(24+7, 0))
+
+	// The console shows a store with no zone 07:00-22:00; that is what is enforced.
+	nv := zoneViewAt(nil, store, ihAt(12, 0))
+	if nv["instantOpenMin"] != effOpenMin(&zone{}) || nv["instantCloseMin"] != effCloseMin(&zone{}) ||
+		nv["instant_open_min"] != 420 || nv["instant_close_min"] != 1320 {
+		t.Fatalf("no-zone console hours: %v-%v", nv["instantOpenMin"], nv["instantCloseMin"])
+	}
+
+	t.Setenv("INSTANT_TEST_OPEN", "true")
+	for _, c := range []struct {
+		at    time.Time
+		open  bool
+		label string
+		when  string
+	}{
+		{ihAt(6, 59), false, "today at 7:00 AM", ihUTC(ihAt(7, 0))},
+		{ihAt(7, 0), true, "", ""},
+		{ihAt(21, 59), true, "", ""},
+		{ihAt(22, 0), false, "tomorrow at 7:00 AM", seven},
+		{ihAt(23, 30), false, "tomorrow at 7:00 AM", seven},
+	} {
+		sv, err := w.svc.serviceabilityAt(ctx, p1.Lat, p1.Lng, "", c.at)
+		if err != nil || !sv.Serviceable || !sv.DefaultOpen || sv.Instant != c.open || sv.InstantClosed == c.open ||
+			sv.InstantResumesLabel != c.label || sv.InstantResumesAt != c.when {
+			t.Fatalf("no zone, flag on, %s: %+v %v, want instant=%v %q %q", c.at.In(istZone).Format("15:04"), sv, err, c.open, c.label, c.when)
+		}
+	}
+	// Outside the fence it stays out of area, on both lanes.
+	if sv, err := w.svc.serviceabilityAt(ctx, p6.Lat, p6.Lng, "", ihAt(10, 0)); err != nil || sv.Serviceable || sv.Instant || sv.InstantClosed {
+		t.Fatalf("no zone, flag on, 6 km: %+v %v", sv, err)
+	}
+
+	// The order guard gives the same answer at the order's own moment.
+	cid := w.customer(t, "9000008601", 0)
+	ihClock(w, ihAt(23, 30))
+	if code, out := ihPost(t, w, cid, "instant", p1); code != http.StatusUnprocessableEntity || out["code"] != "INSTANT_CLOSED" {
+		t.Fatalf("no zone, flag on, instant order at 23:30: %d %v, want 422 INSTANT_CLOSED", code, out)
+	}
+	if code, out := ihPost(t, w, cid, "morning", p1); code != http.StatusCreated {
+		t.Fatalf("no zone, flag on, morning order at 23:30: %d %v, want 201", code, out)
+	}
+	ihClock(w, ihAt(24+10, 0))
+	if code, out := ihPost(t, w, cid, "instant", p1); code != http.StatusCreated {
+		t.Fatalf("no zone, flag on, instant order at 10:00: %d %v, want 201", code, out)
+	}
+	ihClock(w, ihAt(24+10, 0))
+	if code, out := ihPost(t, w, cid, "instant", p6); code != http.StatusUnprocessableEntity || out["code"] != "NOT_SERVICEABLE" {
+		t.Fatalf("no zone, flag on, instant 6 km out: %d %v", code, out)
+	}
+
+	// No zone, no controls: no closing alert, nothing to extend or close.
+	for _, at := range []time.Time{ihAt(24+21, 45), ihAt(24+22, 0)} {
+		w.svc.instantAlertsTick(ctx, at)
+	}
+	if n := len(ihNotes(t, w, w.mgr.PartyID)); n != 0 {
+		t.Fatalf("no zone, flag on: %d alerts, want none", n)
+	}
+	ihClock(w, ihAt(24+21, 50))
+	for _, op := range []string{"extend", "close-now"} {
+		if code, e := ihOp(t, w, w.mgr, store, op, 60); code != http.StatusUnprocessableEntity || e["code"] != "INSTANT_NOT_CONFIGURED" {
+			t.Fatalf("no zone, flag on, %s: %d %v", op, code, e)
+		}
+	}
+	// The console's no-zone view is unchanged.
+	if v := zoneViewAt(nil, store, ihAt(24+10, 0)); v["instantOpenNow"] != false || v["instantClosesAt"] != nil || v["configured"] != false {
+		t.Fatalf("no-zone view: %v", v)
+	}
+
+	// No store has coordinates (the pilot kept open): the same hours.
+	if _, err := w.db.Collection("org_units").UpdateOne(ctx, bson.D{{Key: "_id", Value: w.storeID}},
+		bson.D{{Key: "$unset", Value: bson.D{{Key: "geo_lat", Value: ""}, {Key: "geo_lng", Value: ""}}}}); err != nil {
+		t.Fatalf("unset store geo: %v", err)
+	}
+	if sv, err := w.svc.serviceabilityAt(ctx, p6.Lat, p6.Lng, "", ihAt(23, 30)); err != nil || !sv.DefaultOpen || sv.Instant || !sv.InstantClosed ||
+		sv.InstantResumesLabel != "tomorrow at 7:00 AM" {
+		t.Fatalf("no store geo, flag on, 23:30: %+v %v", sv, err)
+	}
+	if sv, err := w.svc.serviceabilityAt(ctx, p6.Lat, p6.Lng, "", ihAt(10, 0)); err != nil || !sv.Instant || sv.InstantClosed {
+		t.Fatalf("no store geo, flag on, 10:00: %+v %v", sv, err)
+	}
+
+	// Flag off: exactly as before. No instant is offered, nothing is "closed",
+	// and the default-open answer lets an instant order through at any hour.
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	for _, at := range []time.Time{ihAt(10, 0), ihAt(23, 30)} {
+		if sv, err := w.svc.serviceabilityAt(ctx, p1.Lat, p1.Lng, "", at); err != nil || !sv.DefaultOpen || sv.Instant || sv.InstantClosed || sv.InstantResumesLabel != "" {
+			t.Fatalf("no zone, flag off, %s: %+v %v", at.In(istZone).Format("15:04"), sv, err)
+		}
+	}
+	ihClock(w, ihAt(48+23, 30))
+	if code, out := ihPost(t, w, cid, "instant", p1); code != http.StatusCreated {
+		t.Fatalf("no zone, flag off, instant order at 23:30: %d %v, want 201 (unchanged)", code, out)
 	}
 }

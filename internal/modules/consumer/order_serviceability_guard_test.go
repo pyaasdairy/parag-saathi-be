@@ -288,6 +288,8 @@ func TestOrderGuardWithNoZoneMatchesServiceability(t *testing.T) {
 
 	// No zone: /serviceability applies the 5 km fence around the nearest store
 	// with coordinates (defaultFenceKm) and marks what it serves defaultOpen.
+	// Asked at the order's own moment (09:00 IST): with the flag on, the no-zone
+	// instant lane keeps the console's 07:00-22:00 (instant_hours_test.go).
 	points := map[string]geoPt{
 		"1 km (inside the fence)":  pointAtBearing(guardCenter, 1000, 180),
 		"6 km (outside the fence)": pointAtBearing(guardCenter, 6000, 180),
@@ -303,7 +305,7 @@ func TestOrderGuardWithNoZoneMatchesServiceability(t *testing.T) {
 		t.Setenv("INSTANT_TEST_OPEN", flag)
 		for name, pt := range points {
 			pt := pt
-			sv, err := w.svc.serviceability(ctx, pt.Lat, pt.Lng, "")
+			sv, err := w.svc.serviceabilityAt(ctx, pt.Lat, pt.Lng, "", guardClock())
 			if err != nil {
 				t.Fatalf("serviceability %s: %v", name, err)
 			}

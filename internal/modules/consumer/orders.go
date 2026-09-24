@@ -468,7 +468,9 @@ func (s *service) orderDeliveryPoint(ctx context.Context, userID string, in orde
 //
 //   - not serviceable (outside every zone, or beyond the no-zone store fence):
 //     NOT_SERVICEABLE, on either lane;
-//   - instant shut for the night / paused: INSTANT_CLOSED (unchanged);
+//   - instant shut for the night / paused: INSTANT_CLOSED (unchanged; with no
+//     zone drawn and INSTANT_TEST_OPEN on, that is outside the 07:00-22:00
+//     the console shows);
 //   - instant not offered where a drawn zone decides: INSTANT_OUT_OF_RANGE.
 //
 // Everything else goes through: no answer (nil), and the no-zone default-open

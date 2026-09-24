@@ -521,6 +521,27 @@ func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt st
 	return false, day + " at " + next.Format("3:04 PM"), next.UTC().Format(time.RFC3339)
 }
 
+// noZoneInstant sets the instant answer for a point served with NO zone drawn
+// (the default-open answer). Instant is offered there only with the
+// INSTANT_TEST_OPEN flag on, and then within the hours the store console shows
+// a store with no zone (zoneViewAt(nil): 07:00-22:00 IST, the defaults of a
+// zone whose hours were never saved), so after 22:00 the app no longer offers
+// "20 min" while the Zone tab shows instant closed. Outside them it is closed
+// with its "resumes …" answer, as for a drawn zone. Flag off: no instant
+// (unchanged). A store with no zone has no closing alert and nothing to extend
+// or close: those controls come with the zone, drawn on the Zone tab.
+func noZoneInstant(res *serviceabilityResult, instantTestOpen bool, now time.Time) {
+	if !instantTestOpen {
+		return
+	}
+	open, label, at := instantWindow(zone{}, now)
+	if !open {
+		res.InstantClosed, res.InstantResumesLabel, res.InstantResumesAt = true, label, at
+		return
+	}
+	res.Instant = true
+}
+
 // serviceability answers "can we deliver here, and how fast?" for a coordinate
 // (+ optional pincode). Defaults OPEN when no active zone is configured.
 func (s *service) serviceability(ctx context.Context, lat, lng float64, pincode string) (*serviceabilityResult, error) {
@@ -539,7 +560,9 @@ func (s *service) serviceabilityAt(ctx context.Context, lat, lng float64, pincod
 	// TESTING SHORTCUT: with INSTANT_TEST_OPEN=true, instant is offered wherever
 	// the point is serviceable, so the ⚡ Instant tab can be exercised before a
 	// store manager has drawn an instant zone. OFF by default → production still
-	// gates instant strictly on the store's instant radius.
+	// gates instant strictly on the store's instant radius. The widened lane
+	// keeps instant hours: the zone's own, or with no zone drawn the 07:00-22:00
+	// the console shows (noZoneInstant).
 	instantTestOpen := instantTestOpenOn()
 
 	zones, err := s.repo.listActiveZones(ctx)
@@ -557,18 +580,22 @@ func (s *service) serviceabilityAt(ctx context.Context, lat, lng float64, pincod
 			return nil, err
 		}
 		if !ok {
-			return &serviceabilityResult{
-				Serviceable: true, Mode: modeString(svcStandard), Instant: instantTestOpen,
+			res := &serviceabilityResult{
+				Serviceable: true, Mode: modeString(svcStandard),
 				DefaultOpen: true, Pincode: pincode,
-			}, nil
+			}
+			noZoneInstant(res, instantTestOpen, now)
+			return res, nil
 		}
 		dKm := math.Round(distKm*10) / 10
 		if distKm <= defaultFenceKm {
-			return &serviceabilityResult{
-				Serviceable: true, Mode: modeString(svcStandard), Instant: instantTestOpen,
+			res := &serviceabilityResult{
+				Serviceable: true, Mode: modeString(svcStandard),
 				DefaultOpen: true, Pincode: pincode,
 				StoreID: storeID, StoreName: name, DistanceKm: dKm,
-			}, nil
+			}
+			noZoneInstant(res, instantTestOpen, now)
+			return res, nil
 		}
 		return &serviceabilityResult{
 			Serviceable: false, Mode: modeString(svcNone), Instant: false,
