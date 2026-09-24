@@ -19,7 +19,8 @@ import (
 // asked to keep instant open or let it close, instead of the lane closing
 // silently. A light one-minute worker writes, for every active zone that has
 // an instant lane (zoneHasInstantLane: an instant radius, or any served zone
-// while INSTANT_TEST_OPEN widens instant to it) that is not paused, into the
+// while INSTANT_TEST_OPEN widens instant to it) whose pause does not hold
+// (instantPausedAt: a pause is over at its end, the next opening), into the
 // operator inbox that Saathi's bell already polls (GET /notifications/me), on
 // the STORE_LOW_STOCK model (lowstock.go: channel APP, status QUEUED, unread):
 //
@@ -116,7 +117,7 @@ func (s *service) instantAlertsTick(ctx context.Context, now time.Time) {
 	testOpen := instantTestOpenOn()
 	for i := range zones {
 		z := &zones[i]
-		if !zoneHasInstantLane(z, testOpen) || z.InstantPaused {
+		if !zoneHasInstantLane(z, testOpen) || instantPausedAt(z, now) {
 			continue
 		}
 		kind, closeAt, due := instantAlertDue(z, now)

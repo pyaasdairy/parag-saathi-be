@@ -9,8 +9,8 @@ package consumer
 //
 // All answer the zone in the GET /zone shape. An extension runs from the
 // later of now, tonight's closing time and the current extension, never past
-// 02:00 IST; close-now shuts instant until the next opening time without the
-// persistent pause, so it reopens by itself. Fixed IST clock throughout.
+// 02:00 IST; close-now shuts instant until the next opening time without
+// touching the pause switch, so it reopens by itself. Fixed IST clock throughout.
 
 import (
 	"context"
@@ -188,7 +188,8 @@ func TestInstantExtendRefusals(t *testing.T) {
 	if code, e := ihOp(t, w, w.mgr, store, "extend", 60); code != http.StatusUnprocessableEntity || e["code"] != "INSTANT_NOT_CONFIGURED" {
 		t.Fatalf("no instant radius: %d %v", code, e)
 	}
-	// Paused: the manager's switch means "until I turn it back on".
+	// Paused (a pause with no end: it holds until switched off; one with an end
+	// is refused the same way while it holds, instant_pause_test.go).
 	ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000, InstantPaused: true})
 	code, e := ihOp(t, w, w.mgr, store, "extend", 60)
 	if code != http.StatusUnprocessableEntity || e["code"] != "INSTANT_PAUSED" {
@@ -392,8 +393,8 @@ func TestInstantReopenUndoesACloseNow(t *testing.T) {
 		t.Fatalf("reopen with nothing to undo: %d %v", code, v)
 	}
 
-	// Refusals: another store's manager, the pause (it holds until switched
-	// off), a store with no instant lane.
+	// Refusals: another store's manager, the pause while it holds, a store
+	// with no instant lane.
 	_, mgrB := ihSecondStore(t, w)
 	if code, e := ihOp(t, w, mgrB, store, "reopen", 0); code != http.StatusForbidden || e["code"] != "FORBIDDEN" {
 		t.Fatalf("manager B reopens A: %d %v", code, e)

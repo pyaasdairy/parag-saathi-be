@@ -16,15 +16,16 @@ import (
 
 // INSTANT HOURS AT CLOSING TIME (founder, 24 Sep). The store's instant lane is
 // open inside its saved hours (the ones the Zone tab shows; an unsaved zone is
-// 07:00-22:00 IST) unless the manager's persistent pause is on. At closing time
-// the manager decides for tonight only:
+// 07:00-22:00 IST) unless the manager's pause holds (the Zone tab's switch,
+// which ends at the next opening time: instantPausedAt). At closing time the
+// manager decides for tonight only:
 //
 //   - EXTEND by 30, 60 or 120 minutes (POST .../zone/instant/extend). The
 //     extension runs from the later of now, tonight's closing time and the
 //     current extension, and never past 02:00 IST the morning after the
 //     window opened. It simply expires at the stored moment.
 //   - CLOSE NOW (POST .../zone/instant/close-now): instant shuts until the next
-//     opening time and reopens by itself; the persistent pause is not touched.
+//     opening time and reopens by itself; the pause switch is not touched.
 //     REOPEN (POST .../zone/instant/reopen) undoes it at once.
 //
 // Either one replaces the other (the manager's latest word wins). The Zone
@@ -256,7 +257,7 @@ func (s *service) extendInstant(ctx context.Context, actor auth.Actor, storeID s
 		if requestID != "" && containsStr(z.InstantExtendRequests, requestID) {
 			return z, nil // a retry of an extension already made
 		}
-		if z.InstantPaused {
+		if instantPausedAt(z, now) {
 			return nil, errUnprocessable("INSTANT_PAUSED", "instant is switched off for this store; turn it back on in the Zone tab first")
 		}
 		base, limit := instantExtendBase(z, now)
@@ -277,7 +278,7 @@ func (s *service) extendInstant(ctx context.Context, actor auth.Actor, storeID s
 }
 
 // closeInstantNow shuts the store's instant lane until its next opening time,
-// clearing any extension; the persistent pause is not touched.
+// clearing any extension; the pause switch is not touched.
 func (s *service) closeInstantNow(ctx context.Context, actor auth.Actor, storeID string, now time.Time) (*zone, error) {
 	z, err := s.instantZoneFor(ctx, actor, storeID)
 	if err != nil {
@@ -289,14 +290,14 @@ func (s *service) closeInstantNow(ctx context.Context, actor auth.Actor, storeID
 
 // reopenInstant undoes a close-now: instant follows its hours (and any
 // extension) again at once. Tonight's close is not moved, and after the hours
-// it stays shut (extend opens past them). The persistent pause is refused as
-// extend refuses it: it holds until the manager switches it off.
+// it stays shut (extend opens past them). While the pause holds it is refused
+// as extend refuses it: the Zone tab's switch is what ends it early.
 func (s *service) reopenInstant(ctx context.Context, actor auth.Actor, storeID string, now time.Time) (*zone, error) {
 	z, err := s.instantZoneFor(ctx, actor, storeID)
 	if err != nil {
 		return nil, err
 	}
-	if z.InstantPaused {
+	if instantPausedAt(z, now) {
 		return nil, errUnprocessable("INSTANT_PAUSED", "instant is switched off for this store; turn it back on in the Zone tab first")
 	}
 	if z.InstantClosedUntil == nil {

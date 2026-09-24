@@ -183,11 +183,16 @@ type zone struct {
 	InstantOpenMin  int  `bson:"instant_open_min"        json:"instantOpenMin"`
 	InstantCloseMin int  `bson:"instant_close_min"       json:"instantCloseMin"`
 	InstantPaused   bool `bson:"instant_paused"          json:"instantPaused"`
+	// InstantPausedUntil ends the pause (UTC): the next opening time when the
+	// manager switched it on (upsertZone), as the Zone tab promises. nil on a
+	// pause stored before ends were: that one holds until switched off. Read
+	// the pause through instantPausedAt, never InstantPaused alone.
+	InstantPausedUntil *time.Time `bson:"instant_paused_until,omitempty" json:"instantPausedUntil,omitempty"`
 	// Tonight-only overrides the store manager sets at closing time
 	// (instant_hours.go), both UTC moments that simply expire: an extension keeps
 	// instant open past its hours until InstantExtendedUntil; close-now shuts it
-	// until InstantClosedUntil (the next opening time) WITHOUT the persistent
-	// pause, so it reopens by itself. The console's PUT never touches them.
+	// until InstantClosedUntil (the next opening time) without touching the
+	// pause switch, and reopens by itself. The console's PUT never touches them.
 	InstantExtendedUntil *time.Time `bson:"instant_extended_until,omitempty" json:"instantExtendedUntil,omitempty"`
 	InstantClosedUntil   *time.Time `bson:"instant_closed_until,omitempty"   json:"instantClosedUntil,omitempty"`
 	// The last few extend request_ids, so a retried extend counts once.
@@ -306,8 +311,10 @@ func (r *repository) getZone(ctx context.Context, storeID string) (*zone, error)
 	return &z, nil
 }
 
-// upsertZone replaces a store's whole zone policy (keyed by store_id). created_at
-// is stamped once on insert; the returned doc reflects the stored state.
+// upsertZone replaces a store's whole zone policy (keyed by store_id), the
+// pause's end included (unset when nil). created_at is stamped once on insert;
+// the returned doc reflects the stored state. Tonight's overrides are not
+// part of the policy and are never touched.
 func (r *repository) upsertZone(ctx context.Context, z *zone) (*zone, error) {
 	now := time.Now().UTC()
 	z.UpdatedAt = now
@@ -328,14 +335,24 @@ func (r *repository) upsertZone(ctx context.Context, z *zone) (*zone, error) {
 		{Key: "updated_by", Value: z.UpdatedBy},
 		{Key: "updated_at", Value: now},
 	}
+	unset := bson.D{}
+	if z.InstantPausedUntil != nil {
+		set = append(set, bson.E{Key: "instant_paused_until", Value: z.InstantPausedUntil.UTC()})
+	} else {
+		unset = append(unset, bson.E{Key: "instant_paused_until", Value: ""})
+	}
+	update := bson.D{
+		{Key: "$set", Value: set},
+		{Key: "$setOnInsert", Value: bson.D{{Key: "created_at", Value: now}}},
+	}
+	if len(unset) > 0 {
+		update = append(update, bson.E{Key: "$unset", Value: unset})
+	}
 	after := options.After
 	var out zone
 	err := r.storeZones.FindOneAndUpdate(ctx,
 		bson.D{{Key: "store_id", Value: z.StoreID}},
-		bson.D{
-			{Key: "$set", Value: set},
-			{Key: "$setOnInsert", Value: bson.D{{Key: "created_at", Value: now}}},
-		},
+		update,
 		options.FindOneAndUpdate().SetReturnDocument(after).SetUpsert(true),
 	).Decode(&out)
 	if err != nil {
@@ -438,11 +455,22 @@ func withinInstantHours(z *zone, t time.Time) bool {
 	return cur >= openMin || cur < closeMin
 }
 
-// pausedResumesLabel is the "resumes …" answer for a store whose manager paused
-// instant ("Close instant now" in the Zone tab). The pause holds until they
-// switch it off, so the label names no time; the consumer app reads it as
-// "Instant resumes when the store turns it back on".
+// pausedResumesLabel is the "resumes …" answer for a pause with no end: one
+// the manager switched on ("Close instant now" in the Zone tab) before pauses
+// carried one, which holds until they switch it off, so the label names no
+// time; the consumer app reads it as "Instant resumes when the store turns it
+// back on". A pause switched on since ends at the next opening time and the
+// label names that moment.
 const pausedResumesLabel = "when the store turns it back on"
+
+// instantPausedAt reports whether the manager's pause holds at now: the switch
+// is on and its end (the next opening time when it was switched on) has not
+// come, or it has no end (stored before ends were: until switched off). From
+// its end on, instant follows its hours again, and the zone view reports the
+// switch off.
+func instantPausedAt(z *zone, now time.Time) bool {
+	return z.InstantPaused && (z.InstantPausedUntil == nil || now.Before(*z.InstantPausedUntil))
+}
 
 // instantWindow decides whether a store's INSTANT lane is open right now (IST) and,
 // when shut, a human "resumes …" label + the RFC3339 resume moment. The hours are
@@ -453,26 +481,34 @@ const pausedResumesLabel = "when the store turns it back on"
 //
 // On top of the hours sit the manager's tonight-only overrides: an extension
 // keeps the lane open until InstantExtendedUntil, close-now shuts it until
-// InstantClosedUntil. The persistent pause beats both.
+// InstantClosedUntil. The pause (instantPausedAt) beats both while it holds.
 func instantWindow(z zone, now time.Time) (open bool, resumesLabel, resumesAt string) {
 	nowIST := now.In(istZone)
 	withinHours := withinInstantHours(&z, now)
+	paused := instantPausedAt(&z, now)
 	closedNow := z.InstantClosedUntil != nil && now.Before(*z.InstantClosedUntil)
 	extended := z.InstantExtendedUntil != nil && now.Before(*z.InstantExtendedUntil)
-	if !z.InstantPaused && !closedNow && (withinHours || extended) {
+	if !paused && !closedNow && (withinHours || extended) {
 		return true, "", ""
 	}
-	if z.InstantPaused {
-		// The pause does not end at the next opening time: name no time.
+	if paused && z.InstantPausedUntil == nil {
+		// A pause with no end holds until switched off: name no time.
 		return false, pausedResumesLabel, ""
 	}
 	// Next opening moment in IST (today if we are before today's open, else
-	// tomorrow). After a close-now, instant comes back when it ends if the
-	// hours are open then (they may have moved since), else at the first
-	// opening after it.
+	// tomorrow). Shut by the manager (a close-now, the pause, or both),
+	// instant comes back when the later of them ends if the hours are open
+	// then (they may have moved since), else at the first opening after it.
 	next := nextInstantOpening(&z, now)
+	var shutUntil *time.Time
 	if closedNow {
-		next = *z.InstantClosedUntil
+		shutUntil = z.InstantClosedUntil
+	}
+	if paused && (shutUntil == nil || z.InstantPausedUntil.After(*shutUntil)) {
+		shutUntil = z.InstantPausedUntil
+	}
+	if shutUntil != nil {
+		next = *shutUntil
 		if !withinInstantHours(&z, next) {
 			next = nextInstantOpening(&z, next)
 		}
@@ -715,10 +751,18 @@ func cleanPincodes(in []string) []string {
 // upsertZone validates a manager's zone config and stores it (guarded to the
 // store they manage). Radii are range-checked (100..60000 m); if both circles
 // are set, the instant circle must sit inside the standard one.
+//
+// The pause ("Close instant now") ends at the next opening time, as the Zone
+// tab says under the switch: switching it on (off, as the view shows it, to
+// on) stores that moment, worked out from the hours this Save stores. The
+// console re-sends the switch on every Save, so a Save while the pause holds
+// keeps its end, and a pause with no end (stored before ends were) stays
+// without one. Switching it off clears both. On the service clock.
 func (s *service) upsertZone(ctx context.Context, actor auth.Actor, storeID string, in zoneInput) (*zone, error) {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
 	}
+	now := s.now()
 	in.normalize() // fold km + snake aliases onto metres/camel
 	if in.Center == nil || !coordsSane(in.Center.Lat, in.Center.Lng) {
 		return nil, errUnprocessable("INVALID_CENTER", "a sane center {lat,lng} is required")
@@ -786,6 +830,18 @@ func (s *service) upsertZone(ctx context.Context, actor auth.Actor, storeID stri
 		InstantCloseMin: closeMin,
 		InstantPaused:   paused,
 		UpdatedBy:       actor.PartyID,
+	}
+	if paused {
+		prev, err := s.repo.getZone(ctx, storeID)
+		if err != nil {
+			return nil, err
+		}
+		if prev != nil && instantPausedAt(prev, now) {
+			z.InstantPausedUntil = prev.InstantPausedUntil // already on: a re-sent switch
+		} else {
+			until := nextInstantOpening(z, now).UTC() // switched on now
+			z.InstantPausedUntil = &until
+		}
 	}
 	return s.repo.upsertZone(ctx, z)
 }
@@ -916,7 +972,10 @@ func zoneView(z *zone, storeID string) map[string]any {
 // closes (null when shut or open round the clock; false/null for a zone with
 // no instant lane or an inactive zone); and tonight's overrides
 // instantExtendedUntil / instantClosedUntil while they still run (RFC3339 UTC,
-// else null).
+// else null). instantPaused is the switch as it holds at `now`: false once
+// the pause has reached its end, so the console shows it off and a Save sends
+// it off; instantPausedUntil is that end while the pause holds (null for a
+// pause with no end, which holds until switched off).
 func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
 	if z == nil {
 		return map[string]any{
@@ -934,6 +993,7 @@ func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
 			"instantClosesAt": nil, "instant_closes_at": nil,
 			"instantExtendedUntil": nil, "instant_extended_until": nil,
 			"instantClosedUntil": nil, "instant_closed_until": nil,
+			"instantPausedUntil": nil, "instant_paused_until": nil,
 		}
 	}
 	c := z.centerPt()
@@ -955,11 +1015,17 @@ func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
 	if z.InstantClosedUntil != nil && now.Before(*z.InstantClosedUntil) {
 		closedUntil = z.InstantClosedUntil.UTC().Format(time.RFC3339)
 	}
+	paused := instantPausedAt(z, now)
+	var pausedUntil any
+	if paused && z.InstantPausedUntil != nil {
+		pausedUntil = z.InstantPausedUntil.UTC().Format(time.RFC3339)
+	}
 	return map[string]any{
 		"instantOpenNow": openNow, "instant_open_now": openNow,
 		"instantClosesAt": closesAt, "instant_closes_at": closesAt,
 		"instantExtendedUntil": extendedUntil, "instant_extended_until": extendedUntil,
 		"instantClosedUntil": closedUntil, "instant_closed_until": closedUntil,
+		"instantPausedUntil": pausedUntil, "instant_paused_until": pausedUntil,
 		"storeId": z.StoreID, "active": z.Active, "configured": true,
 		"center":          map[string]float64{"lat": c.Lat, "lng": c.Lng},
 		"standardRadiusM": z.StandardRadiusM, "instantRadiusM": z.InstantRadiusM,
@@ -971,8 +1037,8 @@ func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
 		"monsoon_enabled": z.MonsoonEnabled, "monsoon_rupees": z.MonsoonRupees,
 		// Midnight (1440) goes out as 0: the console's picker shows it as
 		// 12:00 AM and sends 0 back, which upsertZone stores as 1440 again.
-		"instantOpenMin": effOpenMin(z), "instantCloseMin": effCloseMin(z) % 1440, "instantPaused": z.InstantPaused,
-		"instant_open_min": effOpenMin(z), "instant_close_min": effCloseMin(z) % 1440, "instant_paused": z.InstantPaused,
+		"instantOpenMin": effOpenMin(z), "instantCloseMin": effCloseMin(z) % 1440, "instantPaused": paused,
+		"instant_open_min": effOpenMin(z), "instant_close_min": effCloseMin(z) % 1440, "instant_paused": paused,
 		"updatedAt": z.UpdatedAt,
 	}
 }

@@ -27,9 +27,10 @@ func TestInstantWindow_Hours(t *testing.T) {
 }
 
 func TestInstantWindow_PausedAndNoHours(t *testing.T) {
-	// The manager's pause ("Close instant now" in the Zone tab) holds until they
-	// turn it off: it does NOT end at the next opening time, so the label names no
-	// time (the consumer app reads "Instant resumes when the store turns it back on").
+	// A pause with no end ("Close instant now" in the Zone tab, switched on
+	// before pauses carried one) holds until they turn it off: it does NOT end at
+	// the next opening time, so the label names no time (the consumer app reads
+	// "Instant resumes when the store turns it back on").
 	zp := zone{InstantOpenMin: 420, InstantCloseMin: 1320, InstantPaused: true}
 	for _, at := range []time.Time{istAt(10, 0), istAt(23, 0), istAt(7, 0)} {
 		if open, label, resumesAt := instantWindow(zp, at); open || label != pausedResumesLabel || resumesAt != "" {
@@ -148,6 +149,64 @@ func TestInstantWindow_CloseNowResumesWhenItEnds(t *testing.T) {
 	z := zone{InstantOpenMin: 360, InstantCloseMin: 1320, InstantClosedUntil: &until}
 	if open, _, _ := instantWindow(z, until); !open {
 		t.Fatalf("07:00 on the 31st, hours 06:00-22:00: the close-now has ended, instant is open")
+	}
+}
+
+// A pause switched on through the console carries its end, the next opening
+// time (instant_pause_test.go): "resumes …" names that moment, and at that
+// moment the pause is over and the hours decide again. A pause with no end
+// (stored before ends were) keeps its old meaning: TestInstantWindow_PausedAndNoHours.
+func TestInstantWindow_PauseEndsAtItsEnd(t *testing.T) {
+	jul := func(day, h, m int) time.Time { return time.Date(2026, 7, day, h, m, 0, 0, istZone) }
+	until := jul(31, 7, 0) // switched on at 21:00 on the 30th, hours 07:00-22:00
+	wire := until.UTC().Format(time.RFC3339)
+	z := zone{InstantOpenMin: 420, InstantCloseMin: 1320, InstantPaused: true, InstantPausedUntil: &until}
+	for _, c := range []struct {
+		at    time.Time
+		label string
+	}{{jul(30, 21, 30), "tomorrow at 7:00 AM"}, {jul(31, 6, 59), "today at 7:00 AM"}} {
+		if open, label, at := instantWindow(z, c.at); open || label != c.label || at != wire {
+			t.Fatalf("paused until 07:00, at %s: open=%v label=%q at=%q", c.at.Format("01-02 15:04"), open, label, at)
+		}
+		if !instantPausedAt(&z, c.at) {
+			t.Fatalf("paused until 07:00, at %s: not paused", c.at.Format("01-02 15:04"))
+		}
+	}
+	if open, _, _ := instantWindow(z, until); !open || instantPausedAt(&z, until) {
+		t.Fatalf("07:00: the pause has ended, the hours are open")
+	}
+	// Ended outside the hours (the opening moved later since): the next opening.
+	late := z
+	late.InstantOpenMin = 540
+	if open, label, at := instantWindow(late, jul(31, 8, 0)); open || label != "today at 9:00 AM" || at != jul(31, 9, 0).UTC().Format(time.RFC3339) {
+		t.Fatalf("pause ended at 07:00, opens 09:00, at 08:00: open=%v label=%q at=%q", open, label, at)
+	}
+	if open, label, _ := instantWindow(late, jul(30, 23, 0)); open || label != "tomorrow at 9:00 AM" {
+		t.Fatalf("paused until 07:00, opens 09:00, at 23:00: open=%v label=%q", open, label)
+	}
+	// With a close-now as well, instant is back when the later of the two ends.
+	closed := jul(31, 8, 0)
+	both := z
+	both.InstantClosedUntil = &closed
+	if open, label, _ := instantWindow(both, jul(31, 6, 0)); open || label != "today at 8:00 AM" {
+		t.Fatalf("paused until 07:00 + closed until 08:00: open=%v label=%q", open, label)
+	}
+	pausedLater := jul(31, 9, 0)
+	both.InstantPausedUntil = &pausedLater
+	if open, label, _ := instantWindow(both, jul(31, 6, 0)); open || label != "today at 9:00 AM" {
+		t.Fatalf("paused until 09:00 + closed until 08:00: open=%v label=%q", open, label)
+	}
+	// An extension never reopens a pause that is still on.
+	ext := jul(30, 23, 0)
+	withExt := z
+	withExt.InstantExtendedUntil = &ext
+	if open, _, _ := instantWindow(withExt, jul(30, 22, 30)); open {
+		t.Fatalf("paused until 07:00 + extension to 23:00 should stay closed at 22:30")
+	}
+	// Switched off, whatever end is stored, is not a pause.
+	off := zone{InstantOpenMin: 420, InstantCloseMin: 1320, InstantPausedUntil: &until}
+	if instantPausedAt(&off, jul(30, 21, 30)) {
+		t.Fatalf("switch off: not paused")
 	}
 }
 

@@ -265,9 +265,12 @@ func TestInstantHoursMidnightCloseFromTheConsole(t *testing.T) {
 
 // ── 4) the paused label tells the truth ────────────────────────────────────
 //
-// The manager's pause holds until they switch it off; it does not end at the
-// next opening time. /serviceability used to tell the shopper "Instant resumes
-// tomorrow at 7:00 AM" for a paused store, which stayed shut at 7:00.
+// A pause with no end (stored before pauses carried one) holds until the
+// manager switches it off; it does not end at the next opening time.
+// /serviceability used to tell the shopper "Instant resumes tomorrow at 7:00
+// AM" for such a store, which stayed shut at 7:00. (A pause switched on
+// since ends at the next opening time and the label names it:
+// instant_pause_test.go.)
 
 func TestInstantHoursPausedLabelNamesNoTime(t *testing.T) {
 	w, done := newChainWorld(t)
