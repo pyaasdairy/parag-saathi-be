@@ -21,6 +21,8 @@ package consumer
 
 import (
 	"context"
+	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,14 +33,33 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// crmEmittedTopics is every outbox topic some backend code path emits and
-// the worker routes: the lifecycle topics the generic router serves plus the
-// ones the Welcome Litre state machine owns. An event trigger on any other
+// crmEmitCallRe matches an emitCRMEvent call site and captures its literal
+// topic. Every emitter in the package passes the topic as a string literal.
+var crmEmitCallRe = regexp.MustCompile(`emitCRMEvent\(\s*[^,]+,\s*"([^"]+)"`)
+
+// crmEmittedTopics is every outbox topic some backend code path really
+// emits: read from the emitCRMEvent call sites in this package's non-test
+// sources, never from a hand-kept list (a topic added to crmLifecycleTopics
+// without its emitter must fail the matrix). An event trigger on any other
 // topic has no emitter.
 func crmEmittedTopics() map[string]bool {
-	out := map[string]bool{"offer.finalized": true, "wallet.recharge_settled": true, "abuse_flag_raised": true}
-	for _, t := range crmLifecycleTopics {
-		out[t] = true
+	out := map[string]bool{}
+	ents, err := os.ReadDir(".")
+	if err != nil {
+		return out // nothing readable: every event trigger reports "no emitter"
+	}
+	for _, e := range ents {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			continue
+		}
+		for _, m := range crmEmitCallRe.FindAllStringSubmatch(string(src), -1) {
+			out[m[1]] = true
+		}
 	}
 	return out
 }
@@ -426,5 +447,38 @@ func TestCRMMatrixCoverageCatchesAnUnwiredTrigger(t *testing.T) {
 	delete(cfg.Triggers, "Z-99")
 	if got := strings.Join(crmMatrixUncovered(cfg, covered), "\n"); !strings.Contains(got, "Z-99: meta.awaiting_event names a trigger that does not exist") {
 		t.Fatalf("a stale awaiting_event entry must fail: %s", got)
+	}
+}
+
+// R1-14: following "How to add a message" step 2 half-way (the topic added to
+// crmLifecycleTopics, the emitCRMEvent call forgotten) used to leave the
+// matrix green, because the emitted-topic set was that same hand-kept list.
+// The set is now read from the emitCRMEvent call sites in the package's
+// non-test sources.
+func TestCRMMatrixCoverageCatchesATopicWithNoEmitter(t *testing.T) {
+	real := crmConfigLoad()
+	cfg := &crmConfig{Triggers: map[string]crmTrigger{}, Templates: real.Templates, AwaitingEvent: real.AwaitingEvent}
+	covered := map[string]bool{}
+	for id, tr := range real.Triggers {
+		cfg.Triggers[id] = tr
+		if _, waiting := real.AwaitingEvent[id]; !waiting && tr.Kind != "alias" {
+			covered[id] = true
+		}
+	}
+	saved := crmLifecycleTopics
+	defer func() { crmLifecycleTopics = saved }()
+	crmLifecycleTopics = append(append([]string{}, saved...), "subscription.renewed")
+	cfg.Triggers["Z-98"] = crmTrigger{ID: "Z-98", Kind: "event", Event: "subscription.renewed", Category: "service_implicit", Template: crmTemplateRef{Ref: "T-A03"}}
+	covered["Z-98"] = true
+	got := strings.Join(crmMatrixUncovered(cfg, covered), "\n")
+	if !strings.Contains(got, "Z-98: topic subscription.renewed has no emitter") {
+		t.Fatalf("a listed topic nothing emits must fail the matrix, got:\n%s", got)
+	}
+	// Every topic the router serves really has an emitter today.
+	emitted := crmEmittedTopics()
+	for _, tp := range saved {
+		if !emitted[tp] {
+			t.Errorf("crmLifecycleTopics lists %s but no emitCRMEvent call emits it", tp)
+		}
 	}
 }
