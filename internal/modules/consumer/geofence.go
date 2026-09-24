@@ -446,7 +446,8 @@ const pausedResumesLabel = "when the store turns it back on"
 // when shut, a human "resumes …" label + the RFC3339 resume moment. The hours are
 // the ones the store console shows (effOpenMin/effCloseMin): a zone that never
 // saved hours (InstantCloseMin==0) is open 07:00–22:00 IST, not round the clock.
-// A store that wants instant all day saves 00:00–24:00 (0..1440).
+// A store that wants instant all day saves 00:00–24:00 (0..1440; the console
+// sends it as 12:00 AM-12:00 AM, 0/0, and a saved close of 0 is midnight).
 //
 // On top of the hours sit the manager's tonight-only overrides: an extension
 // keeps the lane open until InstantExtendedUntil, close-now shuts it until
@@ -748,6 +749,12 @@ func (s *service) upsertZone(ctx context.Context, actor auth.Actor, storeID stri
 	}
 	if in.InstantCloseMin != nil {
 		closeMin = *in.InstantCloseMin
+		// The Zone tab's time picker ends at 23:59, so it sends a midnight
+		// close as 0: that is the end of the day (1440), never "hours not
+		// saved". 0/0 is then all day; the view echoes 1440 back as 0.
+		if closeMin == 0 {
+			closeMin = 1440
+		}
 	}
 	paused := false
 	if in.InstantPaused != nil {
@@ -960,8 +967,10 @@ func zoneViewAt(z *zone, storeID string, now time.Time) map[string]any {
 		"includePolygons": z.IncludePolygons, "excludePolygons": z.ExcludePolygons,
 		"monsoonEnabled": z.MonsoonEnabled, "monsoonRupees": z.MonsoonRupees,
 		"monsoon_enabled": z.MonsoonEnabled, "monsoon_rupees": z.MonsoonRupees,
-		"instantOpenMin": effOpenMin(z), "instantCloseMin": effCloseMin(z), "instantPaused": z.InstantPaused,
-		"instant_open_min": effOpenMin(z), "instant_close_min": effCloseMin(z), "instant_paused": z.InstantPaused,
+		// Midnight (1440) goes out as 0: the console's picker shows it as
+		// 12:00 AM and sends 0 back, which upsertZone stores as 1440 again.
+		"instantOpenMin": effOpenMin(z), "instantCloseMin": effCloseMin(z) % 1440, "instantPaused": z.InstantPaused,
+		"instant_open_min": effOpenMin(z), "instant_close_min": effCloseMin(z) % 1440, "instant_paused": z.InstantPaused,
 		"updatedAt": z.UpdatedAt,
 	}
 }

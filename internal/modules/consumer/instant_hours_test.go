@@ -177,6 +177,92 @@ func TestInstantHoursKeepTheInstantTestOpenInteraction(t *testing.T) {
 	}
 }
 
+// ── 5) the console's "Closes 12:00 AM" is midnight, not "never saved" ──────
+//
+// The Zone tab's time picker only produces 0..1439, so a midnight close is
+// sent as instant_close_min 0. That was stored as 0 and read as "hours never
+// saved": the manager's 09:00-midnight became 07:00-22:00 and the form
+// reloaded showing 7:00 AM-10:00 PM; all day (00:00-00:00) could not be
+// saved from the console at all.
+
+func TestInstantHoursMidnightCloseFromTheConsole(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	t.Setenv("INSTANT_TEST_OPEN", "")
+	ctx := context.Background()
+	store := w.storeID.Hex()
+	p1 := pointAtBearing(guardCenter, 1000, 45)
+	// save sends the console's PUT body (snake_case, km radii, both hours) and
+	// answers the view the form re-hydrates from.
+	save := func(open, close int) map[string]any {
+		t.Helper()
+		in := zoneInput{Center: &geoPt{Lat: guardCenter.Lat, Lng: guardCenter.Lng}, StandardRadiusKm: 8, InstantRadiusKm: 2.5,
+			InstantOpenMinS: &open, InstantCloseMinS: &close}
+		z, err := w.svc.upsertZone(ctx, w.mgr, store, in)
+		if err != nil {
+			t.Fatalf("save %d-%d: %v", open, close, err)
+		}
+		return zoneViewAt(z, store, ihAt(23, 50))
+	}
+	stored := func(open, close int) {
+		t.Helper()
+		if z := ihStoredZone(t, w, store); z.InstantOpenMin != open || z.InstantCloseMin != close {
+			t.Fatalf("stored %d-%d, want %d-%d", z.InstantOpenMin, z.InstantCloseMin, open, close)
+		}
+	}
+	echo := func(v map[string]any, open, close int) {
+		t.Helper()
+		if v["instantOpenMin"] != open || v["instantCloseMin"] != close || v["instant_open_min"] != open || v["instant_close_min"] != close {
+			t.Fatalf("console echo %v-%v / %v-%v, want %d-%d", v["instantOpenMin"], v["instantCloseMin"], v["instant_open_min"], v["instant_close_min"], open, close)
+		}
+	}
+	instant := func(at time.Time, want bool) {
+		t.Helper()
+		sv, err := w.svc.serviceabilityAt(ctx, p1.Lat, p1.Lng, "", at)
+		if err != nil || sv.Instant != want || sv.InstantClosed == want {
+			t.Fatalf("at %s: %+v %v, want instant=%v", at.In(istZone).Format("01-02 15:04"), sv, err, want)
+		}
+	}
+
+	// Opens 9:00 AM, closes 12:00 AM.
+	v := save(540, 0)
+	stored(540, 1440)
+	echo(v, 540, 0) // the form shows 9:00 AM - 12:00 AM and sends 0 back
+	if v["instantClosesAt"] != ihUTC(ihAt(24, 0)) {
+		t.Fatalf("closes at %v, want midnight", v["instantClosesAt"])
+	}
+	for _, c := range []struct {
+		at   time.Time
+		want bool
+	}{{ihAt(8, 59), false}, {ihAt(9, 0), true}, {ihAt(23, 0), true}, {ihAt(23, 59), true}, {ihAt(24, 0), false}, {ihAt(24+8, 0), false}} {
+		instant(c.at, c.want)
+	}
+	// Saving the form again as it shows is stable.
+	echo(save(v["instantOpenMin"].(int), v["instantCloseMin"].(int)), 540, 0)
+	stored(540, 1440)
+
+	// Opens 12:00 AM, closes 12:00 AM: all day.
+	v = save(0, 0)
+	stored(0, 1440)
+	echo(v, 0, 0)
+	if v["instantClosesAt"] != nil || v["instantOpenNow"] != true {
+		t.Fatalf("all day: open %v closes %v", v["instantOpenNow"], v["instantClosesAt"])
+	}
+	for _, at := range []time.Time{ihAt(3, 0), ihAt(22, 30), ihAt(23, 59), ihAt(24, 0)} {
+		instant(at, true)
+	}
+
+	// An API client's 1440 is still midnight; a zone never saved keeps 07:00-22:00.
+	save(540, 1440)
+	stored(540, 1440)
+	never := ihZone(t, w, zone{InstantRadiusM: 2500, StandardRadiusM: 8000})
+	if never.InstantCloseMin != 0 {
+		t.Fatalf("precondition: never saved, got close %d", never.InstantCloseMin)
+	}
+	echo(zoneViewAt(never, store, ihAt(12, 0)), 420, 1320)
+	instant(ihAt(22, 30), false)
+}
+
 // ── 4) the paused label tells the truth ────────────────────────────────────
 //
 // The manager's pause holds until they switch it off; it does not end at the
