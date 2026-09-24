@@ -24,6 +24,12 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	ctx := context.Background()
 	store := w.storeID.Hex()
 	tomorrow := addDaysIST(istToday(time.Now()), 1)
+	// Before noon the upcoming window is exactly tomorrow (from noon it runs
+	// to the day after); the test drives the endpoint, and places its
+	// scheduled one-off orders, at 09:00 IST today (after noon tomorrow is
+	// past the one-off cut-off).
+	ist := time.Now().In(istZone)
+	at := time.Date(ist.Year(), ist.Month(), ist.Day(), 9, 0, 0, 0, istZone)
 
 	// (a) a subscription preview: the 13:00 scheduler's unlocked order.
 	cid := w.customer(t, "9000006001", 500)
@@ -57,16 +63,16 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	// (c) a scheduled one-off order: with its task it belongs to the orders
 	// console; without one (creation failed) it is upcoming.
 	cid2 := w.customer(t, "9000006002", 500)
-	oneOff, err := w.svc.createOrder(ctx, cid2.Hex(), orderInput{
+	oneOff, err := w.svc.createOrderAt(ctx, cid2.Hex(), orderInput{
 		Items:         []orderItem{{ProductID: "taaza-1l", Name: "Milk taaza-1l", Qty: 1, Price: 57}},
 		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
 		Lane: "morning", ConsumerName: "Scheduled Tester", Phone: "9000006002", DeliveryDate: tomorrow,
-	})
+	}, at)
 	if err != nil {
 		t.Fatalf("scheduled order: %v", err)
 	}
 
-	rows, err := w.svc.storeUpcoming(ctx, w.mgr, store)
+	rows, err := w.svc.storeUpcomingAt(ctx, w.mgr, store, at)
 	if err != nil {
 		t.Fatalf("storeUpcoming: %v", err)
 	}
@@ -92,7 +98,7 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	if _, err := w.db.Collection(collDeliveries).DeleteOne(ctx, bson.D{{Key: "order_id", Value: oneOff.OrderID}}); err != nil {
 		t.Fatalf("drop task: %v", err)
 	}
-	rows, err = w.svc.storeUpcoming(ctx, w.mgr, store)
+	rows, err = w.svc.storeUpcomingAt(ctx, w.mgr, store, at)
 	if err != nil {
 		t.Fatalf("storeUpcoming 2: %v", err)
 	}
@@ -128,32 +134,32 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	}
 	actor2 := auth.Actor{PartyID: mgr2.Hex(), Kind: "role", RoleCode: "STORE_MANAGER"}
 	cid3 := w.customer(t, "9000006003", 500)
-	farOrder, err := w.svc.createOrder(ctx, cid3.Hex(), orderInput{
+	farOrder, err := w.svc.createOrderAt(ctx, cid3.Hex(), orderInput{
 		Items:         []orderItem{{ProductID: "gold-1l", Name: "Milk gold-1l", Qty: 1, Price: 69}},
 		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Delhi",
 		Lane: "morning", ConsumerName: "Far Tester", Phone: "9000006003", DeliveryDate: tomorrow,
 		Geo: &geoPoint{Lat: 28.6000, Lng: 77.2000},
-	})
+	}, at)
 	if err != nil {
 		t.Fatalf("far order: %v", err)
 	}
 	if _, err := w.db.Collection(collDeliveries).DeleteOne(ctx, bson.D{{Key: "order_id", Value: farOrder.OrderID}}); err != nil {
 		t.Fatalf("drop far task: %v", err)
 	}
-	rows2, err := w.svc.storeUpcoming(ctx, actor2, store2.Hex())
+	rows2, err := w.svc.storeUpcomingAt(ctx, actor2, store2.Hex(), at)
 	if err != nil {
 		t.Fatalf("storeUpcoming store2: %v", err)
 	}
 	if len(rows2) != 1 || rows2[0].OrderID != farOrder.OrderID {
 		t.Fatalf("store2 rows: %+v want only %s", rows2, farOrder.OrderID)
 	}
-	rows, _ = w.svc.storeUpcoming(ctx, w.mgr, store)
+	rows, _ = w.svc.storeUpcomingAt(ctx, w.mgr, store, at)
 	for _, r := range rows {
 		if r.OrderID == farOrder.OrderID {
 			t.Fatalf("the far order leaked into store 1's upcoming")
 		}
 	}
-	if _, err := w.svc.storeUpcoming(ctx, w.mgr, store2.Hex()); err == nil {
+	if _, err := w.svc.storeUpcomingAt(ctx, w.mgr, store2.Hex(), at); err == nil {
 		t.Fatalf("a manager of store 1 read store 2's upcoming")
 	}
 
@@ -186,5 +192,59 @@ func TestStoreUpcomingListsTomorrowsPreviews(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"floor":null`) {
 		t.Fatalf("floor should be null when unknown: %s", rec.Body.String())
+	}
+}
+
+// From noon the upcoming window holds tomorrow's previews the lock could not
+// fund beside the day after tomorrow's editable ones. Each row now says
+// which it is: awaiting_funds (past its cut-off, ships only if the member
+// tops up) and locks_at, the preview's noon cut-off, so the manager does not
+// pack for a preview that will not ship.
+func TestStoreUpcomingFlagsPreviewsAwaitingFunds(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+	plan := func(phone string, fund float64) *subscription {
+		cid := w.customer(t, phone, fund)
+		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		if err != nil {
+			t.Fatalf("createSubscription: %v", err)
+		}
+		chainBackdateSubscription(t, w, sub, istDayAt(D, 8, 0))
+		return sub
+	}
+	funded := plan("9000006101", 500)
+	short := plan("9000006102", 0)
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 0))
+
+	rows, err := w.svc.storeUpcomingAt(ctx, w.mgr, w.storeID.Hex(), istDayAt(D, 12, 30))
+	if err != nil {
+		t.Fatalf("storeUpcoming: %v", err)
+	}
+	raw, _ := json.Marshal(rows)
+	var wire []map[string]any
+	_ = json.Unmarshal(raw, &wire)
+	want := map[string]struct {
+		awaiting bool
+		locksAt  string
+	}{
+		liveSubOrder(t, w, short.SubscriptionID, D1).OrderID:  {true, istDayAt(D, 12, 0).UTC().Format(time.RFC3339)},
+		liveSubOrder(t, w, short.SubscriptionID, D2).OrderID:  {false, istDayAt(D1, 12, 0).UTC().Format(time.RFC3339)},
+		liveSubOrder(t, w, funded.SubscriptionID, D2).OrderID: {false, istDayAt(D1, 12, 0).UTC().Format(time.RFC3339)},
+	}
+	if len(wire) != len(want) {
+		t.Fatalf("rows: %s", raw)
+	}
+	for _, r := range wire {
+		exp, ok := want[r["order_id"].(string)]
+		if !ok {
+			t.Fatalf("unexpected row %v", r)
+		}
+		if r["awaiting_funds"] != exp.awaiting || r["locks_at"] != exp.locksAt {
+			t.Fatalf("row %s %s: awaiting_funds=%v locks_at=%v, want %v %s", r["order_id"], r["delivery_date"], r["awaiting_funds"], r["locks_at"], exp.awaiting, exp.locksAt)
+		}
 	}
 }

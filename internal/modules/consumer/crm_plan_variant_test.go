@@ -19,13 +19,15 @@ import (
 )
 
 // crmTaskItemsForSub returns the delivery task items of the order the sweep
-// placed for one subscription.
-func crmTaskItemsForSub(t *testing.T, w *chainWorld, subID string) []deliveryItem {
+// placed for one subscription on one delivery day.
+func crmTaskItemsForSub(t *testing.T, w *chainWorld, subID, day string) []deliveryItem {
 	t.Helper()
 	ctx := context.Background()
 	var o order
-	if err := w.db.Collection(collOrders).FindOne(ctx, bson.D{{Key: "subscription_id", Value: subID}}).Decode(&o); err != nil {
-		t.Fatalf("subscription order for %s: %v", subID, err)
+	if err := w.db.Collection(collOrders).FindOne(ctx, bson.D{
+		{Key: "subscription_id", Value: subID}, {Key: "scheduled_for", Value: day},
+	}).Decode(&o); err != nil {
+		t.Fatalf("subscription order for %s on %s: %v", subID, day, err)
 	}
 	var d delivery
 	if err := w.db.Collection(collDeliveries).FindOne(ctx, bson.D{{Key: "order_id", Value: o.OrderID}}).Decode(&d); err != nil {
@@ -85,13 +87,21 @@ func TestCRMPlanVariantWelcomeLitreCarriesPackSize(t *testing.T) {
 		t.Fatalf("legacy subscription: %v", err)
 	}
 
-	// The first tick of the plans' first morning places them live, with tasks.
+	// The plans' first morning under the noon lock: the 11:00 tick the day
+	// before previews it, the 12:15 tick locks it and mints the store task.
+	// The plans are dated before that cut-off, so the test reads the same
+	// whatever the wall clock says (created "now" after noon, they would
+	// start the day after tomorrow and no task would exist for start).
 	start := istDay(now.Add(24 * time.Hour))
-	day, _ := time.ParseInLocation("2006-01-02", start, istZone)
-	w.svc.sweepSubscriptionOrders(ctx, day.Add(30*time.Minute))
+	cutoff := lockMomentFor(start)
+	for _, id := range []string{litre, half, legacy.SubscriptionID} {
+		chainBackdateSubscription(t, w, &subscription{SubscriptionID: id}, cutoff.Add(-2*time.Hour))
+	}
+	w.svc.sweepSubscriptionOrders(ctx, cutoff.Add(-time.Hour))
+	w.svc.sweepSubscriptionOrders(ctx, cutoff.Add(15*time.Minute))
 
 	for sub, want := range map[string]string{litre: "1L", half: "500ml", legacy.SubscriptionID: "1L"} {
-		if got := crmTaskItemsForSub(t, w, sub)[0].Variant; got != want {
+		if got := crmTaskItemsForSub(t, w, sub, start)[0].Variant; got != want {
 			t.Fatalf("task line for %s carries variant %q, want %q", sub, got, want)
 		}
 	}

@@ -1086,20 +1086,25 @@ func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "delivered"}, {Key: "can_review", Value: true},
 			{Key: "proof_photo_url", Value: d.ProofPhotoURI}, {Key: "delivered_at", Value: d.DeliveredAt},
 			{Key: "updated_at", Value: time.Now().UTC()}}}})
+	o, oerr := s.repo.findOrderAnyUser(ctx, d.OrderID)
+	if oerr != nil || o == nil {
+		return
+	}
 	// CRM (inert unless CRM_ENABLED): order.delivered for EVERY order
 	// (contract C6). offer_pack still rides along so a delivered Welcome Litre
 	// pack advances the offer state machine (crmOnPackDelivered); the generic
 	// router fires D-06 for ordinary orders only. Best-effort by contract.
 	if crmEnabled() {
-		if o, err := s.repo.findOrderAnyUser(ctx, d.OrderID); err == nil && o != nil {
-			if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
-				s.emitCRMEvent(ctx, "order.delivered", cid, map[string]any{
-					"order_id": o.OrderID, "offer_pack": o.OfferPack,
-					"promotional_only": o.OfferPack > 0, "labelled_product": crmLabelledProductOf(o),
-				})
-			}
+		if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
+			s.emitCRMEvent(ctx, "order.delivered", cid, map[string]any{
+				"order_id": o.OrderID, "offer_pack": o.OfferPack,
+				"promotional_only": o.OfferPack > 0, "labelled_product": crmLabelledProductOf(o),
+			})
 		}
 	}
+	// Referral reward (referrals.go): the referee's first delivered order
+	// pays both sides, exactly once. Best-effort, never blocks the delivery.
+	s.rewardReferralOnDelivery(ctx, o)
 }
 
 // syncOrderFailed leaves the consumer order in a state the shipped app can

@@ -78,8 +78,11 @@ func TestSubscriptionDayRacingWorkersYieldOneOrder(t *testing.T) {
 	}
 
 	// The whole sweep racing itself for tomorrow (claim + index): one order.
+	// Swept after noon, a plan from before the cut-off is caught up for
+	// tomorrow (locked) - the day the racing sweeps all reach for.
 	ist := now.In(istZone)
 	base := time.Date(ist.Year(), ist.Month(), ist.Day(), 14, 30, 0, 0, istZone)
+	chainBackdateSubscription(t, w, sub, base.Add(-6*time.Hour))
 	tomorrow := addDaysIST(istToday(base), 1)
 	var sweeps sync.WaitGroup
 	for i := 0; i < workers; i++ {

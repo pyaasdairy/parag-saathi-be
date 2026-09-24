@@ -240,6 +240,20 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 		"W-08": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			return member(0), map[string]any{"in_zone": false, "pincode": "999999", "source": "enrol"}
 		}, crmMatrixInbox},
+		// Founding Family (founding.go): the unlock pair and the seat held,
+		// with the payloads unlockFoundingFarm and joinFoundingFamily write.
+		"FF-01": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
+			return member(0), map[string]any{"farm_id": "mx-farm", "farm": "Matrix Farm", "farmer": "Harsh Singh",
+				"line": int32(4), "togo": int32(0), "unlocked_packs": ""}
+		}, crmMatrixInbox},
+		"FF-02": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
+			return member(0), map[string]any{"farm_id": "mx-farm", "farm": "Matrix Farm", "farmer": "Harsh Singh",
+				"line": int32(4), "togo": int32(0), "unlocked_packs": ""}
+		}, crmMatrixInbox},
+		"FF-03": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
+			return member(0), map[string]any{"farm_id": "mx-farm", "farm": "Matrix Farm", "farmer": "Harsh Singh",
+				"line": int32(12), "togo": int32(53)}
+		}, crmMatrixInbox},
 	}
 
 	// Flows for the triggers a clock or the Welcome Litre state machine
@@ -302,6 +316,10 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 			t.Fatalf("crmEnrol: %v", err)
 		}
 		cid, _ := primitive.ObjectIDFromHex(res.ConsumerID)
+		// Pack 2 rides only a morning the plan really delivers (the noon
+		// rule): the plan dates from before tomorrow's cut-off, so W-04
+		// fires whatever the wall clock says.
+		planFromBeforeNoon(t, ctx, w.svc.repo, res.SubscriptionID)
 		return cid, res.Pack1OrderID
 	}
 	wl, pack1 := enrol("Flat 1, Matrix Tower")

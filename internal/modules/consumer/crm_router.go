@@ -31,6 +31,11 @@ var crmLifecycleTopics = []string{
 	"user.registered", "wallet.credited", "payment.failed",
 	"subscription.activated", "subscription.created_unpaid", "subscription.modified",
 	"order.line_cancelled", "delivery.delayed", "serviceability.checked",
+	// Growth programmes: Founding Family seats (founding.go) and referrals
+	// (referrals.go). The referral topics carry no trigger yet; they are in
+	// the outbox for the day one is added.
+	"founding.farm_unlocked", "founding.member_active", "founding.seat_waiting",
+	"referral.applied", "referral.rewarded",
 }
 
 // crmComplaintSLA fills [SLA] in T-E02: the config's support.sla_resolve
@@ -610,6 +615,25 @@ func crmEventParams(topic string, payload map[string]any, o *order) map[string]s
 	case "payment.failed":
 		if v := str("reason"); v != "" {
 			p["REASON"] = v
+		}
+	case "founding.farm_unlocked", "founding.member_active", "founding.seat_waiting":
+		// Spec section 6: the farm and farmer by name, the member's place in
+		// line and the homes still to go.
+		if v := str("farm"); v != "" {
+			p["FARM"] = v
+		}
+		if v := str("farmer"); v != "" {
+			p["FARMER"] = v
+		}
+		if n, ok := crmPayloadNumber(payload["line"]); ok && n > 0 {
+			p["LINE"] = strconv.Itoa(int(n))
+		}
+		if n, ok := crmPayloadNumber(payload["togo"]); ok {
+			p["TOGO"] = strconv.Itoa(int(n))
+		}
+	case "referral.applied", "referral.rewarded":
+		if n, ok := crmPayloadNumber(payload["reward_amount"]); ok {
+			p["AMOUNT"] = crmRupees(n)
 		}
 	}
 	return p

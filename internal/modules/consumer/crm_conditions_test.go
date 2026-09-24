@@ -125,18 +125,18 @@ func TestCRMCondUnpaidSubscriptionRecheckedAtFire(t *testing.T) {
 	nowIST := time.Now().In(istZone)
 	t0 := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 15, 0, 0, 0, istZone)
 
-	subscribe := func(cid primitive.ObjectID) {
+	subscribe := func(cid primitive.ObjectID, product string) {
 		t.Helper()
 		if _, err := w.svc.createSubscription(ctx, cid, subscriptionInput{
-			ProductID: "gold-500ml", Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: addDaysIST(istToday(time.Now()), 1),
+			ProductID: product, Variant: "500ml", Qty: 2, Frequency: "daily", StartDate: addDaysIST(istToday(time.Now()), 1),
 		}); err != nil {
 			t.Fatalf("createSubscription: %v", err)
 		}
 	}
 	stillUnpaid := w.customer(t, "9000007502", 0)
 	paysLater := w.customer(t, "9000007503", 0)
-	subscribe(stillUnpaid)
-	subscribe(paysLater)
+	subscribe(stillUnpaid, "gold-500ml")
+	subscribe(paysLater, "gold-500ml")
 	// A Welcome Litre household with a free delivery still owed adds a plan
 	// through the app with an empty wallet: CH-02 says no nudge.
 	res, err := w.svc.crmEnrol(ctx, "cond-test-operator", crmEnrolInput{
@@ -147,7 +147,9 @@ func TestCRMCondUnpaidSubscriptionRecheckedAtFire(t *testing.T) {
 		t.Fatalf("crmEnrol: %v", err)
 	}
 	campaign, _ := primitive.ObjectIDFromHex(res.ConsumerID)
-	subscribe(campaign)
+	// A second milk: the campaign plan already holds its own line, and the
+	// DUPLICATE_SUBSCRIPTION guard refuses a second plan on it.
+	subscribe(campaign, "taaza-500ml")
 
 	w.svc.crmProcessEventsAt(ctx, t0)
 	for _, cid := range []primitive.ObjectID{stillUnpaid, paysLater} {

@@ -99,6 +99,17 @@ func newChainWorld(t *testing.T) (*chainWorld, func()) {
 		cancel()
 		t.Fatalf("push indexes: %v", err)
 	}
+	// The growth programmes' uniqueness guards: one member row per consumer
+	// (a concurrent join cannot take two seats or two Rs 99) and one referral
+	// per referee (a concurrent apply cannot pay two rewards).
+	if err := repo.ensureFoundingIndexes(ctx); err != nil {
+		cancel()
+		t.Fatalf("founding indexes: %v", err)
+	}
+	if err := repo.ensureReferralIndexes(ctx); err != nil {
+		cancel()
+		t.Fatalf("referral indexes: %v", err)
+	}
 
 	storeID := primitive.NewObjectID()
 	if _, err := db.Collection("org_units").InsertOne(ctx, bson.D{
@@ -323,7 +334,10 @@ func TestFullChainSubscriptionMorningDelivery(t *testing.T) {
 		t.Fatalf("server price authority: unit %v want 29", sub.UnitPrice)
 	}
 
-	// The morning sweep materialises today's delivery (same-day branch).
+	// The morning sweep materialises today's delivery: the catch-up branch,
+	// for a plan that predates today's noon cut-off (a plan created now would
+	// start on the first editable day under the noon rule).
+	chainBackdateSubscription(t, w, sub, time.Now().Add(-48*time.Hour))
 	placed := w.svc.sweepSubscriptionOrders(ctx, time.Now())
 	if placed < 1 {
 		t.Fatalf("sweep placed %d orders — the morning lane produced nothing", placed)

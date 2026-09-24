@@ -33,6 +33,13 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 			"amount": float64(35), "before_delivery": true},
 		"delivery.delayed":       {"order_id": "ord_1", "labelled_product": label, "new_eta_known": true, "eta": "about 7:52 am"},
 		"serviceability.checked": {"in_zone": false, "pincode": "226030"},
+		// Founding Family (founding.go) and referrals (referrals.go), as the
+		// emitters write them.
+		"founding.farm_unlocked": {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(0), "unlocked_packs": ""},
+		"founding.member_active": {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(0), "unlocked_packs": ""},
+		"founding.seat_waiting":  {"farm_id": "gonard-dairy", "farm": "Gonard Dairy", "farmer": "Harsh Singh", "line": int32(12), "togo": int32(53)},
+		"referral.applied":       {"referral_id": "r1", "referee_id": "u2", "code": "PGHZU4", "reward_amount": 100.0},
+		"referral.rewarded":      {"referral_id": "r1", "order_id": "ord_1", "reward_amount": 100.0, "referrer_id": "u1", "referee_id": "u2"},
 	}
 	for _, topic := range crmLifecycleTopics {
 		if _, ok := sample[topic]; !ok {
@@ -69,7 +76,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		}
 		routed[id] = true
 	}
-	for _, id := range []string{"A-02", "D-01", "D-02", "D-06", "D-09", "E-01", "E-02", "E-04", "E-06", "E-07", "W-02", "W-05"} {
+	for _, id := range []string{"A-02", "D-01", "D-02", "D-06", "D-09", "E-01", "E-02", "E-04", "E-06", "E-07", "W-02", "W-05", "FF-01", "FF-02", "FF-03"} {
 		if !routed[id] {
 			t.Errorf("%s should be reachable from a lifecycle topic", id)
 		}
@@ -84,7 +91,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		}
 		return fb[len(fb)-1].Channel
 	}
-	for _, id := range []string{"D-01", "D-02", "D-06", "D-09", "E-06", "B-01", "E-05"} {
+	for _, id := range []string{"D-01", "D-02", "D-06", "D-09", "E-06", "B-01", "E-05", "FF-01", "FF-02", "FF-03"} {
 		if last(id) != "sms" {
 			t.Errorf("%s: last fallback = %q, want sms (%+v)", id, last(id), cfg.Triggers[id].Delivery)
 		}
@@ -116,7 +123,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	if err := json.Unmarshal(embeddedCRMConfig, &meta); err != nil {
 		t.Fatalf("embedded config: %v", err)
 	}
-	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 55 || len(meta.Templates) != 47 {
+	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 58 || len(meta.Templates) != 50 {
 		t.Fatalf("meta.trigger_count=%d triggers=%d templates=%d", meta.Meta.TriggerCount, len(meta.Triggers), len(meta.Templates))
 	}
 }

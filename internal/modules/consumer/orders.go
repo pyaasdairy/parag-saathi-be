@@ -141,10 +141,10 @@ type order struct {
 	// Subscription linkage (worker-created morning orders, subscriptions.go).
 	// ScheduledFor is the IST day it delivers — surfaced as delivery_date (the
 	// FE Order field), so tomorrow's order shows as UPCOMING in the app from
-	// the moment it is scheduled. SubLockedAt is stamped at the midnight lock:
-	// before it, the order is a modifiable preview (subscription edits
-	// reconcile it, the shopper may cancel it); after it, the delivery task
-	// exists and the store owns it.
+	// the moment it is scheduled. SubLockedAt is stamped at the noon lock (12:00
+	// IST the day before delivery): before it, the order is a modifiable
+	// preview (subscription edits reconcile it, the shopper may cancel it);
+	// after it, the delivery task exists and the store owns it.
 	SubscriptionID string `bson:"subscription_id,omitempty" json:"-"`
 	ScheduledFor   string `bson:"scheduled_for,omitempty"   json:"scheduled_for,omitempty"`
 	SubLockedAt    string `bson:"sub_locked_at,omitempty"   json:"-"`
@@ -274,6 +274,13 @@ type orderInput struct {
 }
 
 func (s *service) createOrder(ctx context.Context, userID string, in orderInput) (*order, error) {
+	return s.createOrderAt(ctx, userID, in, time.Now())
+}
+
+// createOrderAt is createOrder on an explicit clock: the delivery-date window
+// and the noon cut-off are IST-calendar rules, so tests drive them at a fixed
+// moment the way the subscription sweep's tests do.
+func (s *service) createOrderAt(ctx context.Context, userID string, in orderInput, at time.Time) (*order, error) {
 	if len(in.Items) == 0 {
 		return nil, errBadRequest("an order needs at least one item")
 	}
@@ -286,6 +293,11 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	if err != nil {
 		return nil, err
 	}
+	// FOUNDING FAMILY (founding.go): an active member bills PYAAS milk lines
+	// at level 3 and never pays delivery; Parag is level 1 for everyone.
+	memberActive := s.foundingActiveHex(ctx, userID)
+	consumerOID, _ := primitive.ObjectIDFromHex(userID)
+	hasPyaas := false
 	var subtotal float64
 	var units int
 	items := make([]orderItem, 0, len(in.Items))
@@ -298,9 +310,15 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 		}
 		// SERVER-AUTHORITATIVE PRICE: the catalog's price index is the one billed —
 		// the client's number is display-only, and unknown ids are refused.
-		price, ok := priceIx.priceFor(it.ProductID, it.Variant)
+		price, ok := priceIx.priceForMember(it.ProductID, it.Variant, memberActive)
 		if !ok {
 			return nil, errBadRequest("unknown product in order: " + it.ProductID)
+		}
+		if priceIx.isPyaasLine(it.ProductID) {
+			hasPyaas = true
+			if gerr := s.foundingGate(ctx, consumerOID, true, memberActive); gerr != nil {
+				return nil, gerr
+			}
 		}
 		name := priceIx.nameFor(it.ProductID)
 		if name == "" {
@@ -319,6 +337,15 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	}
 	subtotal = round2(subtotal)
 	fee := deliveryFeeFor(subtotal)
+	// One Voice 1.2: Founding Family members never pay delivery. Spec rule
+	// 5.3 (DELIVERY-FEE on a PYAAS-milk order by a non-member) waits on the
+	// founder's yes: FOUNDING_PYAAS_NONMEMBER_FEE, off by default, and never
+	// on a Parag-only order.
+	if memberActive {
+		fee = 0
+	} else if hasPyaas && s.deps.Cfg.FoundingPyaasNonMemberFee && fee == 0 {
+		fee = s.foundingDeliveryFee(ctx)
+	}
 	total := round2(subtotal + fee)
 	// Payment mode defaults to 'wallet' — the order is settled from the server
 	// wallet on delivery (the settle sweep debits /wallet/debit, idempotent by
@@ -360,20 +387,43 @@ func (s *service) createOrder(ctx context.Context, userID string, in orderInput)
 	// (Instant orders never carry one; the FE sends null.) Invalid input is
 	// rejected loudly instead of silently becoming a due-now delivery.
 	deliveryDate := strings.TrimSpace(in.DeliveryDate)
+	if deliveryDate == "" && lane == "morning" {
+		// A morning order that names no day (an older client, a direct API
+		// call) is for the first morning still open to orders: tomorrow
+		// before noon, the day after tomorrow from noon. Undated, its task
+		// went on the very next route and skipped the noon cut-off.
+		deliveryDate = firstEditableDay(at)
+	}
 	if deliveryDate != "" && lane == "morning" {
 		d, derr := time.ParseInLocation("2006-01-02", deliveryDate, istZone)
 		if derr != nil {
 			return nil, errBadRequest("delivery_date must be YYYY-MM-DD")
 		}
-		ist := time.Now().In(istZone)
+		ist := at.In(istZone)
 		today0 := time.Date(ist.Year(), ist.Month(), ist.Day(), 0, 0, 0, 0, istZone)
 		if d.Before(today0.AddDate(0, 0, 1)) || d.After(today0.AddDate(0, 0, 7)) {
 			return nil, errUnprocessable("BAD_DELIVERY_DATE", "pick a morning between tomorrow and 7 days from now")
 		}
+		// THE NOON CUT-OFF (One Voice 1.2, "Order by 12 noon, delivery by
+		// 7 AM"): tomorrow's morning route locks at 12:00 IST today, for
+		// one-off orders exactly as for subscription changes (the same
+		// lockedThroughDay the sweep uses). The order is refused rather than
+		// moved to a later morning: the member agreed to tomorrow, so the
+		// message names the next open morning and lets them choose.
+		if deliveryDate <= lockedThroughDay(at) {
+			next := firstEditableDay(at)
+			label := next
+			if nd, ok := parseDay(next); ok {
+				label = nd.Format("Mon 2 Jan")
+			}
+			return nil, &apiError{status: http.StatusUnprocessableEntity, Code: "CUTOFF_PASSED",
+				Message:          "Order by 12 noon for tomorrow; next available " + label + ".",
+				NextDeliveryDate: next}
+		}
 	} else {
 		deliveryDate = ""
 	}
-	now := time.Now().UTC()
+	now := at.UTC()
 	o := &order{
 		MongoID: primitive.NewObjectID(), OrderID: newOrderID(), UserID: userID, Status: "placed",
 		Subtotal: subtotal, DeliveryFee: fee, MonsoonFee: monsoonFee, Total: total, PaymentMethod: pm,

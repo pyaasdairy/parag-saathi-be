@@ -17,12 +17,14 @@ import (
 
 // Upcoming days (contract C1): GET /consumer/stores/{storeId}/upcoming.
 //
-// Tomorrow's IST day as the store sees it before any task exists: the
-// subscription previews the 13:00 scheduler materialised (not yet locked at
-// midnight, so no task) and the scheduled one-off morning orders that still
-// have no task. Read-only: it creates nothing and backfills nothing; the
-// midnight lock and the order path own task creation. Scoped to the store the
-// same way createDeliveryForOrder routes an order: by its nearest store.
+// The days the store cannot see as tasks yet: from tomorrow through the first
+// day still open to changes (tomorrow before noon; from noon, tomorrow's
+// unfunded leftovers plus the day after), the subscription previews not yet
+// locked (no task) and the scheduled one-off morning orders that still have
+// no task. Read-only: it creates nothing and backfills nothing; the noon lock
+// and the order path own task creation. Scoped to the store the same way
+// createDeliveryForOrder routes an order: by its nearest store. Each row
+// carries its own delivery_date.
 
 const (
 	upcomingSourceSubscription = "subscription_preview"
@@ -54,6 +56,12 @@ type upcomingRow struct {
 	Unit           string         `json:"unit"`
 	Items          []upcomingItem `json:"items"`
 	Source         string         `json:"source"`
+	// AwaitingFunds marks a subscription preview whose noon cut-off has
+	// passed without it locking: the wallet did not cover it, and it ships
+	// only if the member tops up before its day. LocksAt is a preview's
+	// cut-off (RFC3339 UTC; "" on a scheduled one-off order). Additive keys.
+	AwaitingFunds bool   `json:"awaiting_funds"`
+	LocksAt       string `json:"locks_at"`
 }
 
 // scheduledOneOffOrders: still-open one-time morning orders whose picked
@@ -136,19 +144,33 @@ func (s *service) upcomingRowFor(ctx context.Context, o *order, day, source stri
 	return row
 }
 
-// storeUpcoming lists tomorrow's previews for the store the actor manages.
+// storeUpcoming lists the upcoming previews for the store the actor manages.
 func (s *service) storeUpcoming(ctx context.Context, actor auth.Actor, storeID string) ([]upcomingRow, error) {
+	return s.storeUpcomingAt(ctx, actor, storeID, time.Now())
+}
+
+// storeUpcomingAt is storeUpcoming with the clock injected: the window runs
+// from tomorrow through firstEditableDay(now).
+func (s *service) storeUpcomingAt(ctx context.Context, actor auth.Actor, storeID string, now time.Time) ([]upcomingRow, error) {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
 	}
-	tomorrow := addDaysIST(istToday(time.Now()), 1)
-	previews, err := s.repo.listUnlockedSubOrders(ctx, tomorrow)
+	tomorrow := addDaysIST(istToday(now), 1)
+	last := firstEditableDay(now)
+	if last < tomorrow {
+		last = tomorrow
+	}
+	previews, err := s.repo.listUnlockedSubOrders(ctx, bson.D{{Key: "$gte", Value: tomorrow}, {Key: "$lte", Value: last}})
 	if err != nil {
 		return nil, err
 	}
-	scheduled, err := s.repo.scheduledOneOffOrders(ctx, tomorrow)
-	if err != nil {
-		return nil, err
+	scheduled := []order{}
+	for day := tomorrow; day <= last; day = addDaysIST(day, 1) {
+		batch, err := s.repo.scheduledOneOffOrders(ctx, day)
+		if err != nil {
+			return nil, err
+		}
+		scheduled = append(scheduled, batch...)
 	}
 	rows := []upcomingRow{}
 	// The console polls this every 12 s: the stores are read once and the
@@ -179,7 +201,19 @@ func (s *service) storeUpcoming(ctx context.Context, actor auth.Actor, storeID s
 			if !orderRoutesToStore(stores, o, storeID) {
 				continue
 			}
-			rows = append(rows, s.upcomingRowFor(ctx, o, tomorrow, batch.source))
+			day := o.ScheduledFor
+			if day == "" {
+				day = o.DeliveryDate
+			}
+			if day == "" {
+				day = tomorrow
+			}
+			row := s.upcomingRowFor(ctx, o, day, batch.source)
+			if batch.source == upcomingSourceSubscription {
+				row.LocksAt = lockMomentFor(day).UTC().Format(time.RFC3339)
+				row.AwaitingFunds = day <= lockedThroughDay(now)
+			}
+			rows = append(rows, row)
 		}
 	}
 	return rows, nil

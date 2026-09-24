@@ -1,0 +1,49 @@
+{
+  "founder_todo": "PLACEHOLDER FARM RECORDS - confirm before launch: the names and farmers below are copied from pyaas-app-spec.md section 3.3 and pyaas-one-voice.md 3.2; each farmer's written consent to use name, village, herd and photo is still open (One Voice 3.7 rule 5); photo_url is empty on every farm; unlocks_at are the planned thresholds; Sri Radha Mohan is described as unlocked and delivering on the website, so set its status and unlocked_packs by hand (PUT /consumer/admin/founding/farms) once its member list is migrated (spec section 8).",
+  "farms": [
+    {
+      "id": "sri-radha-mohan-dairy",
+      "name": "Sri Radha Mohan Dairy",
+      "farmer": "Ram",
+      "place": "Paraspur",
+      "note": "Founder's family farm",
+      "photo_url": "",
+      "unlocks_at": 150,
+      "unlocked_packs": "",
+      "status": "filling"
+    },
+    {
+      "id": "mishra-dairy",
+      "name": "Mishra Dairy",
+      "farmer": "Abhishek Mishra",
+      "place": "Gonda",
+      "note": "",
+      "photo_url": "",
+      "unlocks_at": 80,
+      "unlocked_packs": "",
+      "status": "filling"
+    },
+    {
+      "id": "gonard-dairy",
+      "name": "Gonard Dairy",
+      "farmer": "Harsh Singh",
+      "place": "Paraspur",
+      "note": "",
+      "photo_url": "",
+      "unlocks_at": 65,
+      "unlocked_packs": "",
+      "status": "filling"
+    },
+    {
+      "id": "ranjeet-singh-dairy",
+      "name": "Ranjeet Singh Dairy",
+      "farmer": "Ranjeet Singh",
+      "place": "Dutt Nagar, Gonda",
+      "note": "",
+      "photo_url": "",
+      "unlocks_at": 55,
+      "unlocked_packs": "",
+      "status": "filling"
+    }
+  ]
+}

@@ -11,8 +11,8 @@ import (
 // replacement fails in CI, never at 10:30 IST in production.
 func TestCRMConfigParses(t *testing.T) {
 	c := crmConfigLoad() // sync.Once — parse happens exactly once per process
-	if len(c.Triggers) != 55 {
-		t.Fatalf("triggers: got %d want 55", len(c.Triggers))
+	if len(c.Triggers) != 58 {
+		t.Fatalf("triggers: got %d want 58", len(c.Triggers))
 	}
 	for _, id := range []string{"W-01", "W-02", "W-03a", "W-03b", "W-04", "W-05", "W-06", "W-07", "W-08", "W-09", "W-10"} {
 		tr, ok := c.Triggers[id]

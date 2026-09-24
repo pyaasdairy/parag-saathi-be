@@ -88,6 +88,38 @@ type Product struct {
 	// tva_tx often 0 and the real rate only in the vat code ("C+S-5" = 5%).
 	TvaTx          Num    `json:"tva_tx"`
 	DefaultVATCode string `json:"default_vat_code"`
+	// Price levels (PRODUIT_MULTIPRICES): level 1 is the shelf price, level 3
+	// the Founding Family price. Dolibarr serialises the PHP array as an
+	// object keyed "1".."5", or as [] when empty; LevelPrices reads both.
+	MultipricesTTC LevelPrices `json:"multiprices_ttc"`
+}
+
+// LevelPrices is Dolibarr's per-level price map, tolerant of the empty-array
+// shape an unconfigured instance returns.
+type LevelPrices map[string]Num
+
+func (l *LevelPrices) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" || strings.HasPrefix(s, "[") {
+		*l = nil
+		return nil
+	}
+	m := map[string]Num{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		*l = nil
+		return nil // an unexpected shape never breaks the product decode
+	}
+	*l = m
+	return nil
+}
+
+// LevelPriceTTC is the stored price at a multiprice level (0 when the
+// instance carries no such level).
+func (p Product) LevelPriceTTC(level int) float64 {
+	if p.MultipricesTTC == nil {
+		return 0
+	}
+	return p.MultipricesTTC[strconv.Itoa(level)].Float()
 }
 
 // Sellable reports whether the consumer catalog should surface this product.

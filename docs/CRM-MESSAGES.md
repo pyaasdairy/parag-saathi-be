@@ -2,7 +2,8 @@
 
 Every message the CRM engine can send, as of `integration/delivery` on 24 Sep 2026
 (after the CRM completion stage: `8edd9e1` .. `81e2ff6`, then human_call, the matrix
-test and the inbox refs). The source of truth is `internal/modules/consumer/crm_triggers.json`;
+test and the inbox refs, and the merge of `feature/founding-referrals`, which adds
+FF-01 .. FF-03). The source of truth is `internal/modules/consumer/crm_triggers.json`;
 this file is written from it by hand, so when the two disagree the JSON wins and this
 file is out of date. How the engine works: `docs/HANDOFF-CODEV-2026-09-24.md` section 4.
 The per-trigger audit that led here: `docs/CRM-AUDIT-2026-09-24.md`.
@@ -52,7 +53,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 - **Body** is the English template rendered with realistic values. Every template also
   has Hindi (roman, and Devanagari where written); the inbox stores both.
 
-## 1. Live messages (32)
+## 1. Live messages (35)
 
 | id | topic / schedule | when (IST) | channels | env to leave the building | status today | body (EN) |
 |---|---|---|---|---|---|---|
@@ -88,6 +89,9 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 | W-08 | `serviceability.checked` | a signed-in member's address is out of zone (self-enrol refused, or the waitlist join with a session); once per member ever | whatsapp, then sms | WA W-08; or DLT W-08 | INBOX-ONLY | We don't deliver to your area yet. We've noted your pincode and we'll tell you the day we do — that's the only message you'll get from us. |
 | W-09 | `abuse_flag_raised` (internal) | a second Welcome Litre enrolment at an address already enrolled | admin_console | none | OPERATOR | (operator bell: "address_hash match — second offer at the same address (review, do not auto-reject)") |
 | W-10 | `0 18 * * *` (internal) | first tick after 18:00: free packs issued vs enrolments that day | admin_console, +email | none (email not built) | OPERATOR (bell only on a variance) | (operator bell: "packs issued N vs consumers created M — variance V") |
+| FF-01 | `founding.farm_unlocked` | the join that fills a Founding Family farm unlocks it: every waiting member of that farm | push, then whatsapp, then sms | push; or WA FF-01; or DLT FF-01 | INBOX-ONLY | Gonard Dairy is unlocked! Whole Farm Milk from Harsh Singh and the full PYAAS range are open for you. First delivery tomorrow by 7 AM. |
+| FF-02 | `founding.member_active` | with FF-01, for each waiting member who turns Active at that unlock | push, then whatsapp, then sms | push; or WA FF-02; or DLT FF-02 | INBOX-ONLY | You are in. Your Founding Family price is on at Gonard Dairy: Rs 2 off every litre of PYAAS milk and free delivery, every morning. Stop any month in Me > Founding Family. |
+| FF-03 | `founding.seat_waiting` | a Rs 99 join takes a seat on a farm still filling | push, then whatsapp, then sms | push; or WA FF-03; or DLT FF-03 | INBOX-ONLY | Your seat at Gonard Dairy is held: you are #12 in line. 53 more homes and it unlocks. Share your link with your society group. |
 
 ## 2. Awaiting a product event (22) and the alias
 
