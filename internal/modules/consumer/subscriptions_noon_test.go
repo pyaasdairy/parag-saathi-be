@@ -554,3 +554,64 @@ func TestNoonLockStepIgnoresEditsAfterTheCutOff(t *testing.T) {
 		t.Fatalf("the 12:05 edit must reach the day after tomorrow: %+v", o)
 	}
 }
+
+// A change made before the cut-off still reaches tomorrow when a second
+// change lands after noon but before the first tick: changed_at holds only
+// the LAST change, so the tick at 12:10 saw a plan changed at 12:05 and
+// locked tomorrow's preview as it was previewed, dropping the 11:50 pause or
+// qty edit. A post-noon change now first locks tomorrow against the plan as
+// it stood; the change itself still applies from the day after tomorrow.
+func TestNoonLockKeepsAPreNoonChangeUnderALaterOne(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	const D = "2026-10-06"
+	D1, D2 := addDaysIST(D, 1), addDaysIST(D, 2)
+	plan := func(phone string) (*subscription, primitive.ObjectID) {
+		cid := w.customer(t, phone, 5000)
+		sub, err := w.svc.createSubscription(ctx, cid, subscriptionInput{ProductID: "taaza-500ml", Qty: 1, Frequency: "daily", StartDate: D})
+		if err != nil {
+			t.Fatalf("createSubscription: %v", err)
+		}
+		chainBackdateSubscription(t, w, sub, istDayAt(D, 8, 0))
+		return sub, cid
+	}
+	paused, pausedCID := plan("9000010111")
+	edited, editedCID := plan("9000010112")
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+
+	// (a) pause at 11:50, resume at 12:05, first tick at 12:10.
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, pausedCID, paused.SubscriptionID, "pause", istDayAt(D, 11, 50)); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if _, err := w.svc.setSubscriptionStatusAt(ctx, pausedCID, paused.SubscriptionID, "resume", istDayAt(D, 12, 5)); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	// (b) qty 1 -> 3 at 11:50, a slot edit at 12:05.
+	three, slot := 3, "early"
+	if _, err := w.svc.patchSubscriptionAt(ctx, editedCID, edited.SubscriptionID, subscriptionPatch{Qty: &three}, istDayAt(D, 11, 50)); err != nil {
+		t.Fatalf("qty: %v", err)
+	}
+	if _, err := w.svc.patchSubscriptionAt(ctx, editedCID, edited.SubscriptionID, subscriptionPatch{DeliverySlot: &slot}, istDayAt(D, 12, 5)); err != nil {
+		t.Fatalf("slot: %v", err)
+	}
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 10))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 25))
+
+	if o := liveSubOrder(t, w, paused.SubscriptionID, D1); o != nil {
+		t.Fatalf("(a) the 11:50 pause must still take tomorrow: %+v", o)
+	}
+	if o := liveSubOrder(t, w, paused.SubscriptionID, D2); o == nil {
+		t.Fatalf("(a) the 12:05 resume brings the plan back from the day after tomorrow")
+	}
+	o := liveSubOrder(t, w, edited.SubscriptionID, D1)
+	if o == nil || o.SubLockedAt == "" || o.Items[0].Qty != 3 || o.Total != 87 {
+		t.Fatalf("(b) tomorrow must lock with the 11:50 qty edit: %+v", o)
+	}
+	if d, _ := w.svc.repo.findDeliveryByOrder(ctx, o.OrderID); d == nil {
+		t.Fatalf("(b) tomorrow's locked order has no store task")
+	}
+	if o2 := liveSubOrder(t, w, edited.SubscriptionID, D2); o2 == nil || o2.Items[0].Qty != 3 {
+		t.Fatalf("(b) the day after tomorrow carries the plan as edited: %+v", o2)
+	}
+}

@@ -508,6 +508,25 @@ func (r *repository) listUnlockedSubOrders(ctx context.Context, dayFilter any) (
 	return out, nil
 }
 
+// listUnlockedSubOrdersFor is listUnlockedSubOrders for ONE subscription and
+// every day up to and including throughDay.
+func (r *repository) listUnlockedSubOrdersFor(ctx context.Context, subID, throughDay string) ([]order, error) {
+	cur, err := r.orders.Find(ctx, bson.D{
+		{Key: "subscription_id", Value: subID},
+		{Key: "scheduled_for", Value: bson.D{{Key: "$lte", Value: throughDay}}},
+		{Key: "status", Value: "placed"},
+		{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+	}, options.Find().SetLimit(100))
+	if err != nil {
+		return nil, errInternal("scheduled orders scan failed")
+	}
+	out := []order{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, errInternal("scheduled orders decode failed")
+	}
+	return out, nil
+}
+
 // ── Service ─────────────────────────────────────────────────────────────────
 
 type subscriptionInput struct {
@@ -678,6 +697,11 @@ func (s *service) listSubscriptionsFor(ctx context.Context, consumerID primitive
 
 // setSubscriptionStatus — pause / resume / cancel with the state machine.
 func (s *service) setSubscriptionStatus(ctx context.Context, consumerID primitive.ObjectID, subID, action string) (*subscription, error) {
+	return s.setSubscriptionStatusAt(ctx, consumerID, subID, action, time.Now())
+}
+
+// setSubscriptionStatusAt is setSubscriptionStatus with the change made at now.
+func (s *service) setSubscriptionStatusAt(ctx context.Context, consumerID primitive.ObjectID, subID, action string, now time.Time) (*subscription, error) {
 	target, ok := subscriptionActionTarget(action)
 	if !ok {
 		return nil, errBadRequest("unknown subscription action")
@@ -692,21 +716,31 @@ func (s *service) setSubscriptionStatus(ctx context.Context, consumerID primitiv
 	if !subscriptionTransitions[sub.Status][target] {
 		return nil, errConflict("SUBSCRIPTION_STATE", fmt.Sprintf("cannot %s a %s subscription", action, sub.Status))
 	}
+	// A day already past its cut-off keeps the plan as it stood then.
+	s.lockPreviewsBeforeChange(ctx, sub, now)
 	return s.repo.updateSubscription(ctx, subID, consumerID,
-		bson.D{{Key: "status", Value: target}, {Key: "changed_at", Value: time.Now().UTC()}},
+		bson.D{{Key: "status", Value: target}, {Key: "changed_at", Value: now.UTC()}},
 		bson.D{{Key: "status", Value: sub.Status}})
 }
 
-// patchSubscription edits the live plan (qty / frequency / slot / re-anchored
-// start date / vacation ranges) — the FE's updateSubscription + reactivate +
-// vacation mirror rides through here.
-func (s *service) patchSubscription(ctx context.Context, consumerID primitive.ObjectID, subID string, in struct {
+// subscriptionPatch is PATCH /subscriptions/{id}'s body: every field optional.
+type subscriptionPatch struct {
 	Qty          *int             `json:"qty"`
 	Frequency    *string          `json:"frequency"`
 	DeliverySlot *string          `json:"delivery_slot"`
 	StartDate    *string          `json:"start_date"`
 	Vacations    *[]vacationRange `json:"vacations"`
-}) (*subscription, error) {
+}
+
+// patchSubscription edits the live plan (qty / frequency / slot / re-anchored
+// start date / vacation ranges) — the FE's updateSubscription + reactivate +
+// vacation mirror rides through here.
+func (s *service) patchSubscription(ctx context.Context, consumerID primitive.ObjectID, subID string, in subscriptionPatch) (*subscription, error) {
+	return s.patchSubscriptionAt(ctx, consumerID, subID, in, time.Now())
+}
+
+// patchSubscriptionAt is patchSubscription with the change made at now.
+func (s *service) patchSubscriptionAt(ctx context.Context, consumerID primitive.ObjectID, subID string, in subscriptionPatch, now time.Time) (*subscription, error) {
 	set := bson.D{}
 	if in.Qty != nil {
 		if *in.Qty <= 0 || *in.Qty > maxQtyPerProduct {
@@ -740,10 +774,13 @@ func (s *service) patchSubscription(ctx context.Context, consumerID primitive.Ob
 		}
 		set = append(set, bson.E{Key: "vacations", Value: *in.Vacations})
 	}
-	if len(set) == 0 {
-		return s.repo.findSubscription(ctx, subID, consumerID)
+	cur, err := s.repo.findSubscription(ctx, subID, consumerID)
+	if err != nil || len(set) == 0 {
+		return cur, err
 	}
-	set = append(set, bson.E{Key: "changed_at", Value: time.Now().UTC()})
+	// A day already past its cut-off keeps the plan as it stood then.
+	s.lockPreviewsBeforeChange(ctx, cur, now)
+	set = append(set, bson.E{Key: "changed_at", Value: now.UTC()})
 	return s.repo.updateSubscription(ctx, subID, consumerID, set, bson.D{})
 }
 
@@ -973,34 +1010,10 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 	//    tick), then create the store delivery task.
 	if due, err := s.repo.listUnlockedSubOrders(ctx, bson.D{{Key: "$lte", Value: lockedThrough}}); err == nil {
 		for i := range due {
-			o := &due[i]
-			sub, _ := s.repo.findSubscriptionByID(ctx, o.SubscriptionID)
-			// The tick runs every 15 minutes, so it can reach a day after
-			// its lock moment has passed. A member change stamped after that
-			// moment belongs to the next editable day (the noon rule), so
-			// the preview locks as it stands: no cancel, no refresh.
-			asPreviewed := sub != nil && !sub.subChangedBefore(lockMomentFor(o.ScheduledFor))
-			if !asPreviewed {
-				if sub == nil || !subscriptionDueOn(sub, o.ScheduledFor) {
-					s.cancelScheduledSubOrder(ctx, o)
-					continue
-				}
-				o = s.refreshSubOrder(ctx, o, sub)
+			sub, _ := s.repo.findSubscriptionByID(ctx, due[i].SubscriptionID)
+			if s.lockSubPreview(ctx, &due[i], sub, now) {
+				placed++
 			}
-			if wv, werr := s.wallet(ctx, sub.ConsumerID); werr != nil || wv.Available < o.Total {
-				continue
-			}
-			upd, uerr := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
-				bson.D{{Key: "sub_locked_at", Value: now.UTC().Format(time.RFC3339)}},
-				bson.D{
-					{Key: "status", Value: "placed"},
-					{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
-				})
-			if uerr != nil {
-				continue // raced with another replica — it owns the lock
-			}
-			s.createDeliveryForOrder(ctx, upd)
-			placed++
 		}
 	}
 
@@ -1037,6 +1050,58 @@ func (s *service) sweepSubscriptionOrders(ctx context.Context, now time.Time) in
 		s.log.InfoContext(ctx, "subscription sweep placed morning orders", "day", today, "orders", placed)
 	}
 	return placed
+}
+
+// lockSubPreview is the LOCK step for one preview whose day is past its noon
+// cut-off: re-checked against sub (a pause/cancel/vacation made before the
+// cut-off cancels it; otherwise the line is refreshed), the wallet floor
+// enforced (unfunded -> left for the next tick), then locked with its store
+// task. Returns whether this call locked it.
+func (s *service) lockSubPreview(ctx context.Context, o *order, sub *subscription, now time.Time) bool {
+	// The tick runs every 15 minutes, so it can reach a day after its lock
+	// moment has passed. A member change stamped after that moment belongs to
+	// the next editable day (the noon rule), so the preview locks as it
+	// stands: no cancel, no refresh.
+	asPreviewed := sub != nil && !sub.subChangedBefore(lockMomentFor(o.ScheduledFor))
+	if !asPreviewed {
+		if sub == nil || !subscriptionDueOn(sub, o.ScheduledFor) {
+			s.cancelScheduledSubOrder(ctx, o)
+			return false
+		}
+		o = s.refreshSubOrder(ctx, o, sub)
+	}
+	if wv, werr := s.wallet(ctx, sub.ConsumerID); werr != nil || wv.Available < o.Total {
+		return false
+	}
+	upd, uerr := s.repo.updateOrder(ctx, o.OrderID, o.UserID,
+		bson.D{{Key: "sub_locked_at", Value: now.UTC().Format(time.RFC3339)}},
+		bson.D{
+			{Key: "status", Value: "placed"},
+			{Key: "sub_locked_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+		})
+	if uerr != nil {
+		return false // raced with another replica — it owns the lock
+	}
+	s.createDeliveryForOrder(ctx, upd)
+	return true
+}
+
+// lockPreviewsBeforeChange runs the LOCK step for this plan's previews whose
+// cut-off has passed but that no tick has locked yet, against the plan AS IT
+// STOOD, before a member change made at now is written. changed_at keeps
+// only the LAST change and the tick runs every 15 minutes, so without this a
+// change made before noon followed by another before the first tick after
+// noon was lost: the tick saw a plan changed after the lock moment and
+// locked tomorrow as previewed (a pause at 11:50 and a resume at 12:05 still
+// delivered and billed tomorrow; a qty edit at 11:50 never reached it).
+func (s *service) lockPreviewsBeforeChange(ctx context.Context, sub *subscription, now time.Time) {
+	due, err := s.repo.listUnlockedSubOrdersFor(ctx, sub.SubscriptionID, lockedThroughDay(now))
+	if err != nil {
+		return
+	}
+	for i := range due {
+		s.lockSubPreview(ctx, &due[i], sub, now)
+	}
 }
 
 // sweepOneSubscription runs the per-subscription half of the sweep (steps 3
