@@ -1229,13 +1229,16 @@ func (r *repository) listStaleLockedSubOrders(ctx context.Context, cutoff string
 // task fails with reason missed, order.failed is emitted with reason
 // "missed" so the member is told, and no money moves. Yesterday's orders
 // are closed from noon (the morning is left for a late delivered mark);
-// older ones on any tick. Returns how many orders were closed.
+// older ones on any tick. An order a rider is still out with gets until the
+// day after: failing the task under the rider refused their late delivered
+// mark. Returns how many orders were closed.
 func (s *service) closeMissedSubscriptionOrders(ctx context.Context, now time.Time) int {
 	ist := now.In(istZone)
 	cutoff := istToday(now)
 	if ist.Hour() < lockHourIST {
 		cutoff = addDaysIST(cutoff, -1)
 	}
+	inFlightCutoff := addDaysIST(istToday(now), -1)
 	stale, err := s.repo.listStaleLockedSubOrders(ctx, cutoff)
 	if err != nil {
 		return 0
@@ -1246,6 +1249,9 @@ func (s *service) closeMissedSubscriptionOrders(ctx context.Context, now time.Ti
 		task, _ := s.repo.findDeliveryByOrder(ctx, o.OrderID)
 		if task != nil && task.Status == "DELIVERED" {
 			continue // the delivery happened; the order sync owns the rest
+		}
+		if task != nil && task.Status == "OUT_FOR_DELIVERY" && o.ScheduledFor >= inFlightCutoff {
+			continue // the rider still has it: left for a late delivered mark
 		}
 		res, err := s.repo.orders.UpdateOne(ctx,
 			bson.D{{Key: "order_id", Value: o.OrderID}, {Key: "status", Value: bson.D{{Key: "$in", Value: subscriptionOpenStatuses}}}},

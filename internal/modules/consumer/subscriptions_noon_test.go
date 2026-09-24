@@ -711,3 +711,55 @@ func TestNextDeliveryDateFollowsTheLiveOrders(t *testing.T) {
 		}
 	}
 }
+
+// The MISSED step closes yesterday's orders from noon, but not one a rider
+// is still out with: it failed the task under the rider, whose late
+// "delivered" was then refused. An in-flight order gets until the day after
+// to be marked; an order whose task never left the store closes at noon as
+// before, and an in-flight one older than yesterday closes on any tick.
+func TestMissedSweepSparesAnOrderTheRiderIsCarrying(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000010401", 5000)
+	addrs, _ := w.svc.repo.listAddresses(ctx, cid)
+	const D = "2026-10-06"
+	Dm1, Dm2 := addDaysIST(D, -1), addDaysIST(D, -2)
+	mk := func(id, day string) *order {
+		s := &subscription{SubscriptionID: id, ConsumerID: cid, ProductID: "taaza-500ml", Name: "Milk taaza-500ml",
+			Variant: "500ml", Qty: 1, UnitPrice: 29, Frequency: "daily", Status: "active", StartDate: day}
+		o, err := w.svc.insertSubscriptionOrder(ctx, s, &addrs[0], day, true, istDayAt(addDaysIST(day, -1), 12, 0))
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		return o
+	}
+	carried := mk("sub_carried", Dm1)
+	chainOutForDelivery(t, w, chainTaskFor(t, w, carried.OrderID).ID)
+	atStore := mk("sub_at_store", Dm1)
+	old := mk("sub_old_carried", Dm2)
+	chainOutForDelivery(t, w, chainTaskFor(t, w, old.OrderID).ID)
+
+	if n := w.svc.closeMissedSubscriptionOrders(ctx, istDayAt(D, 12, 30)); n != 2 {
+		t.Fatalf("closed at 12:30: %d want 2 (the order still at the store and the two-day-old one)", n)
+	}
+	if o := w.orderByID(t, atStore.OrderID); o.Status != "cancelled" || o.CancelledBy != orderCancelledByMissed {
+		t.Fatalf("an order that never left the store closes at noon: %s by %q", o.Status, o.CancelledBy)
+	}
+	if o := w.orderByID(t, old.OrderID); o.Status != "cancelled" {
+		t.Fatalf("an in-flight order two days old closes: %s", o.Status)
+	}
+	if o := w.orderByID(t, carried.OrderID); o.Status != "out_for_delivery" {
+		t.Fatalf("yesterday's order the rider is carrying was closed: %s", o.Status)
+	}
+	task := chainTaskFor(t, w, carried.OrderID)
+	if task.Status != "OUT_FOR_DELIVERY" {
+		t.Fatalf("the rider's task was failed under them: %s %q", task.Status, task.FailureReason)
+	}
+	if _, err := w.svc.deliverDelivery(ctx, w.rider, task.ID, deliverInput{ProofPhoto: "p.jpg", Geo: &geoPt{Lat: task.Geo.Lat, Lng: task.Geo.Lng}, GeofenceOK: true}); err != nil {
+		t.Fatalf("the rider's late delivered mark must go through: %v", err)
+	}
+	if o := w.orderByID(t, carried.OrderID); o.Status != "delivered" {
+		t.Fatalf("after the late mark: %s", o.Status)
+	}
+}
