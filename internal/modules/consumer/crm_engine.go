@@ -486,6 +486,19 @@ func (s *service) crmClaimDispatchScoped(ctx context.Context, t crmTrigger, cons
 			return nil, false
 		}
 	}
+	// A per-day claim an older binary wrote carries no scope_key at all
+	// (null to the unique index, which "" does not collide with). During a
+	// rolling deploy both binaries run the same morning sweep, so the day is
+	// taken if such a row exists; the boot backfill stamps only older rows.
+	if scope == "" {
+		n, err := s.repo.crmDispatchCol().CountDocuments(ctx, bson.D{
+			{Key: "trigger_id", Value: t.ID}, {Key: "consumer_id", Value: consumerID}, {Key: "ist_day", Value: day},
+			{Key: "scope_key", Value: bson.D{{Key: "$exists", Value: false}}},
+		}, options.Count().SetLimit(1))
+		if err != nil || n > 0 {
+			return nil, false
+		}
+	}
 	row := &crmDispatchRow{
 		TriggerID: t.ID, ConsumerID: consumerID, ISTDay: day, ScopeKey: scope,
 		Category: t.Category, Template: t.Template.String(), Status: "CLAIMED", CreatedAt: time.Now().UTC(),
@@ -493,6 +506,13 @@ func (s *service) crmClaimDispatchScoped(ctx context.Context, t crmTrigger, cons
 	}
 	res, err := s.repo.crmDispatchCol().InsertOne(ctx, row)
 	if err != nil {
+		// With the scoped index refused, the legacy (trigger, consumer, day)
+		// index is still in force and admits one event-scoped message a day:
+		// the second order's D-01 / D-06 is lost here. Say so.
+		if scope != "" && mongo.IsDuplicateKeyError(err) && strings.Contains(err.Error(), crmClaimIndexLegacy) {
+			s.log.Warn("crm: event-scoped claim lost to the legacy per-day claim index (scoped index not built)",
+				"trigger", t.ID, "scope", scope, "day", day)
+		}
 		return nil, false // duplicate = already claimed; anything else = skip this tick
 	}
 	row.ID = res.InsertedID.(primitive.ObjectID)
