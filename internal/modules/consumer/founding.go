@@ -147,6 +147,9 @@ type foundingMemberView struct {
 	ReferralCode *string `json:"referral_code"`
 	JoinedAt     *string `json:"joined_at"`
 	NextBillDate *string `json:"next_bill_date"`
+	// PerksActive (additive): whether the perks apply today, as orders are
+	// billed (foundingStanding). The app shows "Delivery charge FREE" from it.
+	PerksActive bool `json:"perks_active"`
 }
 
 type foundingSavingsView struct {
@@ -178,11 +181,25 @@ func farmView(f foundingFarm) foundingFarmView {
 	}
 }
 
-func memberView(m *foundingMember, referralCode string) *foundingMemberView {
+// perksOn reports whether the member's perks apply on day (YYYY-MM-DD, IST):
+// an active member, and a stopped member (or one who re-joined a filling farm)
+// until the end of the month already paid.
+func (m *foundingMember) perksOn(day string) bool {
+	switch m.Status {
+	case memberActive:
+		return true
+	case memberStopped, memberWaiting:
+		return m.PerksUntil != "" && day <= m.PerksUntil
+	}
+	return false
+}
+
+// memberView is the wire member as it stands on day (perks_active).
+func memberView(m *foundingMember, referralCode, day string) *foundingMemberView {
 	if m == nil {
 		return nil
 	}
-	v := &foundingMemberView{Status: m.Status, FarmID: m.FarmID, ReferralCode: strOrNil(referralCode)}
+	v := &foundingMemberView{Status: m.Status, FarmID: m.FarmID, ReferralCode: strOrNil(referralCode), PerksActive: m.perksOn(day)}
 	if m.LineNumber > 0 {
 		n := m.LineNumber
 		v.LineNumber = &n
@@ -519,13 +536,7 @@ func (s *service) foundingStanding(ctx context.Context, consumerID primitive.Obj
 	if err != nil || m == nil {
 		return nil, false
 	}
-	switch m.Status {
-	case memberActive:
-		return m, true
-	case memberStopped, memberWaiting:
-		return m, m.PerksUntil != "" && day <= m.PerksUntil
-	}
-	return m, false
+	return m, m.perksOn(day)
 }
 
 // foundingActive: does member pricing apply to this consumer today?
@@ -580,7 +591,7 @@ func (s *service) foundingFamilyView(ctx context.Context, consumerID primitive.O
 	}
 	if m, err := s.repo.findFoundingMember(ctx, consumerID); err == nil && m != nil {
 		code, _ := s.repo.mintReferralCode(ctx, consumerID)
-		v.Member = memberView(m, code)
+		v.Member = memberView(m, code, istToday(time.Now()))
 	}
 	v.Savings = s.foundingSavings(ctx)
 	return v, nil
@@ -796,7 +807,7 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 		m = fresh
 	}
 	code, _ := s.repo.mintReferralCode(ctx, consumerID)
-	return memberView(m, code), nil
+	return memberView(m, code, istToday(time.Now())), nil
 }
 
 // retakeFoundingSeat puts a stopped member back on the farm they were active
@@ -815,7 +826,7 @@ func (s *service) retakeFoundingSeat(ctx context.Context, consumerID primitive.O
 		return nil, errAlreadyMember
 	}
 	code, _ := s.repo.mintReferralCode(ctx, consumerID)
-	return memberView(m, code), nil
+	return memberView(m, code, istToday(time.Now())), nil
 }
 
 // unlockFoundingFarm flips the farm (exactly once), activates every waiting
@@ -885,7 +896,7 @@ func (s *service) stopFoundingFamily(ctx context.Context, consumerID primitive.O
 	}
 	code, _ := s.repo.mintReferralCode(ctx, consumerID)
 	if m.Status == memberStopped {
-		return memberView(m, code), nil // idempotent
+		return memberView(m, code, istToday(time.Now())), nil // idempotent
 	}
 	now := time.Now().UTC()
 	set := bson.D{{Key: "status", Value: memberStopped}, {Key: "stopped_at", Value: now}, {Key: "stop_reason", Value: "member"}}
@@ -898,12 +909,12 @@ func (s *service) stopFoundingFamily(ctx context.Context, consumerID primitive.O
 	}
 	if upd == nil {
 		fresh, _ := s.repo.findFoundingMember(ctx, consumerID)
-		return memberView(fresh, code), nil
+		return memberView(fresh, code, istToday(time.Now())), nil
 	}
 	if m.Status == memberWaiting {
 		s.repo.releaseFarmSeat(ctx, m.FarmID)
 	}
-	return memberView(upd, code), nil
+	return memberView(upd, code, istToday(time.Now())), nil
 }
 
 // ── Service: monthly billing ────────────────────────────────────────────────
