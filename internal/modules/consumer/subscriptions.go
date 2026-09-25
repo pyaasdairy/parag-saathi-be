@@ -113,10 +113,12 @@ type subscription struct {
 	// day still belongs to the plan (subChangedBefore). updated_at cannot
 	// serve: the worker's own claims stamp it too.
 	ChangedAt time.Time `bson:"changed_at,omitempty" json:"-"`
-	// PauseReason says who paused a paused plan: always "member" (POST
-	// /pause). The server never pauses for a low wallet - the noon lock skips
-	// the day instead (lockConsumerDay) - and never resumes a pause on its
-	// own, so a paused plan waits for the member. Cleared on resume; additive.
+	// PauseReason says who paused a paused plan: "member" (POST /pause), or
+	// "founding_required" when FOUNDING_PYAAS_MEMBERS_ONLY refused a PYAAS
+	// milk plan's next morning (pausePlanFoundingRequired). The server never
+	// pauses for a low wallet - the noon lock skips the day instead
+	// (lockConsumerDay) - and never resumes a pause on its own, so a paused
+	// plan waits for the member. Cleared on resume; additive.
 	PauseReason string `bson:"pause_reason,omitempty" json:"pause_reason,omitempty"`
 	// NextDeliveryDate is derived on the wire (subscriptionNextDelivery): the
 	// first day this plan still delivers, honouring the noon cut-off, so the
@@ -845,12 +847,19 @@ func (s *service) setSubscriptionStatusAt(ctx context.Context, consumerID primit
 	if !subscriptionTransitions[sub.Status][target] {
 		return nil, errConflict("SUBSCRIPTION_STATE", fmt.Sprintf("cannot %s a %s subscription", action, sub.Status))
 	}
+	// Spec 5.1 (FOUNDING_PYAAS_MEMBERS_ONLY): a PYAAS milk plan resumes only
+	// for a member whose perks cover the first morning it would deliver.
+	if target == "active" {
+		if gerr := s.pyaasPlanGate(ctx, sub, firstEditableDay(now)); gerr != nil {
+			return nil, gerr
+		}
+	}
 	// A day already past its cut-off keeps the plan as it stood then.
 	s.lockPreviewsBeforeChange(ctx, sub, now)
 	set := bson.D{{Key: "status", Value: target}, {Key: "changed_at", Value: now.UTC()}}
 	switch target {
 	case "paused":
-		set = append(set, bson.E{Key: "pause_reason", Value: "member"}) // the only pause there is
+		set = append(set, bson.E{Key: "pause_reason", Value: "member"}) // the member's own pause (the server's is founding_required)
 	case "active":
 		set = append(set, bson.E{Key: "pause_reason", Value: ""})
 	}
@@ -1401,6 +1410,15 @@ func (s *service) decideMemberDay(ctx context.Context, userID, day string, previ
 			}
 			o = s.refreshSubOrder(ctx, o, sub)
 		}
+		// Spec 5.1 (FOUNDING_PYAAS_MEMBERS_ONLY): a PYAAS milk morning the
+		// member's perks no longer cover is not locked; the day is skipped
+		// (its claim kept), with no task and no money, and the plan is paused
+		// and the member told (pausePlanFoundingRequired).
+		if s.pyaasPlanGate(ctx, sub, day) != nil {
+			s.cancelScheduledSubOrder(ctx, o)
+			s.pausePlanFoundingRequired(ctx, sub, day, now)
+			continue
+		}
 		cands = append(cands, lockCandidate{o: o, sub: sub})
 	}
 	if len(cands) == 0 {
@@ -1810,6 +1828,13 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 		if rs := routeStartFor(day); !rs.IsZero() && !now.Before(rs) {
 			continue
 		}
+		// Spec 5.1: a PYAAS milk day the member's perks do not cover is left
+		// unclaimed and the plan is paused and the member told; no later day
+		// is covered either (perks only run out), so nothing else is due.
+		if s.pyaasPlanGate(ctx, sub, day) != nil {
+			s.pausePlanFoundingRequired(ctx, sub, day, now)
+			return placed
+		}
 		addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID)
 		if aerr != nil {
 			continue
@@ -1834,6 +1859,12 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 	//    modifiable upcoming order (no delivery task, no money, no wallet
 	//    gate — the member can top up until that day's noon cut-off).
 	if !sub.claimed(editable) && subscriptionDueOn(sub, editable) {
+		// Spec 5.1: a PYAAS milk morning the member's perks do not cover is
+		// not previewed; the plan is paused and the member told.
+		if s.pyaasPlanGate(ctx, sub, editable) != nil {
+			s.pausePlanFoundingRequired(ctx, sub, editable, now)
+			return placed
+		}
 		if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
 			if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, editable); won {
 				if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, editable, false, now); oerr != nil {

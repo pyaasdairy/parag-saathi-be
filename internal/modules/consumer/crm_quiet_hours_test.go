@@ -40,7 +40,7 @@ func TestCRMQuietHoursClassOfEveryLiveTrigger(t *testing.T) {
 	} {
 		want[id] = "always"
 	}
-	for _, id := range []string{"A-01", "A-05", "B-01", "C-03", "W-06", "W-07"} {
+	for _, id := range []string{"A-01", "A-05", "B-01", "C-03", "FF-04", "W-06", "W-07"} {
 		want[id] = "deferred"
 	}
 	for _, id := range []string{"E-07", "W-03b"} {

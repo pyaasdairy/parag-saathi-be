@@ -186,6 +186,26 @@ func dolibarrFoundingServiceField(ref string) string {
 	return ""
 }
 
+// saveFoundingServicePrice records a Founding Family service's ERP price (its
+// GST included, like every row) for the backend to bill by. DELIVERY-FEE is
+// the One Voice charge the founder publishes as Rs 5: an ERP entry that does
+// not come to exactly FOUNDING_DELIVERY_FEE_PAISE with its GST (Rs 5 + 18% is
+// Rs 5.90) is still what orders bill and what the app quotes (GET
+// /serviceability and /founding-family send it), so the sync says so loudly.
+func (s *service) saveFoundingServicePrice(ctx context.Context, field string, p dolibarr.Product) {
+	price := dolibarrEffectivePrice(p)
+	if price <= 0 {
+		return
+	}
+	s.repo.saveFoundingERPPrice(ctx, field, price)
+	if field == "delivery_fee" {
+		if published := s.deps.Cfg.FoundingDeliveryFee(); math.Abs(round2(price)-round2(published)) >= 0.005 {
+			s.log.WarnContext(ctx, "dolibarr: DELIVERY-FEE with its GST is not the published One Voice fee; orders bill and the app quotes the ERP amount",
+				"erp_with_gst", round2(price), "published", round2(published), "ref", strings.ToUpper(strings.TrimSpace(p.Ref)))
+		}
+	}
+}
+
 func dolibarrWithGST(p dolibarr.Product, base float64) float64 {
 	if base <= 0 {
 		return 0
@@ -339,9 +359,7 @@ func (s *service) runDolibarrCatalogSync(ctx context.Context, cli *dolibarr.Clie
 		// The Founding Family services (spec section 9): their ERP price is
 		// what GET /founding-family serves, in place of the config fallback.
 		if field := dolibarrFoundingServiceField(ref); field != "" {
-			if price := dolibarrEffectivePrice(p); price > 0 {
-				s.repo.saveFoundingERPPrice(ctx, field, price)
-			}
+			s.saveFoundingServicePrice(ctx, field, p)
 			continue
 		}
 		if !dolibarrRefPattern.MatchString(ref) {

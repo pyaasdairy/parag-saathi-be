@@ -24,6 +24,10 @@ package consumer
 // sides, exactly once per referral, once that delivery has outlived the
 // rider's undo window: the delivered sync marks the referral due and
 // referralRewardWorker pays it (payDueReferralRewards).
+//
+// Beside the credit (founder, 25 Sep: keep the Rs 100 AND add line movement)
+// a referral moves a waiting Founding Family referrer up their farm's line
+// when the friend pays the Rs 99: founding_line.go.
 
 import (
 	"context"
@@ -76,6 +80,12 @@ type referral struct {
 	// can no longer be undone by the rider: the moment the reward sweep
 	// looks at it. Absent while nothing is waiting.
 	RewardDueAt *time.Time `bson:"reward_due_at,omitempty"`
+	// The Founding Family line movement the referral earns when the referee
+	// pays the Rs 99 (founding_line.go): due from that join (with the
+	// friend's farm, for the message) until LineMove carries a result.
+	LineMoveDueAt      *time.Time        `bson:"line_move_due_at,omitempty"`
+	LineMoveFriendFarm string            `bson:"line_move_friend_farm,omitempty"`
+	LineMove           *referralLineMove `bson:"line_move,omitempty"`
 }
 
 // referralRewardHold is how long a delivery must stand before it pays a
@@ -582,6 +592,9 @@ func (s *service) referralRewardWorker(ctx context.Context) {
 	run := func(now time.Time) {
 		runCtx, cancel := context.WithTimeout(ctx, time.Minute)
 		s.payDueReferralRewards(runCtx, now)
+		// A friend's Rs 99 whose line movement could not be made at the join
+		// (the farm's line was busy, a restart) is made here.
+		s.applyDueLineMoves(runCtx, now)
 		cancel()
 	}
 	run(time.Now())

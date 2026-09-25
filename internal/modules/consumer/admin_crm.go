@@ -926,5 +926,8 @@ func registerAdminCRM(cr chi.Router, h *handler, jwtm *auth.JWTManager) {
 		// only ever moved by joins.
 		ar.Get("/founding/farms", h.adminFoundingFarms)
 		ar.Put("/founding/farms", h.adminPutFoundingFarms)
+		// Before FOUNDING_PYAAS_MEMBERS_ONLY goes on: the PYAAS milk plans it
+		// will stop (founding_members_only.go). Read-only.
+		ar.Get("/founding/members-only-impact", h.adminFoundingMembersOnlyImpact)
 	})
 }

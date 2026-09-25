@@ -69,13 +69,13 @@ type Config struct {
 	// Founding Family. Prices are read from the ERP when the sync has seen the
 	// FOUNDING-99 / DELIVERY-FEE services; these are the fallbacks until then.
 	FoundingPriceMonthPaise        int64  // FOUNDING_PRICE_MONTH_PAISE (FOUNDING-99)
-	FoundingDeliveryFeePaise       int64  // FOUNDING_DELIVERY_FEE_PAISE (DELIVERY-FEE)
+	FoundingDeliveryFeePaise       int64  // FOUNDING_DELIVERY_FEE_PAISE (DELIVERY-FEE): the One Voice fee on a one-off order below Rs 199
 	FoundingLevel3OffPaisePerLitre *int64 // FOUNDING_LEVEL3_OFF_PAISE_PER_LITRE: level 3 = level 1 minus this per litre on PYAAS milk when the ERP carries no level 3; 0 = no derived discount
 	FoundingSavingsSKU             string // FOUNDING_SAVINGS_SKU: the 1 L PYAAS line behind the "1 L a day saves" line
 	FoundingBillRetryDays          int    // FOUNDING_BILL_RETRY_DAYS: retries before a short wallet stops the membership
 	FoundingClosed                 bool   // FOUNDING_FAMILY_CLOSED=true: GET /founding-family answers 404 (the app says opening soon)
-	FoundingPyaasMembersOnly       bool   // FOUNDING_PYAAS_MEMBERS_ONLY=true: PYAAS milk lines refuse non-active members (spec rule 5.1)
-	FoundingPyaasNonMemberFee      bool   // FOUNDING_PYAAS_NONMEMBER_FEE=true: DELIVERY-FEE on PYAAS-milk orders by non-members (spec rule 5.3, needs the founder's yes)
+	FoundingPyaasMembersOnly       bool   // FOUNDING_PYAAS_MEMBERS_ONLY=true: PYAAS milk lines refuse non-active members (spec rule 5.1); the founder switches it on at launch
+	FoundingPyaasNonMemberFee      bool   // FOUNDING_PYAAS_NONMEMBER_FEE: spec rule 5.3, superseded by the One Voice fee (founder, 25 Sep: kept off); on or off, a bill follows One Voice and never pays two fees
 }
 
 // ReferralReward is the promo credit, in rupees, each side receives on the

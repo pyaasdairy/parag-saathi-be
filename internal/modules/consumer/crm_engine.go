@@ -1198,12 +1198,15 @@ func (s *service) crmInLiveWelcomeJourney(ctx context.Context, consumerID primit
 }
 
 // B-01: days of cover = spendable / daily burn; below 4 days → nudge, at most
-// once per 7 days (the config's per_cycle cap for a daily-milk cycle).
+// once per 7 days (the config's per_cycle cap for a daily-milk cycle). A PYAAS
+// milk plan FOUNDING_PYAAS_MEMBERS_ONLY refuses from the next open morning
+// burns nothing (pyaasPlanGate): no top-up is asked for milk that will not come.
 func (s *service) crmSweepWalletCover(ctx context.Context, now time.Time) {
+	next := firstEditableDay(now)
 	for cid, subs := range s.crmSubsByConsumer(ctx) {
 		daily := 0.0
 		for i := range subs {
-			if subs[i].Frequency == "daily" {
+			if subs[i].Frequency == "daily" && s.pyaasPlanGate(ctx, &subs[i], next) == nil {
 				daily += subs[i].UnitPrice*float64(subs[i].Qty) + subscriptionDeliveryFee
 			}
 		}
@@ -1285,16 +1288,24 @@ func (s *service) crmSkipNoticeFor(ctx context.Context, consumerID primitive.Obj
 // crmPlanCostOn is what the LOCK will ask the wallet for one plan's delivery
 // on day: the order already previewed for that day, else the plan's line at
 // the price the morning order bills; 0 when the plan does not deliver that
-// day (off cadence, on vacation, or a day the member skipped).
+// day (off cadence, on vacation, or a day the member skipped), and 0 for a
+// PYAAS milk morning FOUNDING_PYAAS_MEMBERS_ONLY refuses (pyaasPlanGate: the
+// lock will not fund it), unless it is already locked.
 func (s *service) crmPlanCostOn(ctx context.Context, sub *subscription, day string) float64 {
 	if !subscriptionDueOn(sub, day) {
 		return 0
 	}
 	if live, err := s.repo.findLiveSubscriptionOrder(ctx, sub.SubscriptionID, day); err == nil && live != nil {
+		if live.SubLockedAt == "" && s.pyaasPlanGate(ctx, sub, day) != nil {
+			return 0 // a preview the lock will not fund
+		}
 		return live.Total
 	}
 	if sub.claimed(day) {
 		return 0 // claimed with no live order: the member skipped this day
+	}
+	if s.pyaasPlanGate(ctx, sub, day) != nil {
+		return 0
 	}
 	return round2(s.subscriptionLinePrice(ctx, sub)*float64(sub.Qty)) + subscriptionDeliveryFee
 }

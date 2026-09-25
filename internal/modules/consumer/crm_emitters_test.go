@@ -159,9 +159,15 @@ func TestCRMEmitWalletCredited(t *testing.T) {
 	evs = crmEventsOf(t, w.db, cid, "wallet.credited")
 	last = evs[len(evs)-1].Payload
 	// The reason is a DLT variable (at most 30 characters): the order's short
-	// code, its last six characters in capitals, not the whole order id.
+	// code, its last six characters in capitals, not the whole order id. The
+	// Rs 75 Welcome credit above pays the whole Rs 75 order (2 x 35 plus the
+	// One Voice Rs 5), so the debit drew promo money and goes back as Pyaas
+	// credit, the bucket it came from.
 	short := strings.ToUpper(task.OrderCode[len(task.OrderCode)-6:])
-	if reason, _ := last["reason"].(string); last["account"] != "topup" || reason != "delivery "+short+" reversed" || len(reason) > 30 {
+	if o.Total != 75 {
+		t.Fatalf("setup: the instant order bills %v, want 75", o.Total)
+	}
+	if reason, _ := last["reason"].(string); last["account"] != "promo_credit" || reason != "delivery "+short+" reversed" || len(reason) > 30 {
 		t.Fatalf("wallet.credited on undo: %+v", last)
 	}
 	if _, has := last["order_id"]; has {

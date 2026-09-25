@@ -690,8 +690,8 @@ func TestCommerceFunnelE2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("createOrder: %v", err)
 		}
-		if o.Total != 85 { // server repricing: 2 × ₹35 + ₹15 instant fee; client price ignored
-			t.Fatalf("server reprice: total=%v want 85", o.Total)
+		if o.Total != 75 { // server repricing: 2 × ₹35 + the One Voice ₹5 below ₹199; client price ignored
+			t.Fatalf("server reprice: total=%v want 75", o.Total)
 		}
 		var task delivery
 		if err := db.Collection(collDeliveries).FindOne(ctx, bson.D{{Key: "order_id", Value: o.OrderID}}).Decode(&task); err != nil {
@@ -741,8 +741,8 @@ func TestCommerceFunnelE2E(t *testing.T) {
 	o1 := buyAndDeliver(t, newAcct.ID, "rider-A")
 	// Wallet debited at the door, exactly once.
 	wv, _ := svc.wallet(ctx, newAcct.ID)
-	if wv.Available != 415 { // 500 - (70 + ₹15 instant fee)
-		t.Fatalf("wallet after paid delivery: %v want 415", wv.Available)
+	if wv.Available != 425 { // 500 - (70 + ₹5 One Voice fee)
+		t.Fatalf("wallet after paid delivery: %v want 425", wv.Available)
 	}
 	if !hasPaid(t, db, newAcct.ID) {
 		t.Fatal("paid settle must set has_paid_order")
@@ -775,8 +775,8 @@ func TestCommerceFunnelE2E(t *testing.T) {
 	}
 	buyAndDeliver(t, oldAcct.ID, "rider-B")
 	wv2, _ := svc.wallet(ctx, oldAcct.ID)
-	if wv2.Available != 115 { // 200 - 85
-		t.Fatalf("existing wallet after delivery: %v want 115", wv2.Available)
+	if wv2.Available != 125 { // 200 - 75
+		t.Fatalf("existing wallet after delivery: %v want 125", wv2.Available)
 	}
 	if st, _ := svc.crmEligibility(ctx, oldAcct.ID); st != "not_eligible" {
 		t.Fatal("existing user funnel must stay hidden after another purchase")

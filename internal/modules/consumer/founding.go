@@ -147,6 +147,9 @@ type foundingMemberView struct {
 	ReferralCode *string `json:"referral_code"`
 	JoinedAt     *string `json:"joined_at"`
 	NextBillDate *string `json:"next_bill_date"`
+	// PerksActive (additive): whether the perks apply today, as orders are
+	// billed (foundingStanding). The app shows "Delivery charge FREE" from it.
+	PerksActive bool `json:"perks_active"`
 }
 
 type foundingSavingsView struct {
@@ -160,6 +163,24 @@ type foundingView struct {
 	Member     *foundingMemberView  `json:"member"`
 	Farms      []foundingFarmView   `json:"farms"`
 	Savings    *foundingSavingsView `json:"savings"`
+	// Delivery (additive) is the One Voice rule orders are billed by, so the
+	// app's cart quotes the amount charged (lib/deliveryRule.ts).
+	Delivery *deliveryRuleView `json:"delivery,omitempty"`
+}
+
+// deliveryRuleView is the One Voice delivery rule on the wire: a one-off
+// order whose goods come to less than FreeFrom pays Fee (DELIVERY-FEE: the
+// ERP's price with its GST once the sync has seen it, else
+// FOUNDING_DELIVERY_FEE_PAISE); from FreeFrom it is free, and a Founding
+// Family member whose perks cover the delivery day never pays it.
+type deliveryRuleView struct {
+	Fee      float64 `json:"fee"`
+	FreeFrom float64 `json:"free_from"`
+}
+
+// deliveryRule is the rule orderDeliveryFee bills by, as the app reads it.
+func (s *service) deliveryRule(ctx context.Context) *deliveryRuleView {
+	return &deliveryRuleView{Fee: s.foundingDeliveryFee(ctx), FreeFrom: freeDeliveryOver}
 }
 
 func strOrNil(s string) *string {
@@ -178,11 +199,25 @@ func farmView(f foundingFarm) foundingFarmView {
 	}
 }
 
-func memberView(m *foundingMember, referralCode string) *foundingMemberView {
+// perksOn reports whether the member's perks apply on day (YYYY-MM-DD, IST):
+// an active member, and a stopped member (or one who re-joined a filling farm)
+// until the end of the month already paid.
+func (m *foundingMember) perksOn(day string) bool {
+	switch m.Status {
+	case memberActive:
+		return true
+	case memberStopped, memberWaiting:
+		return m.PerksUntil != "" && day <= m.PerksUntil
+	}
+	return false
+}
+
+// memberView is the wire member as it stands on day (perks_active).
+func memberView(m *foundingMember, referralCode, day string) *foundingMemberView {
 	if m == nil {
 		return nil
 	}
-	v := &foundingMemberView{Status: m.Status, FarmID: m.FarmID, ReferralCode: strOrNil(referralCode)}
+	v := &foundingMemberView{Status: m.Status, FarmID: m.FarmID, ReferralCode: strOrNil(referralCode), PerksActive: m.perksOn(day)}
 	if m.LineNumber > 0 {
 		n := m.LineNumber
 		v.LineNumber = &n
@@ -488,7 +523,8 @@ func (s *service) foundingPriceMonth(ctx context.Context) float64 {
 	return round2(s.deps.Cfg.FoundingPriceMonth())
 }
 
-// foundingDeliveryFee is DELIVERY-FEE in rupees, same precedence.
+// foundingDeliveryFee is DELIVERY-FEE in rupees, same precedence: the One
+// Voice charge on a one-off order below Rs 199 (orderDeliveryFee).
 func (s *service) foundingDeliveryFee(ctx context.Context) float64 {
 	if p := s.repo.foundingERPPrices(ctx); p.DeliveryFee > 0 {
 		return round2(p.DeliveryFee)
@@ -518,28 +554,14 @@ func (s *service) foundingStanding(ctx context.Context, consumerID primitive.Obj
 	if err != nil || m == nil {
 		return nil, false
 	}
-	switch m.Status {
-	case memberActive:
-		return m, true
-	case memberStopped, memberWaiting:
-		return m, m.PerksUntil != "" && day <= m.PerksUntil
-	}
-	return m, false
+	return m, m.perksOn(day)
 }
 
-// foundingActive: does member pricing apply to this consumer today?
+// foundingActive: does member pricing apply to this consumer today? A
+// one-off order is judged on its own delivery day instead (createOrderAt).
 func (s *service) foundingActive(ctx context.Context, consumerID primitive.ObjectID) bool {
 	_, active := s.foundingStanding(ctx, consumerID, istToday(time.Now()))
 	return active
-}
-
-// foundingActiveHex is foundingActive for the hex consumer id orders carry.
-func (s *service) foundingActiveHex(ctx context.Context, userID string) bool {
-	cid, err := primitive.ObjectIDFromHex(userID)
-	if err != nil {
-		return false
-	}
-	return s.foundingActive(ctx, cid)
 }
 
 // foundingGate applies spec rule 5.1 when FOUNDING_PYAAS_MEMBERS_ONLY is on:
@@ -550,6 +572,13 @@ func (s *service) foundingGate(ctx context.Context, consumerID primitive.ObjectI
 	if !pyaasLine || active || !s.deps.Cfg.FoundingPyaasMembersOnly {
 		return nil
 	}
+	return s.foundingRefusal(ctx, consumerID)
+}
+
+// foundingRefusal is the FOUNDING_REQUIRED answer for a home whose perks do
+// not apply: a waiting member hears their farm's name, anyone else the
+// Founding Family line.
+func (s *service) foundingRefusal(ctx context.Context, consumerID primitive.ObjectID) error {
 	m, _ := s.repo.findFoundingMember(ctx, consumerID)
 	if m != nil && m.Status == memberWaiting {
 		name := "your farm"
@@ -559,6 +588,40 @@ func (s *service) foundingGate(ctx context.Context, consumerID primitive.ObjectI
 		return errUnprocessable("FOUNDING_REQUIRED", "Opens when "+name+" unlocks.")
 	}
 	return errUnprocessable("FOUNDING_REQUIRED", "PYAAS milk is for Founding Family homes. Unlock it with Founding Family.")
+}
+
+// pyaasPlanGate is spec rule 5.1 for a subscription morning: with
+// FOUNDING_PYAAS_MEMBERS_ONLY on (the founder turns it on at launch), a
+// PYAAS milk plan delivers on day only while its member's perks cover day
+// (an active member, or a stopped or re-joined one inside the month already
+// paid). Without it a plan made while the perks ran kept delivering PYAAS
+// milk, at level 1, to a home that was no longer a member. Returns the
+// refusal, or nil. The same PYAAS test subscriptionLinePrice prices by; a
+// catalog that cannot be read refuses nothing; Parag is never touched. The
+// first morning it refuses pauses the plan and says so
+// (pausePlanFoundingRequired, founding_members_only.go).
+func (s *service) pyaasPlanGate(ctx context.Context, sub *subscription, day string) error {
+	if sub == nil || !s.deps.Cfg.FoundingPyaasMembersOnly {
+		return nil
+	}
+	return s.pyaasPlanRefusal(ctx, sub, day)
+}
+
+// pyaasPlanRefusal is pyaasPlanGate's answer as it stands with the switch
+// on, whatever the switch says now: what the founder's pre-launch list
+// (pyaasPlansMembersOnlyStops) asks of every plan.
+func (s *service) pyaasPlanRefusal(ctx context.Context, sub *subscription, day string) error {
+	if sub == nil || !isPyaasMilkSKU(sub.ProductID, "", "") {
+		return nil
+	}
+	ix, err := s.loadPriceIndex(ctx)
+	if err != nil || !ix.isPyaasLine(sub.ProductID) {
+		return nil
+	}
+	if _, active := s.foundingStanding(ctx, sub.ConsumerID, day); active {
+		return nil
+	}
+	return s.foundingRefusal(ctx, sub.ConsumerID)
 }
 
 // ── Service: the view ───────────────────────────────────────────────────────
@@ -579,9 +642,10 @@ func (s *service) foundingFamilyView(ctx context.Context, consumerID primitive.O
 	}
 	if m, err := s.repo.findFoundingMember(ctx, consumerID); err == nil && m != nil {
 		code, _ := s.repo.mintReferralCode(ctx, consumerID)
-		v.Member = memberView(m, code)
+		v.Member = memberView(m, code, istToday(time.Now()))
 	}
 	v.Savings = s.foundingSavings(ctx)
+	v.Delivery = s.deliveryRule(ctx)
 	return v, nil
 }
 
@@ -603,18 +667,15 @@ func (s *service) foundingSavings(ctx context.Context) *foundingSavingsView {
 		}
 	}
 	l3, _ := ix.memberPriceFor(sku, "")
-	// delivery_fee is the fee a non-member actually pays per delivery, the
-	// saving the app adds to the price gap: DELIVERY-FEE only once the
-	// founder has switched it on (spec 5.3, FOUNDING_PYAAS_NONMEMBER_FEE),
-	// else nothing. Sending Rs 5 while no non-member is charged it made the
-	// join screen promise "1 L a day saves Rs 111 a month" to a daily
-	// subscriber who in fact pays Rs 39 more as a member.
-	fee := 0.0
-	if s.deps.Cfg.FoundingPyaasNonMemberFee {
-		fee = s.foundingDeliveryFee(ctx)
-	}
+	// delivery_fee is the fee a non-member actually pays on the line's "1 L
+	// a day", the saving the app adds to the price gap. A daily litre is a
+	// subscription, and subscription mornings never carry the One Voice fee
+	// (subscriptionDeliveryFee), so it is 0 whatever
+	// FOUNDING_PYAAS_NONMEMBER_FEE says: sending Rs 5 made the join screen
+	// promise "1 L a day saves Rs 111 a month" to a daily subscriber who in
+	// fact pays Rs 39 more as a member.
 	return &foundingSavingsView{
-		Level1PerLitre: round2(l1), Level3PerLitre: round2(l3), DeliveryFee: fee,
+		Level1PerLitre: round2(l1), Level3PerLitre: round2(l3), DeliveryFee: subscriptionDeliveryFee,
 	}
 }
 
@@ -793,12 +854,18 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 			"scope_key": "founding:join:" + m.ID.Hex() + ":" + strconv.Itoa(m.Joins),
 		})
 	}
+	// A friend who paid the Rs 99 moves the member who referred them up
+	// their own farm's line (founding_line.go), once per referral. A
+	// paid-through re-join moved no money, so it moves nobody.
+	if !paidThrough {
+		s.referralLineMoveOnJoin(ctx, consumerID, farmID, now)
+	}
 	fresh, _ := s.repo.findFoundingMember(ctx, consumerID)
 	if fresh != nil {
 		m = fresh
 	}
 	code, _ := s.repo.mintReferralCode(ctx, consumerID)
-	return memberView(m, code), nil
+	return memberView(m, code, istToday(time.Now())), nil
 }
 
 // retakeFoundingSeat puts a stopped member back on the farm they were active
@@ -817,7 +884,7 @@ func (s *service) retakeFoundingSeat(ctx context.Context, consumerID primitive.O
 		return nil, errAlreadyMember
 	}
 	code, _ := s.repo.mintReferralCode(ctx, consumerID)
-	return memberView(m, code), nil
+	return memberView(m, code, istToday(time.Now())), nil
 }
 
 // unlockFoundingFarm flips the farm (exactly once), activates every waiting
@@ -887,7 +954,7 @@ func (s *service) stopFoundingFamily(ctx context.Context, consumerID primitive.O
 	}
 	code, _ := s.repo.mintReferralCode(ctx, consumerID)
 	if m.Status == memberStopped {
-		return memberView(m, code), nil // idempotent
+		return memberView(m, code, istToday(time.Now())), nil // idempotent
 	}
 	now := time.Now().UTC()
 	set := bson.D{{Key: "status", Value: memberStopped}, {Key: "stopped_at", Value: now}, {Key: "stop_reason", Value: "member"}}
@@ -900,12 +967,12 @@ func (s *service) stopFoundingFamily(ctx context.Context, consumerID primitive.O
 	}
 	if upd == nil {
 		fresh, _ := s.repo.findFoundingMember(ctx, consumerID)
-		return memberView(fresh, code), nil
+		return memberView(fresh, code, istToday(time.Now())), nil
 	}
 	if m.Status == memberWaiting {
 		s.repo.releaseFarmSeat(ctx, m.FarmID)
 	}
-	return memberView(upd, code), nil
+	return memberView(upd, code, istToday(time.Now())), nil
 }
 
 // ── Service: monthly billing ────────────────────────────────────────────────

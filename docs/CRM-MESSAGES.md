@@ -7,7 +7,9 @@ FF-01 .. FF-03), plus the noon rules of 24 Sep afternoon (`feature/noon-rules`: 
 wired to the noon lock's skipped day, B-02 held until the lock has decided and not
 sent beside D-07, A-05 and FF-01 naming the real day; then W-01 naming the morning the
 free pack really comes, B-06 by push too, every body under its own SMS / WhatsApp
-registration, and a refused send recorded on its dispatch row). The source of truth is `internal/modules/consumer/crm_triggers.json`;
+registration, and a refused send recorded on its dispatch row), plus FF-04 of 25 Sep
+(`decisions/pricing`: a referred friend's Rs 99 join moves a waiting referrer up the
+line). The source of truth is `internal/modules/consumer/crm_triggers.json`;
 this file is written from it by hand, so when the two disagree the JSON wins and this
 file is out of date. How the engine works: `docs/HANDOFF-CODEV-2026-09-24.md` section 4.
 The per-trigger audit that led here: `docs/CRM-AUDIT-2026-09-24.md`.
@@ -28,6 +30,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
   complaint once whatever the day, so a replay on a later day sends nothing. FF-03
   is claimed once per join and FF-01 once per farm; FF-02 carries the same farm scope,
   so a member who re-joins another farm the same day is told about that farm too.
+  FF-04 is claimed once per referral.
   **Quiet hours, 22:00 to 07:00 IST** (founder decision 6, section 5): only order,
   delivery and money messages, the answer to what the member just did, and critical ones
   go out inside them; every other message waits for 07:00, and a promotional one for its
@@ -75,7 +78,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 - **Body** is the English template rendered with realistic values. Every template also
   has Hindi (roman, and Devanagari where written); the inbox stores both.
 
-## 1. Live messages (36)
+## 1. Live messages (37)
 
 | id | topic / schedule | when (IST) | channels | env to leave the building | status today | body (EN) |
 |---|---|---|---|---|---|---|
@@ -115,6 +118,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 | FF-01 | `founding.farm_unlocked` | the join that fills a Founding Family farm unlocks it: every waiting member of that farm. [DATE] is the first morning an order placed then reaches: tomorrow before 12 noon, the day after from noon | push, then whatsapp, then sms | push; or WA FF-01; or DLT FF-01 | INBOX-ONLY | Gonard Dairy is unlocked! Whole Farm Milk from Harsh Singh and the full PYAAS range are open for you. First delivery tomorrow by 7 AM. / after noon: … First delivery 8 Oct by 7 AM. |
 | FF-02 | `founding.member_active` | with FF-01, for each waiting member who turns Active at that unlock | push, then whatsapp, then sms | push; or WA FF-02; or DLT FF-02 | INBOX-ONLY | You are in. Your Founding Family price is on at Gonard Dairy: Rs 2 off every litre of PYAAS milk and free delivery, every morning. Stop any month in Me > Founding Family. |
 | FF-03 | `founding.seat_waiting` | a Rs 99 join takes a seat on a farm still filling | push, then whatsapp, then sms | push; or WA FF-03; or DLT FF-03 | INBOX-ONLY | Your seat at Gonard Dairy is held: you are #12 in line. 53 more homes and it unlocks. Share your link with your society group. |
+| FF-04 | `founding.line_moved` | a friend who applied the member's code pays the Rs 99 (a Founding Family join that moved money, once per referral ever) while the member waits on a farm still filling: the member swaps places with the waiting member directly ahead on their own farm's line. Not sent to an active member, a stopped one, or one already first in line (nothing moves). The Rs 100 referral credit (B-06) is separate | push, then whatsapp, then sms | push; or WA FF-04; or DLT FF-04 (T-FF04-UNLOCKED is its own registration) | INBOX-ONLY | Your friend Neha joined. You moved up to #11. They claimed Mishra Dairy: 79 more to unlock. / when the friend's join unlocked their farm (T-FF04-UNLOCKED): … They claimed Mishra Dairy, and it has unlocked. The friend is named by first name, else "(number ending 1234)". |
 
 ## 2. Awaiting a product event (21) and the alias
 
@@ -138,6 +142,16 @@ it real (the matrix test then needs its scenario).
 | D-08 | `route.changed` | whatsapp, +sms | zones carry no effective date and their edits emit no event |
 | E-03 | `delivery.late_confirmed` | whatsapp | no lateness confirmation and no production grant path for the Rs20 apology credit |
 | F-01 .. F-09 | schedules | ai_call | ai_call is not a transport (F-02 also needs a server cart; F-05 a high_value segment) |
+
+**Events recorded with no message yet** (in the outbox, no trigger, so nothing is sent
+and no count above changes): `referral.applied`, `referral.rewarded`, and
+`founding.pyaas_plan_paused`. The last is the member's PYAAS milk plan that the server
+paused (`pause_reason: founding_required`) on the first morning
+`FOUNDING_PYAAS_MEMBERS_ONLY` refused it because their Founding Family perks did not
+cover it. It is emitted once per pause, with `subscription_id`, `product_id`, `day` (the
+first refused morning) and `member_status`. The plan shows as paused in the app, and a
+resume works again once the perks cover the next morning. Its message (FF-05) waits for
+the founder's copy. Add it then as an event trigger on this topic (section 4).
 
 ## 3. Wallet credit paths and the top-up message (the owner's 24 Sep complaint)
 
@@ -220,8 +234,8 @@ them is `guards.G5_quiet_hours.quiet_hours.always_send` (`crm_schedule.go`
 
 | class | live triggers | inside the quiet hours |
 |---|---|---|
-| always send: money (category `transactional`), `critical`, section D (order and delivery), E (a complaint or rating and its answer), FF (a Rs 99 seat), and by id A-02, A-03, W-01, W-02, W-04, W-05, W-08 | A-02, A-03, B-02, B-03, B-06, D-01, D-02, D-03, D-05, D-06, D-07, D-09, E-01, E-02, E-04, E-05, E-06, W-01, W-02, W-03a, W-04, W-05, W-08, FF-01, FF-02, FF-03 (and the operator's W-09, W-10) | sent at once, as by day: a 05:30 delivery's D-06, a 02:00 top-up's B-06 |
-| deferred | A-01, A-05, B-01, C-03, W-06, W-07 | waits for 07:00; never dropped |
+| always send: money (category `transactional`), `critical`, section D (order and delivery), E (a complaint or rating and its answer), and by id A-02, A-03, FF-01..FF-03 (the member's own Rs 99 seat), W-01, W-02, W-04, W-05, W-08 | A-02, A-03, B-02, B-03, B-06, D-01, D-02, D-03, D-05, D-06, D-07, D-09, E-01, E-02, E-04, E-05, E-06, W-01, W-02, W-03a, W-04, W-05, W-08, FF-01, FF-02, FF-03 (and the operator's W-09, W-10) | sent at once, as by day: a 05:30 delivery's D-06, a 02:00 top-up's B-06 |
+| deferred | A-01, A-05, B-01, C-03, FF-04, W-06, W-07 | waits for 07:00; never dropped. FF-04 (a friend's Rs 99 moved the member up the line) is news about someone else, so it is not in the FF-01..FF-03 always-send ids |
 | promotional (never always send) | E-07, W-03b | only inside 10:00 to 21:00, which lies inside the 07:00 to 22:00 day |
 
 A trigger added later is deferred unless the rule covers it; `crm_quiet_hours_test.go`

@@ -265,6 +265,13 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 			return member(0), map[string]any{"farm_id": "mx-farm", "farm": "Matrix Farm", "farmer": "Harsh Singh",
 				"line": int32(12), "togo": int32(53)}
 		}, crmMatrixInbox},
+		// The payload founding_line.go writes when a friend's Rs 99 moves
+		// the referrer up the line.
+		"FF-04": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
+			return member(0), map[string]any{"referral_id": "mx-ref", "line": int32(11), "from": int32(12),
+				"referrer_farm_id": "mx-farm", "friend": "Neha", "farm_id": "mx-farm-2", "farm": "Matrix Farm Two",
+				"farmer": "Harsh Singh", "togo": int32(7), "friend_farm_unlocked": false, "scope_key": "founding:line:mx-ref"}
+		}, crmMatrixInbox},
 	}
 
 	// Flows for the triggers a clock or the Welcome Litre state machine

@@ -181,19 +181,15 @@ func TestFoundingFamilyJoinUnlockStopAndPricing(t *testing.T) {
 	if f0["id"] != "gonard-dairy" || f0["status"] != farmFilling || f0["claimed"] != 0.0 || f0["unlocks_at"] != 2.0 || f0["note"] != nil {
 		t.Fatalf("farm row: %v", f0)
 	}
-	// delivery_fee is what a non-member really pays per morning delivery:
-	// nothing while FOUNDING_PYAAS_NONMEMBER_FEE is off, so the app's line
+	// delivery_fee is what a non-member really pays on a daily litre: a
+	// subscription morning never carries the One Voice fee, so the app's line
 	// (level1 + fee) * 30 - (level3 * 30 + 99) never promises a saving on a
-	// Rs 5 fee nobody is charged (it hides the line when there is none).
+	// Rs 5 fee nobody is charged (it hides the line when there is none). The
+	// non-member fee switch changes nothing here (TestOneVoiceDeliveryFeeOnOrders).
 	sav, _ := view["savings"].(map[string]any)
 	if sav["level1_per_litre"] != 85.0 || sav["level3_per_litre"] != 83.0 || sav["delivery_fee"] != 0.0 {
 		t.Fatalf("savings: %v", sav)
 	}
-	w.svc.deps.Cfg.FoundingPyaasNonMemberFee = true
-	if sv := w.svc.foundingSavings(ctx); sv == nil || sv.DeliveryFee != 5 {
-		t.Fatalf("savings with the non-member fee switched on: %+v", sv)
-	}
-	w.svc.deps.Cfg.FoundingPyaasNonMemberFee = false
 
 	// A short wallet: WALLET_SHORT names the shortfall and carries it as a field.
 	poor := w.customer(t, "9000009002", 60)
@@ -285,7 +281,8 @@ func TestFoundingFamilyJoinUnlockStopAndPricing(t *testing.T) {
 	}
 
 	// Pricing: A's order bills PYAAS at level 3 with no delivery fee; a
-	// non-member pays level 1 and the usual fee; Parag is level 1 for both.
+	// non-member pays level 1 and the One Voice Rs 5 below Rs 199; Parag is
+	// level 1 for both.
 	ord, err := w.svc.createOrder(ctx, a.Hex(), orderInput{
 		Items: []orderItem{
 			{ProductID: "pyaas-toned-1l", Name: "Toned Milk - PYAAS", Qty: 1, Price: 85},
@@ -306,7 +303,7 @@ func TestFoundingFamilyJoinUnlockStopAndPricing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("non-member order: %v", err)
 	}
-	if ord2.Items[0].Price != 85 || ord2.DeliveryFee != deliveryFee {
+	if ord2.Items[0].Price != 85 || ord2.DeliveryFee != 5 || ord2.Total != 90 {
 		t.Fatalf("non-member order pricing: %+v fee %v", ord2.Items, ord2.DeliveryFee)
 	}
 	// The catalog carries both prices on the PYAAS line, none on Parag.

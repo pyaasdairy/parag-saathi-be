@@ -308,7 +308,7 @@ func TestWalletLockReservesTheMembersOneOffMorningOrder(t *testing.T) {
 	oSub := walletLockPlan(t, w, withOrder, "taaza-500ml", 2, D1, long) // Rs 58
 	nSub := walletLockPlan(t, w, without, "taaza-500ml", 2, D1, long)
 
-	// 10:00: a one-off morning order for tomorrow, 2 x Rs 35 + Rs 15 = Rs 85.
+	// 10:00: a one-off morning order for tomorrow, 2 x Rs 35 + Rs 5 = Rs 75.
 	one, err := w.svc.createOrderAt(ctx, withOrder.Hex(), orderInput{
 		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Qty: 2, Price: 35}},
 		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
@@ -317,13 +317,13 @@ func TestWalletLockReservesTheMembersOneOffMorningOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("one-off order: %v", err)
 	}
-	if one.Total != 85 || one.DeliveryDate != D1 {
+	if one.Total != 75 || one.DeliveryDate != D1 {
 		t.Fatalf("one-off: total %v date %s", one.Total, one.DeliveryDate)
 	}
 
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
 	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 5))
-	assertSkipped(t, w, oSub, D1) // 100 - 85 = 15 < 58
+	assertSkipped(t, w, oSub, D1) // 100 - 75 = 25 < 58
 	assertLocked(t, w, nSub, D1)  // 100 >= 58
 	if o := w.orderByID(t, one.OrderID); o.Status != "placed" {
 		t.Fatalf("the one-off order was touched: %s", o.Status)
