@@ -1013,7 +1013,9 @@ func (s *service) billFoundingMember(ctx context.Context, m *foundingMember, pri
 // Smart Recharge it starts no new charge while the mandate is held after a
 // bank refusal (that IST day, or autopayMaxFailures in a row until the
 // member acts): a second decline and a second B-03 the same day help
-// nobody. A charge already on its way still holds the stop.
+// nobody. Nor does it start one outside 07:00-22:00 IST (autopayDaytime,
+// quiet hours): a bill day's short wallet at 00:10 is charged at 07:00. A
+// charge already on its way still holds the stop.
 func (s *service) foundingSeatTopup(ctx context.Context, m *foundingMember, price float64, now time.Time) bool {
 	if !autopayAutoEnabled() || s.rzpKeySecret == "" {
 		return false
@@ -1031,6 +1033,9 @@ func (s *service) foundingSeatTopup(ctx context.Context, m *foundingMember, pric
 		// (a Smart Recharge one) still holds the stop.
 		open, _ := s.repo.openAutopayTopup(ctx, md.MandateID)
 		return open != nil
+	}
+	if !autopayDaytime(now) {
+		return false // quiet hours: the seat's charge waits for 07:00
 	}
 	if !s.autopayTokenReady(ctx, md, now) {
 		return false

@@ -30,6 +30,15 @@ package consumer
 // (consumer, ref, type) index. The wallet moves only when the money is
 // CAPTURED, exactly once, and B-06 "money added" fires once with it.
 //
+// DAYTIME. The server starts its OWN charges (the sweep and the Founding
+// Family seat top-up) only from 07:00 to 22:00 IST (founder decision 6: at
+// night only order, delivery and "money added" messages go out): every
+// charge makes the bank send its UPI pre-debit notice, and a refusal tells
+// the member. A need that arises at night waits for 07:00. A plan day
+// enters the funding horizon at 12:00 (48 h before its noon lock), always
+// in daytime, so that charge is never held. The member's own "top up now"
+// is theirs to time and is never held.
+//
 // SAFETY. One charge in flight per mandate (a partial unique index; Razorpay:
 // "do not create another subsequent payment until you get the status of the
 // previous one"); at most autopayMaxPerDay automatic charges a day; a bank
@@ -82,6 +91,11 @@ const (
 	// autopayFallbackEmail: Razorpay's recurring charge requires an email; a
 	// member who gave none is charged under Razorpay's placeholder address.
 	autopayFallbackEmail = "void@razorpay.com"
+
+	// autopayDayStartHour / autopayDayEndHour: the IST hours [07:00, 22:00)
+	// in which the server starts its own charges (autopayDaytime).
+	autopayDayStartHour = 7
+	autopayDayEndHour   = 22
 
 	autopayReasonThreshold = "threshold" // the wallet fell below the member's line
 	autopayReasonSeat      = "seat"      // the Rs 99 Founding Family bill found the wallet short
@@ -152,6 +166,13 @@ func autopayAmountFor(m *mandate, shortfall float64) float64 {
 		amt = m.MaxAmount
 	}
 	return round2(amt)
+}
+
+// autopayDaytime reports whether the server may START one of its own
+// charges at now: 07:00 to 22:00 IST (founder decision 6, quiet hours).
+func autopayDaytime(now time.Time) bool {
+	h := now.In(istZone).Hour()
+	return h >= autopayDayStartHour && h < autopayDayEndHour
 }
 
 // autopayAutoEnabled is the MANDATE_AUTODEBIT switch: true arms the server's
@@ -710,6 +731,9 @@ func (s *service) sweepAutopay(ctx context.Context, now time.Time) int {
 // autopayCheck decides one mandate on one tick and starts its charge when
 // the wallet needs one. Reports whether a charge started.
 func (s *service) autopayCheck(ctx context.Context, m *mandate, now time.Time) bool {
+	if !autopayDaytime(now) {
+		return false // quiet hours: the need waits for 07:00
+	}
 	today := istToday(now)
 	if m.TopupFailures >= autopayMaxFailures || m.LastFailureDay == today {
 		return false

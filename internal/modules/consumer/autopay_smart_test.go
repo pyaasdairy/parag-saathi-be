@@ -333,6 +333,80 @@ func TestAutopayChargesEarlyEnoughForTheNoonLock(t *testing.T) {
 	}
 }
 
+// RV-AP-05 (founder decision 6, quiet hours): the server starts its own
+// charges only from 07:00 to 22:00 IST, since each one makes the bank send
+// a pre-debit notice and a refusal messages the member. A need at night
+// waits for 07:00, the Founding Family seat's charge on a bill day too; the
+// member's own "top up now" is never held.
+func TestAutopayChargesStartInDaytimeOnly(t *testing.T) {
+	t.Setenv("MANDATE_AUTODEBIT", "true")
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	f := liveRzp(t, w)
+
+	// A refusal on 5 Oct holds the retry to 6 Oct, and not before 07:00.
+	a := w.customer(t, "9000013061", 50)
+	ma := armedMandate(t, w, a, "mnd_night", 500, 2000, 200)
+	f.recurringStatus, f.recurringBody = 400, `{"error":{"description":"declined"}}`
+	w.svc.sweepAutopay(ctx, istDayAt("2026-10-05", 10, 0))
+	f.recurringStatus = 0
+	refused := len(f.recurringCalls())
+	for _, at := range []time.Time{istDayAt("2026-10-06", 0, 5), istDayAt("2026-10-06", 6, 59)} {
+		if n := w.svc.sweepAutopay(ctx, at); n != 0 {
+			t.Fatalf("a charge started at %s IST", at.In(istZone).Format("15:04"))
+		}
+	}
+	if len(f.recurringCalls()) != refused {
+		t.Fatalf("a night sweep reached the bank")
+	}
+	if n := w.svc.sweepAutopay(ctx, istDayAt("2026-10-06", 7, 0)); n != 1 {
+		t.Fatalf("the held need must be charged at 07:00")
+	}
+	if tps := topupsOf(t, w, ma.MandateID); len(tps) != 2 {
+		t.Fatalf("charges: %+v", tps)
+	}
+
+	// 22:00 is quiet; 21:59 is not.
+	b := w.customer(t, "9000013062", 50)
+	armedMandate(t, w, b, "mnd_late", 500, 2000, 200)
+	if n := w.svc.sweepAutopay(ctx, istDayAt("2026-10-06", 22, 0)); n != 0 {
+		t.Fatalf("a charge started at 22:00 IST")
+	}
+	if n := w.svc.sweepAutopay(ctx, istDayAt("2026-10-06", 21, 59)); n != 1 {
+		t.Fatalf("a charge at 21:59 IST must start")
+	}
+
+	// The member's own top up now is theirs to time.
+	c := w.customer(t, "9000013063", 50)
+	mc := armedMandate(t, w, c, "mnd_own", 500, 2000, 200)
+	if tp, err := w.svc.autopayTopupNow(ctx, c, mc.MandateID, 300, "own-late", istDayAt("2026-10-06", 23, 30)); err != nil || tp.Status != "initiated" {
+		t.Fatalf("top up now at 23:30: %+v %v", tp, err)
+	}
+
+	// The seat on its bill day: nothing at 00:10, the charge at 07:00.
+	seedTestFarms(t, w, 1)
+	d := w.customer(t, "9000013064", 99)
+	if _, err := w.svc.joinFoundingFamily(ctx, d, "gonard-dairy"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	pinBillDate(t, w, d, "2026-10-31", 31)
+	md := armedMandate(t, w, d, "mnd_seat_night", 500, 2000, 200)
+	for _, at := range []time.Time{istDayAt("2026-10-31", 0, 10), istDayAt("2026-10-31", 6, 59)} {
+		w.svc.billFoundingMembers(ctx, at)
+	}
+	if tps := topupsOf(t, w, md.MandateID); len(tps) != 0 {
+		t.Fatalf("the seat charged at night: %+v", tps)
+	}
+	w.svc.billFoundingMembers(ctx, istDayAt("2026-10-31", 7, 0))
+	if tps := topupsOf(t, w, md.MandateID); len(tps) != 1 || tps[0].Reason != "seat" {
+		t.Fatalf("the seat's charge must start at 07:00: %+v", tps)
+	}
+	if m, _ := w.svc.repo.findFoundingMember(ctx, d); m.Status != memberActive {
+		t.Fatalf("a night-held seat charge stopped the member: %+v", m)
+	}
+}
+
 // The bank's word on the token: an unconfirmed token is looked up (at most
 // hourly) and charged once confirmed; a token the bank cancels ends the
 // mandate here too; an erased account is never charged.
