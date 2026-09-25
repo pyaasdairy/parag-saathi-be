@@ -10,10 +10,12 @@ package consumer
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 func TestAutopayRegistrationCreditsTheWalletOnce(t *testing.T) {
@@ -339,6 +341,59 @@ func TestAutopayRegistrationCancelledMandateTokenIsCancelled(t *testing.T) {
 	}
 	if got := w.cash(t, c); got != 200 {
 		t.Fatalf("late registration credit %v, want 200", got)
+	}
+}
+
+// RV-AP-08: verify is idempotent under concurrency. A double tap or an app
+// retry racing the first verify answers the active mandate, never 409, and
+// the registration is credited once.
+func TestAutopayRegistrationConcurrentVerifyIsIdempotent(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	verifyAll := func(cid primitive.ObjectID, id, paymentID, sig string) []error {
+		var wg sync.WaitGroup
+		errs := make([]error, 4)
+		for i := range errs {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				m, err := w.svc.verifyMandate(ctx, cid, id, paymentID, sig, "")
+				if err == nil && m.Status != "active" {
+					err = errors.New("answered " + m.Status)
+				}
+				errs[i] = err
+			}(i)
+		}
+		wg.Wait()
+		return errs
+	}
+	// Dev seam demo approvals (no credit, straight to the transition).
+	a := w.customer(t, "9000011031", 0)
+	va, err := w.svc.createMandate(ctx, a, "daily", 300, 1000, 0)
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	for _, err := range verifyAll(a, va.ID, "demo_"+va.ID, "demo") {
+		if err != nil {
+			t.Fatalf("a concurrent demo approval failed: %v", err)
+		}
+	}
+	// Live: signed verifies racing each other, credited once.
+	f := liveRzp(t, w)
+	b := w.customer(t, "9000011032", 0)
+	vb, err := w.svc.createMandate(ctx, b, "daily", 400, 2000, 0)
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	f.paymentTokens["pay_race_b"] = "token_race_b"
+	for _, err := range verifyAll(b, vb.ID, "pay_race_b", rzpTestSignature("rzp_test_secret", vb.OrderID, "pay_race_b")) {
+		if err != nil {
+			t.Fatalf("a concurrent verify failed: %v", err)
+		}
+	}
+	if got := w.cash(t, b); got != 400 {
+		t.Fatalf("concurrent verifies credited %v, want 400", got)
 	}
 }
 

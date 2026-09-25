@@ -505,7 +505,17 @@ func (s *service) verifyMandate(ctx context.Context, consumerID primitive.Object
 	if token != "" {
 		set = append(set, bson.E{Key: "token", Value: token})
 	}
-	return s.repo.transitionMandate(ctx, mandateID, consumerID, m.Status, "active", set)
+	out, err := s.repo.transitionMandate(ctx, mandateID, consumerID, m.Status, "active", set)
+	var ae *apiError
+	if err != nil && errors.As(err, &ae) && ae.Code == "MANDATE_STATE" {
+		// A concurrent verify (a double tap, an app retry) or the webhook
+		// got there first: the same idempotent answer as the early check
+		// when the mandate is now active.
+		if cur, rerr := s.repo.findMandate(ctx, mandateID, consumerID); rerr == nil && cur.Status == "active" {
+			return cur, nil
+		}
+	}
+	return out, err
 }
 
 // autopayRegRefPrefix names an AutoPay REGISTRATION payment order (RefID =
