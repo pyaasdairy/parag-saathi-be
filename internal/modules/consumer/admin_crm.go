@@ -765,8 +765,16 @@ func (h *handler) crmAssign(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	d, err := h.svc.repo.updateDelivery(ctx, id,
-		bson.D{{Key: "rider_party_id", Value: body.RiderPartyID}, {Key: "status", Value: "ASSIGNED"}, {Key: "assigned_at", Value: now}},
+	// Stamp the admin as the assigner (assignment.go), so a task a manager
+	// assigned and the admin then moved never credits the manager with the
+	// admin's choice of rider.
+	var by *assignedByDoc
+	if actor, ok := auth.ActorFrom(ctx); ok {
+		by = h.svc.assignerOf(ctx, actor)
+	}
+	set := append(bson.D{{Key: "rider_party_id", Value: body.RiderPartyID}, {Key: "status", Value: "ASSIGNED"}, {Key: "assigned_at", Value: now}},
+		assignmentStamp(by, assignSourceAdmin, "")...)
+	d, err := h.svc.repo.updateDelivery(ctx, id, set,
 		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"ASSIGNED", "OFFERED", "ACCEPTED"}}}}})
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(errConflict("NOT_ASSIGNABLE", "only an order that has not been picked up can be reassigned")))

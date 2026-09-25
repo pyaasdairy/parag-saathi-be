@@ -470,6 +470,24 @@ func tierFor(distKm float64) float64 {
 // delivery falls within a served tier (with the store-distance seam, all the
 // store's riders share the store→address distance).
 func (s *service) assignRider(ctx context.Context, actor auth.Actor, storeID, deliveryID, riderPartyID string) (*delivery, error) {
+	return s.assignRiderAt(ctx, actor, storeID, deliveryID, riderPartyID, "", s.now())
+}
+
+// assignRiderAt is the store manager's assign on an explicit clock, with the
+// manager's optional reason.
+//
+// Assignable: an unassigned or never-accepted task (ASSIGNED), a task the
+// delivery side failed (FAILED), and an UNCLAIMED instant offer (OFFERED, no
+// rider yet). The last is the manager's hand-assign when no rider has taken a
+// broadcast order: the task leaves every other rider's offer pool at once,
+// lands in the chosen rider's queue as ASSIGNED (they swipe to accept, as for
+// any assigned task), and the member's order moves to assigned exactly as it
+// does on a claim. An instant order a rider already claimed is theirs; only
+// the admin CRM may move it.
+//
+// Every assign stamps who did it on the task (assigned_by, assign_source
+// manager_assign, assign_reason) and writes an audit row.
+func (s *service) assignRiderAt(ctx context.Context, actor auth.Actor, storeID, deliveryID, riderPartyID, reason string, now time.Time) (*delivery, error) {
 	if err := s.assertStore(ctx, actor, storeID); err != nil {
 		return nil, err
 	}
@@ -504,17 +522,37 @@ func (s *service) assignRider(ctx context.Context, actor auth.Actor, storeID, de
 			return nil, errConflict("ORDER_CANCELLED", "the customer cancelled this order; it cannot be reassigned")
 		}
 	}
-	now := time.Now().UTC()
-	upd, err := s.repo.updateDelivery(ctx, deliveryID,
-		bson.D{{Key: "rider_party_id", Value: riderPartyID}, {Key: "status", Value: "ASSIGNED"}, {Key: "assigned_at", Value: now.Format(time.RFC3339)}},
-		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"ASSIGNED", "FAILED"}}}}},
+	by := s.assignerOf(ctx, actor)
+	set := append(bson.D{
+		{Key: "rider_party_id", Value: riderPartyID},
+		{Key: "status", Value: "ASSIGNED"},
+		{Key: "assigned_at", Value: now.UTC().Format(time.RFC3339)},
+	}, assignmentStamp(by, assignSourceManager, cleanAssignReason(reason))...)
+	// One atomic write, raced fairly against a rider's claim: both require an
+	// OFFERED task to still have no rider, so exactly one of them wins.
+	upd, err := s.repo.updateDelivery(ctx, deliveryID, set,
+		bson.D{{Key: "$or", Value: bson.A{
+			bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"ASSIGNED", "FAILED"}}}}},
+			bson.D{{Key: "status", Value: "OFFERED"}, {Key: "rider_party_id", Value: ""}},
+		}}},
 	)
 	if err != nil {
+		// A rider claimed the instant order first (before the manager's tap,
+		// or racing it): say so, rather than a bare "not in a valid state"
+		// the manager cannot act on.
+		if cur, cerr := s.repo.findDeliveryByID(ctx, deliveryID); cerr == nil &&
+			cur.Lane == "instant" && cur.Status == "ACCEPTED" && cur.RiderPartyID != "" {
+			return nil, errConflict("CLAIMED_BY_OTHER", "a rider has already accepted this order")
+		}
 		return nil, err
 	}
-	if d.Status == "FAILED" {
+	switch d.Status {
+	case "FAILED":
 		s.syncOrderReassigned(ctx, upd) // the member sees the order live again
+	case "OFFERED":
+		s.syncOrderAssigned(ctx, upd) // placed -> assigned, exactly as on a claim
 	}
+	s.auditManagerAssign(ctx, actor, d, upd, by, nil, now)
 	return upd, nil
 }
 
@@ -1261,9 +1299,12 @@ func (h *handler) assignRider(w http.ResponseWriter, r *http.Request) {
 	actor, _ := operatorActor(r)
 	var body struct {
 		RiderPartyID string `json:"rider_party_id"`
+		// Optional: why the manager hand-assigned (recorded on the task and
+		// in the audit log). Older clients send no reason.
+		Reason string `json:"reason"`
 	}
 	_ = decode(r, &body)
-	d, err := h.svc.assignRider(r.Context(), actor, chi.URLParam(r, "storeId"), chi.URLParam(r, "deliveryId"), body.RiderPartyID)
+	d, err := h.svc.assignRiderAt(r.Context(), actor, chi.URLParam(r, "storeId"), chi.URLParam(r, "deliveryId"), body.RiderPartyID, body.Reason, h.svc.now())
 	if err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
