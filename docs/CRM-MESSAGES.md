@@ -139,6 +139,16 @@ it real (the matrix test then needs its scenario).
 | E-03 | `delivery.late_confirmed` | whatsapp | no lateness confirmation and no production grant path for the Rs20 apology credit |
 | F-01 .. F-09 | schedules | ai_call | ai_call is not a transport (F-02 also needs a server cart; F-05 a high_value segment) |
 
+**Events recorded with no message yet** (in the outbox, no trigger, so nothing is sent
+and no count above changes): `referral.applied`, `referral.rewarded`, and
+`founding.pyaas_plan_paused`. The last is the member's PYAAS milk plan that the server
+paused (`pause_reason: founding_required`) on the first morning
+`FOUNDING_PYAAS_MEMBERS_ONLY` refused it because their Founding Family perks did not
+cover it. It is emitted once per pause, with `subscription_id`, `product_id`, `day` (the
+first refused morning) and `member_status`. The plan shows as paused in the app, and a
+resume works again once the perks cover the next morning. Its message (FF-05) waits for
+the founder's copy. Add it then as an event trigger on this topic (section 4).
+
 ## 3. Wallet credit paths and the top-up message (the owner's 24 Sep complaint)
 
 Every path that adds money, through its real entry point, drained through the real

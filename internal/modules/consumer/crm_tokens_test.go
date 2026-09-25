@@ -53,6 +53,8 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 		"founding.line_moved": {"referral_id": "r1", "line": int32(11), "from": int32(12), "referrer_farm_id": "gonard-dairy",
 			"friend": "Neha", "farm_id": "mishra-dairy", "farm": "Mishra Dairy", "farmer": "Abhishek Mishra", "togo": int32(79),
 			"friend_farm_unlocked": false, "scope_key": "founding:line:r1"},
+		"founding.pyaas_plan_paused": {"subscription_id": "sub_1", "product_id": "pyaas-toned-1l", "day": "2026-10-07",
+			"reason": "founding_required", "member_status": "stopped", "scope_key": "sub_1:founding_required:2026-10-06T06:35:00Z"},
 	}
 	for _, topic := range crmLifecycleTopics {
 		if _, ok := sample[topic]; !ok {

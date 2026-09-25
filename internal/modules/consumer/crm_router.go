@@ -40,6 +40,10 @@ var crmLifecycleTopics = []string{
 	// A referred friend's Rs 99 moved the referrer up the line (FF-04,
 	// founding_line.go).
 	"founding.line_moved",
+	// The members-only switch paused a PYAAS milk plan its member's perks
+	// do not cover (founding_members_only.go). No trigger yet: its message
+	// (FF-05) waits for the founder's copy.
+	"founding.pyaas_plan_paused",
 	"referral.applied", "referral.rewarded",
 }
 

@@ -562,6 +562,13 @@ func (s *service) foundingGate(ctx context.Context, consumerID primitive.ObjectI
 	if !pyaasLine || active || !s.deps.Cfg.FoundingPyaasMembersOnly {
 		return nil
 	}
+	return s.foundingRefusal(ctx, consumerID)
+}
+
+// foundingRefusal is the FOUNDING_REQUIRED answer for a home whose perks do
+// not apply: a waiting member hears their farm's name, anyone else the
+// Founding Family line.
+func (s *service) foundingRefusal(ctx context.Context, consumerID primitive.ObjectID) error {
 	m, _ := s.repo.findFoundingMember(ctx, consumerID)
 	if m != nil && m.Status == memberWaiting {
 		name := "your farm"
@@ -580,17 +587,31 @@ func (s *service) foundingGate(ctx context.Context, consumerID primitive.ObjectI
 // paid). Without it a plan made while the perks ran kept delivering PYAAS
 // milk, at level 1, to a home that was no longer a member. Returns the
 // refusal, or nil. The same PYAAS test subscriptionLinePrice prices by; a
-// catalog that cannot be read refuses nothing; Parag is never touched.
+// catalog that cannot be read refuses nothing; Parag is never touched. The
+// first morning it refuses pauses the plan and says so
+// (pausePlanFoundingRequired, founding_members_only.go).
 func (s *service) pyaasPlanGate(ctx context.Context, sub *subscription, day string) error {
-	if sub == nil || !s.deps.Cfg.FoundingPyaasMembersOnly || !isPyaasMilkSKU(sub.ProductID, "", "") {
+	if sub == nil || !s.deps.Cfg.FoundingPyaasMembersOnly {
+		return nil
+	}
+	return s.pyaasPlanRefusal(ctx, sub, day)
+}
+
+// pyaasPlanRefusal is pyaasPlanGate's answer as it stands with the switch
+// on, whatever the switch says now: what the founder's pre-launch list
+// (pyaasPlansMembersOnlyStops) asks of every plan.
+func (s *service) pyaasPlanRefusal(ctx context.Context, sub *subscription, day string) error {
+	if sub == nil || !isPyaasMilkSKU(sub.ProductID, "", "") {
 		return nil
 	}
 	ix, err := s.loadPriceIndex(ctx)
 	if err != nil || !ix.isPyaasLine(sub.ProductID) {
 		return nil
 	}
-	_, active := s.foundingStanding(ctx, sub.ConsumerID, day)
-	return s.foundingGate(ctx, sub.ConsumerID, true, active)
+	if _, active := s.foundingStanding(ctx, sub.ConsumerID, day); active {
+		return nil
+	}
+	return s.foundingRefusal(ctx, sub.ConsumerID)
 }
 
 // ── Service: the view ───────────────────────────────────────────────────────
