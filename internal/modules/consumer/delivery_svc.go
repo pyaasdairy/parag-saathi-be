@@ -391,6 +391,12 @@ func (s *service) storeRidersAt(ctx context.Context, actor auth.Actor, storeID, 
 	}
 	all, _ := s.repo.listDeliveriesByStore(ctx, storeID)
 	today := istToday(now) // the store's day is the IST day the route runs on
+	// Today's duty per rider, for the manager's roster. Best-effort: a failed
+	// lookup shows everyone off duty and blocks nothing (assign ignores it).
+	duty, derr := s.repo.dutyForRiders(ctx, riderIDs, today)
+	if derr != nil {
+		duty = map[string]riderDuty{}
+	}
 	out := make([]riderSummary, 0, len(riderIDs))
 	for _, rid := range riderIDs {
 		name, phone := s.repo.riderName(ctx, rid)
@@ -423,9 +429,14 @@ func (s *service) storeRidersAt(ctx context.Context, actor auth.Actor, storeID, 
 		if dest != nil {
 			dist = round2(haversineKm(origin, *dest))
 		}
+		dutySource := duty[rid].Source
+		if dutySource == "" {
+			dutySource = dutySourceNone
+		}
 		out = append(out, riderSummary{
 			PartyID: rid, Name: name, PhoneMasked: maskPhone(phone), VehicleNo: "",
 			ActiveDeliveries: active, CompletedToday: done, DistanceKm: dist, WithinTierKm: tierFor(dist),
+			OnDuty: duty[rid].OnDuty, DutySource: dutySource,
 		})
 	}
 	// Nearest-first when ranking against a concrete drop; ties break on the
@@ -552,7 +563,15 @@ func (s *service) assignRiderAt(ctx context.Context, actor auth.Actor, storeID, 
 	case "OFFERED":
 		s.syncOrderAssigned(ctx, upd) // placed -> assigned, exactly as on a claim
 	}
-	s.auditManagerAssign(ctx, actor, d, upd, by, nil, now)
+	// Duty never gates the manager's assign (the override): the audit row
+	// records whether the chosen rider was on duty, so an assign to an
+	// off-duty rider is visibly the manager's call.
+	extra := map[string]any{}
+	if duty, derr := s.repo.dutyForRiders(ctx, []string{riderPartyID}, istDay(now)); derr == nil {
+		extra["rider_on_duty"] = duty[riderPartyID].OnDuty
+		extra["rider_duty_source"] = duty[riderPartyID].Source
+	}
+	s.auditManagerAssign(ctx, actor, d, upd, by, extra, now)
 	return upd, nil
 }
 
@@ -783,6 +802,13 @@ const offerPingFreshness = 10 * time.Minute
 // only reaches riders within 15 km of the drop; the first to claim wins
 // (claimDelivery is atomic, so exactly one rider can ever take it).
 func (s *service) offeredForRider(ctx context.Context, actor auth.Actor, live *geoPt) ([]delivery, error) {
+	return s.offeredForRiderAt(ctx, actor, live, s.now())
+}
+
+// offeredForRiderAt is offeredForRider on an explicit clock. The pool is
+// gated on duty (duty_gate.go): a rider who is not on duty today sees only
+// the offers of stores where no rider is on duty (the never-strand fallback).
+func (s *service) offeredForRiderAt(ctx context.Context, actor auth.Actor, live *geoPt, now time.Time) ([]delivery, error) {
 	stores, err := s.repo.storesForRider(ctx, actor.PartyID)
 	if err != nil {
 		return nil, err
@@ -791,8 +817,9 @@ func (s *service) offeredForRider(ctx context.Context, actor auth.Actor, live *g
 	// at the very moment the offer would be shown. Record it as the rider's
 	// duty presence so the manager's assign ranking sees it too.
 	if live != nil {
-		s.repo.upsertRiderPresence(ctx, actor.PartyID, *live, time.Now())
+		s.repo.upsertRiderPresence(ctx, actor.PartyID, *live, now)
 	}
+	stores = s.offerPoolStores(ctx, actor.PartyID, stores, now)
 	offered, err := s.repo.listOfferedForStores(ctx, stores, actor.PartyID)
 	if err != nil {
 		return nil, err
@@ -803,7 +830,7 @@ func (s *service) offeredForRider(ctx context.Context, actor auth.Actor, live *g
 	// it may be yesterday's position, so it must never include OR exclude a
 	// rider from an offer. Nothing fresh → the rider stages AT their store (the
 	// duty station), the same positioning rule the manager's assign sheet uses.
-	cutoff := time.Now().UTC().Add(-offerPingFreshness).Format(time.RFC3339)
+	cutoff := now.UTC().Add(-offerPingFreshness).Format(time.RFC3339)
 	origin := live
 	if origin == nil {
 		if g, at, ok := s.repo.findRiderPresence(ctx, actor.PartyID); ok && at >= cutoff {
@@ -849,7 +876,16 @@ func (s *service) offeredForRider(ctx context.Context, actor auth.Actor, live *g
 // claimOfferedDelivery is the FIRST-ACCEPT-WINS path: the first rider to claim an
 // OFFERED task wins it atomically; everyone else gets CLAIMED_BY_OTHER (409).
 func (s *service) claimOfferedDelivery(ctx context.Context, actor auth.Actor, id string) (*delivery, error) {
-	d, err := s.repo.claimDelivery(ctx, id, actor.PartyID, time.Now().UTC())
+	return s.claimOfferedDeliveryAt(ctx, actor, id, s.now())
+}
+
+// claimOfferedDeliveryAt is the claim on an explicit clock, behind the same
+// duty gate as the pool: a rider may claim only an offer they can see.
+func (s *service) claimOfferedDeliveryAt(ctx context.Context, actor auth.Actor, id string, now time.Time) (*delivery, error) {
+	if err := s.claimAllowed(ctx, actor.PartyID, id, now); err != nil {
+		return nil, err
+	}
+	d, err := s.repo.claimDelivery(ctx, id, actor.PartyID, now.UTC())
 	if err != nil {
 		return nil, err
 	}

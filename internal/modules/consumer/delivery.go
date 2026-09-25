@@ -192,6 +192,11 @@ type riderSummary struct {
 	CompletedToday   int     `json:"completedToday"`
 	DistanceKm       float64 `json:"distanceKm"`
 	WithinTierKm     float64 `json:"withinTierKm"`
+	// Today's duty (duty_gate.go): whether the rider sees the instant offer
+	// pool, and what decided it (attendance | manager | none). Additive; the
+	// manager may assign any rider whatever this says.
+	OnDuty     bool   `json:"onDuty"`
+	DutySource string `json:"dutySource"`
 }
 
 func newDeliveryID() string {

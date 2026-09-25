@@ -437,6 +437,9 @@ func Register(r chi.Router, d *deps.Deps) {
 				// Tomorrow's previews with no task yet (upcoming.go, contract C1).
 				sm.Get("/stores/{storeId}/upcoming", h.storeUpcoming)
 				sm.Get("/stores/{storeId}/riders", h.storeRiders)
+				// Mark one of the store's riders on (or off) duty for today:
+				// the manager's override of the offer-pool gate (duty_gate.go).
+				sm.Post("/stores/{storeId}/riders/{riderPartyId}/duty", h.setRiderDuty)
 				sm.Post("/stores/{storeId}/orders/{deliveryId}/assign", h.assignRider)
 				// Order surgery at handover: cancel (crate damaged) or reduce
 				// quantities (deliver 2 of 3) — the bill re-computes and the

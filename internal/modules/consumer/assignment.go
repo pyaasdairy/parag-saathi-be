@@ -107,12 +107,19 @@ func (s *service) auditManagerAssign(ctx context.Context, actor auth.Actor, befo
 	for k, v := range extra {
 		meta[k] = v
 	}
-	s.recordAudit(ctx, audit.Entry{
+	s.recordAudit(ctx, auditEntry(actor, auditActionManagerAssign, auditTargetDelivery, after.ID, meta))
+}
+
+// auditEntry builds an audit row for an operator's action. The actor is set
+// explicitly rather than left to the recorder's context lookup, so the row
+// names the person even where the context carries no actor.
+func auditEntry(actor auth.Actor, action, targetType, targetID string, meta map[string]any) audit.Entry {
+	return audit.Entry{
 		ActorPartyID: actor.PartyID,
 		ActorRole:    actor.RoleCode,
-		Action:       auditActionManagerAssign,
-		TargetType:   auditTargetDelivery,
-		TargetID:     after.ID,
+		Action:       action,
+		TargetType:   targetType,
+		TargetID:     targetID,
 		Meta:         meta,
-	})
+	}
 }

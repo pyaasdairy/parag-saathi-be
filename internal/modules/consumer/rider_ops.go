@@ -397,6 +397,9 @@ func (r *repository) ensureRiderOpsIndexes(ctx context.Context) error {
 		// makes a double check-in impossible even under a double-tap race.
 		{collRiderAttendance, bson.D{{Key: "rider_party_id", Value: 1}, {Key: "day", Value: 1}}, options.Index().SetUnique(true)},
 		{collRiderAttendance, bson.D{{Key: "rider_party_id", Value: 1}, {Key: "day", Value: -1}}, nil},
+		// One manager duty mark per rider per IST day (duty_gate.go): the
+		// upsert's key, and what the offer-pool gate reads on every poll.
+		{collRiderDutyOverrides, bson.D{{Key: "rider_party_id", Value: 1}, {Key: "day", Value: 1}}, options.Index().SetUnique(true)},
 		{collRiderProfiles, bson.D{{Key: "rider_party_id", Value: 1}}, options.Index().SetUnique(true)},
 		{collRiderProfiles, bson.D{{Key: "referral_code", Value: 1}}, options.Index().SetSparse(true)},
 		{collRiderRouteDays, bson.D{{Key: "rider_party_id", Value: 1}, {Key: "day", Value: 1}}, options.Index().SetUnique(true)},
