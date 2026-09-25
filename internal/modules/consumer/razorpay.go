@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -24,11 +25,92 @@ import (
 // without moving real money. In production the secret is set and the dev seam is
 // unreachable.
 const (
-	razorpayOrdersURL = "https://api.razorpay.com/v1/orders"
+	// razorpayAPIOrigin is Razorpay's REST host. RAZORPAY_API_BASE_URL replaces
+	// it (scheme://host, like the CRM_*_BASE_URL stubs): the /v1 path, method,
+	// auth and body stay what production sends, so one local stub captures
+	// every gateway call a dry run or an E2E makes. Unset = the real gateway.
+	razorpayAPIOrigin = "https://api.razorpay.com"
 	// devRazorpaySecret signs top-ups when no real key secret is configured. It
 	// is ONLY trusted while OTP dev mode is on (never in production).
 	devRazorpaySecret = "rzp_dev_secret_v1"
 )
+
+// rzpAPIBase is the REST root EVERY Razorpay call goes through (orders, the
+// recurring charge, payment and token lookups, the reconciliation sweep):
+// the configured origin + /v1, or a test's httptest URL set on the service.
+func (s *service) rzpAPIBase() string {
+	if s.rzpBase != "" {
+		return s.rzpBase
+	}
+	return razorpayAPIBase
+}
+
+// rzpBaseFromEnv is the base newService stores: RAZORPAY_API_BASE_URL's origin
+// + /v1 when set, else "" (rzpAPIBase then answers the real gateway).
+func rzpBaseFromEnv() string {
+	if o := crmProviderOrigin("RAZORPAY_API_BASE_URL", ""); o != "" {
+		return o + "/v1"
+	}
+	return ""
+}
+
+// rzpCall is one authenticated JSON call to the gateway: body (nil for a
+// GET) is marshalled, the answer decoded into out when it is a 2xx. status is
+// the HTTP status (0 when the request never got an answer: a transport error
+// or a timeout, whose outcome is UNKNOWN - the caller must not read it as a
+// refusal). Keys come only from config; with no key secret nothing is sent.
+func (s *service) rzpCall(ctx context.Context, method, path string, body, out any) (status int, err error) {
+	if s.rzpKeySecret == "" {
+		return 0, errInternal("payments are not configured")
+	}
+	var rd io.Reader
+	if body != nil {
+		raw, merr := json.Marshal(body)
+		if merr != nil {
+			return 0, errInternal("gateway request build failed")
+		}
+		rd = bytes.NewReader(raw)
+	}
+	req, rerr := http.NewRequestWithContext(ctx, method, s.rzpAPIBase()+path, rd)
+	if rerr != nil {
+		return 0, errInternal("gateway request build failed")
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+	req.SetBasicAuth(s.rzpKeyID, s.rzpKeySecret)
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, derr := client.Do(req)
+	if derr != nil {
+		return 0, errInternal("payment gateway unreachable")
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 300 {
+		return resp.StatusCode, errInternal(fmt.Sprintf("payment gateway answered %d: %s", resp.StatusCode, rzpErrorText(raw)))
+	}
+	if out != nil {
+		if uerr := json.Unmarshal(raw, out); uerr != nil {
+			return resp.StatusCode, errInternal("payment gateway response invalid")
+		}
+	}
+	return resp.StatusCode, nil
+}
+
+// rzpErrorText is the gateway's own error description, for logs and a
+// refused charge's reason ({"error":{"description":...}}), else "".
+func rzpErrorText(raw []byte) string {
+	var e struct {
+		Error struct {
+			Description string `json:"description"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &e) == nil {
+		return e.Error.Description
+	}
+	return ""
+}
 
 // rzpDevMode reports the offline dev seam is in effect (no real key secret AND
 // OTP dev mode on). Any other combination requires a real secret to verify.
@@ -60,26 +142,20 @@ func (s *service) createRzpOrder(ctx context.Context, amountPaise int64, receipt
 		}
 		return "order_dev_" + hex.EncodeToString(b), nil
 	}
-	body, _ := json.Marshal(map[string]any{"amount": amountPaise, "currency": "INR", "receipt": receipt})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, razorpayOrdersURL, bytes.NewReader(body))
-	if err != nil {
-		return "", errInternal("order request build failed")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.SetBasicAuth(s.rzpKeyID, s.rzpKeySecret)
-	client := &http.Client{Timeout: 12 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", errInternal("payment gateway unreachable")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return "", errInternal(fmt.Sprintf("payment gateway rejected order (%d)", resp.StatusCode))
-	}
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.ID == "" {
+	status, err := s.rzpCall(ctx, http.MethodPost, "/orders", map[string]any{"amount": amountPaise, "currency": "INR", "receipt": receipt}, &out)
+	if err != nil {
+		switch {
+		case status == 0:
+			return "", errInternal("payment gateway unreachable")
+		case status < 300:
+			return "", errInternal("payment gateway response invalid")
+		}
+		return "", errInternal(fmt.Sprintf("payment gateway rejected order (%d)", status))
+	}
+	if out.ID == "" {
 		return "", errInternal("payment gateway response invalid")
 	}
 	return out.ID, nil

@@ -74,6 +74,9 @@ type service struct {
 	// the Razorpay dashboard when the webhook URL is registered. Empty → the
 	// webhook endpoint rejects every request, so this ships inert.
 	rzpWebhookSecret string
+	// rzpBase is the gateway REST root (razorpay.go rzpAPIBase): empty is the
+	// real gateway; RAZORPAY_API_BASE_URL or a test points it at a stub.
+	rzpBase string
 	// trace is the operator's public QR resolver, reused READ-ONLY for the
 	// consumer traceability bridge (tracebridge.go). Never mutates operator state.
 	trace *publictrace.Service
@@ -132,6 +135,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		rzpKeyID:           os.Getenv("RAZORPAY_KEY_ID"),
 		rzpKeySecret:       os.Getenv("RAZORPAY_KEY_SECRET"),
 		rzpWebhookSecret:   os.Getenv("RAZORPAY_WEBHOOK_SECRET"),
+		rzpBase:            rzpBaseFromEnv(),
 		trace:              publictrace.NewService(d, log),
 		appKey:             os.Getenv("CONSUMER_APP_KEY"),
 		sms:                sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),

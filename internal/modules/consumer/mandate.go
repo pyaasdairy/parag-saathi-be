@@ -264,7 +264,7 @@ func (s *service) createRzpMandate(ctx context.Context, m *mandate, receipt stri
 			"frequency":  rzpFrequency(m.Plan),
 		},
 	})
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, razorpayOrdersURL, bytes.NewReader(body))
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, s.rzpAPIBase()+"/orders", bytes.NewReader(body))
 	if e != nil {
 		return "", errInternal("mandate request build failed")
 	}

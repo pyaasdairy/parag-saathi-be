@@ -52,10 +52,11 @@ import (
 )
 
 const (
-	// razorpayAPIBase is the REST root used for reconciliation lookups. A field
-	// on the service would be nicer for tests; the sweep takes an explicit base
-	// instead (reconcilePendingPaymentsAt) so production keeps a constant.
-	razorpayAPIBase = "https://api.razorpay.com/v1"
+	// razorpayAPIBase is the real gateway's REST root. Every call reads the
+	// root through rzpAPIBase (razorpay.go), which RAZORPAY_API_BASE_URL can
+	// point at a stub; the sweep's body still takes an explicit base
+	// (reconcilePendingPaymentsAt) so a test can aim one pass anywhere.
+	razorpayAPIBase = razorpayAPIOrigin + "/v1"
 	// rzpReconcileGrace is how long a payment order must have sat at CREATED
 	// before we ask the gateway about it. Long enough that an ordinary checkout
 	// (including a slow UPI collect) has finished and called /wallet/verify.
@@ -273,7 +274,7 @@ func (s *service) paymentReconcileWorker(ctx context.Context) {
 }
 
 func (s *service) reconcilePendingPayments(ctx context.Context, now time.Time) {
-	s.reconcilePendingPaymentsAt(ctx, now, razorpayAPIBase)
+	s.reconcilePendingPaymentsAt(ctx, now, s.rzpAPIBase())
 }
 
 // reconcilePendingPaymentsAt is the testable body: `base` lets a test point the
