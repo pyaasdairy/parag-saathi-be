@@ -822,6 +822,12 @@ func (s *service) joinFoundingFamily(ctx context.Context, consumerID primitive.O
 			"scope_key": "founding:join:" + m.ID.Hex() + ":" + strconv.Itoa(m.Joins),
 		})
 	}
+	// A friend who paid the Rs 99 moves the member who referred them up
+	// their own farm's line (founding_line.go), once per referral. A
+	// paid-through re-join moved no money, so it moves nobody.
+	if !paidThrough {
+		s.referralLineMoveOnJoin(ctx, consumerID, farmID, now)
+	}
 	fresh, _ := s.repo.findFoundingMember(ctx, consumerID)
 	if fresh != nil {
 		m = fresh

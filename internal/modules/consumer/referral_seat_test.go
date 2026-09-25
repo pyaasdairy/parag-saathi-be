@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,13 +104,21 @@ func TestReferralCreditPaysTheFoundingSeat(t *testing.T) {
 }
 
 // referFriend links friend to referrer's code, as the app's sign-up does.
+// Accounts a test mints in the same second derive the SAME code (the app's
+// hash; the oldest account wins a collision) and a join stores it, so the
+// referrer is first given a stored code of its own, which always wins.
 func referFriend(t *testing.T, w *chainWorld, referrer, friend primitive.ObjectID) {
 	t.Helper()
-	code, err := w.svc.referralCode(context.Background(), referrer)
-	if err != nil {
-		t.Fatalf("code: %v", err)
+	ctx := context.Background()
+	own := "T" + strings.ToUpper(referrer.Hex()[14:])
+	if _, err := w.svc.repo.updateAccount(ctx, referrer, bson.D{{Key: "referral_code", Value: own}}); err != nil {
+		t.Fatalf("store code: %v", err)
 	}
-	if _, err := w.svc.applyReferral(context.Background(), friend, code); err != nil {
+	code, err := w.svc.referralCode(ctx, referrer)
+	if err != nil || code != own {
+		t.Fatalf("code: %q %v", code, err)
+	}
+	if _, err := w.svc.applyReferral(ctx, friend, code); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 }

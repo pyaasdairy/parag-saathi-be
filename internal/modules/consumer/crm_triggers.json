@@ -5,7 +5,7 @@
   "source_document": "Pyaas_CRM_Retention_AI_Calling_Playbook_Rev3.docx, 20 August 2026",
   "generated": "2026-08-20",
   "companion_spec": "PYAAS_CRM_App_Developer_Spec_Rev3.pdf",
-  "trigger_count": 58,
+  "trigger_count": 59,
   "architecture": "hybrid — in-house orchestration core, external vendor for AI outbound calls",
   "note": "Every trigger MUST pass the guard chain in `guards.evaluation_order` before dispatch. A trigger that fires but fails a guard is logged as suppressed with the failing guard id — it is never silently dropped.",
   "deviations_from_playbook": [
@@ -594,6 +594,20 @@
    "en": "Your seat at [FARM] is held: you are #[LINE] in line. [TOGO] more homes and it unlocks. Share your link with your society group.",
    "hi": "[FARM] par aapki seat pakki: aap line mein #[LINE] par hain. [TOGO] aur ghar judte hi farm unlock. Apna link society group mein share karein.",
    "note": "pyaas-app-spec.md section 6, seat waiting (the homes-to-unlock line). Refer a friend, move up the line: no reward language."
+  },
+  "T-FF04": {
+   "dlt_category": "service_implicit",
+   "cta": "open_founding_family",
+   "en": "Your friend [FRIEND] joined. You moved up to #[LINE]. They claimed [FARM]: [TOGO] more to unlock.",
+   "hi": "Aapke dost [FRIEND] jud gaye. Aap line mein #[LINE] par aa gaye. Unhone [FARM] chuna: [TOGO] aur ghar judte hi unlock.",
+   "note": "pyaas-app-spec.md section 6, referred friend pays Rs 99 ('Your friend Neha joined. You moved up to #271. She claimed Gonard Dairy: 2 more to unlock.'), gender-neutral. FRIEND is the friend's first name, else '(number ending 1234)'; FARM and TOGO are the friend's farm; LINE is the member's new place. Refer a friend, move up the line: no cash or reward language."
+  },
+  "T-FF04-UNLOCKED": {
+   "dlt_category": "service_implicit",
+   "cta": "open_founding_family",
+   "en": "Your friend [FRIEND] joined. You moved up to #[LINE]. They claimed [FARM], and it has unlocked.",
+   "hi": "Aapke dost [FRIEND] jud gaye. Aap line mein #[LINE] par aa gaye. Unhone [FARM] chuna, aur woh unlock ho gaya.",
+   "note": "T-FF04 when the friend's own join unlocked their farm (no homes to go). Its own SMS / WhatsApp registration."
   }
  },
  "triggers": [
@@ -2796,6 +2810,45 @@
    },
    "success_metric": "share_tapped",
    "note": "Emitted by founding.go joinFoundingFamily right after the Rs 99 seat is taken on a farm still filling. Routed like D-01; the in-app inbox always runs."
+  },
+  {
+   "id": "FF-04",
+   "section": "FF",
+   "name": "Founding Family: a friend joined, you moved up the line",
+   "phase": 2,
+   "kind": "event",
+   "event": "founding.line_moved",
+   "delay": "PT0S",
+   "conditions": [],
+   "segments": [
+    "*"
+   ],
+   "category": "service_implicit",
+   "delivery": {
+    "primary": "push",
+    "fallback": [
+     {
+      "channel": "whatsapp",
+      "after": "PT15M",
+      "if": "not_delivered"
+     },
+     {
+      "channel": "sms",
+      "after": "PT0S",
+      "if": "not_delivered"
+     }
+    ]
+   },
+   "template": {
+    "if": "founding.friend_farm_unlocked == true",
+    "then": "T-FF04-UNLOCKED",
+    "else": "T-FF04"
+   },
+   "frequency_cap": {
+    "per_event": 1
+   },
+   "success_metric": "share_tapped",
+   "note": "Emitted by founding_line.go when a referred friend's Rs 99 join moves the waiting referrer up one place on their own farm's line (spec 5.8; founder 25 Sep: keep the Rs 100 credit and add the line movement). Once per referral (scope_key founding:line:<referral id>). Routed like FF-03; the in-app inbox always runs."
   }
  ],
  "ai_call_guardrails": {

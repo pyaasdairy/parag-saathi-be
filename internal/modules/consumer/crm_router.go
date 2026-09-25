@@ -37,6 +37,9 @@ var crmLifecycleTopics = []string{
 	// (referrals.go). The referral topics carry no trigger yet; they are in
 	// the outbox for the day one is added.
 	"founding.farm_unlocked", "founding.member_active", "founding.seat_waiting",
+	// A referred friend's Rs 99 moved the referrer up the line (FF-04,
+	// founding_line.go).
+	"founding.line_moved",
 	"referral.applied", "referral.rewarded",
 }
 
@@ -401,6 +404,13 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 			return v, nil
 		}
 		return nil, fmt.Errorf("payload carries no account")
+	case "founding.friend_farm_unlocked":
+		// FF-04: the friend's own join unlocked their farm (0 homes to go),
+		// so the message says it has unlocked instead of counting homes.
+		if v, ok := p["friend_farm_unlocked"].(bool); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no friend_farm_unlocked")
 	case "order.contains_promotional_line":
 		// The shipped model mints each free pack as its own order, so an
 		// order carries a promotional line iff it is a pack order.
@@ -813,9 +823,14 @@ func crmEventParams(topic string, payload map[string]any, o *order) map[string]s
 		if v := str("reason"); v != "" {
 			p["REASON"] = v
 		}
-	case "founding.farm_unlocked", "founding.member_active", "founding.seat_waiting":
+	case "founding.farm_unlocked", "founding.member_active", "founding.seat_waiting", "founding.line_moved":
 		// Spec section 6: the farm and farmer by name, the member's place in
-		// line and the homes still to go.
+		// line and the homes still to go. FF-04 (founding.line_moved) names
+		// the friend who joined, and the farm and homes to go are the
+		// friend's farm; the line is the member's new place.
+		if v := str("friend"); v != "" {
+			p["FRIEND"] = v
+		}
 		if v := str("farm"); v != "" {
 			p["FARM"] = v
 		}

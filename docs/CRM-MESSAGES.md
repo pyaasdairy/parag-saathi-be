@@ -7,7 +7,9 @@ FF-01 .. FF-03), plus the noon rules of 24 Sep afternoon (`feature/noon-rules`: 
 wired to the noon lock's skipped day, B-02 held until the lock has decided and not
 sent beside D-07, A-05 and FF-01 naming the real day; then W-01 naming the morning the
 free pack really comes, B-06 by push too, every body under its own SMS / WhatsApp
-registration, and a refused send recorded on its dispatch row). The source of truth is `internal/modules/consumer/crm_triggers.json`;
+registration, and a refused send recorded on its dispatch row), plus FF-04 of 25 Sep
+(`decisions/pricing`: a referred friend's Rs 99 join moves a waiting referrer up the
+line). The source of truth is `internal/modules/consumer/crm_triggers.json`;
 this file is written from it by hand, so when the two disagree the JSON wins and this
 file is out of date. How the engine works: `docs/HANDOFF-CODEV-2026-09-24.md` section 4.
 The per-trigger audit that led here: `docs/CRM-AUDIT-2026-09-24.md`.
@@ -28,6 +30,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
   complaint once whatever the day, so a replay on a later day sends nothing. FF-03
   is claimed once per join and FF-01 once per farm; FF-02 carries the same farm scope,
   so a member who re-joins another farm the same day is told about that farm too.
+  FF-04 is claimed once per referral.
 - **Channels, in order.** The first is the primary; `+x` runs in parallel; `then x` is a
   fallback taken only when the channel before it is unavailable or refused. The in-app
   inbox is not listed because it ALWAYS gets the message (except human_call-only E-05,
@@ -71,7 +74,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 - **Body** is the English template rendered with realistic values. Every template also
   has Hindi (roman, and Devanagari where written); the inbox stores both.
 
-## 1. Live messages (36)
+## 1. Live messages (37)
 
 | id | topic / schedule | when (IST) | channels | env to leave the building | status today | body (EN) |
 |---|---|---|---|---|---|---|
@@ -111,6 +114,7 @@ end, and fails if a trigger is added without a scenario or an `awaiting_event` m
 | FF-01 | `founding.farm_unlocked` | the join that fills a Founding Family farm unlocks it: every waiting member of that farm. [DATE] is the first morning an order placed then reaches: tomorrow before 12 noon, the day after from noon | push, then whatsapp, then sms | push; or WA FF-01; or DLT FF-01 | INBOX-ONLY | Gonard Dairy is unlocked! Whole Farm Milk from Harsh Singh and the full PYAAS range are open for you. First delivery tomorrow by 7 AM. / after noon: … First delivery 8 Oct by 7 AM. |
 | FF-02 | `founding.member_active` | with FF-01, for each waiting member who turns Active at that unlock | push, then whatsapp, then sms | push; or WA FF-02; or DLT FF-02 | INBOX-ONLY | You are in. Your Founding Family price is on at Gonard Dairy: Rs 2 off every litre of PYAAS milk and free delivery, every morning. Stop any month in Me > Founding Family. |
 | FF-03 | `founding.seat_waiting` | a Rs 99 join takes a seat on a farm still filling | push, then whatsapp, then sms | push; or WA FF-03; or DLT FF-03 | INBOX-ONLY | Your seat at Gonard Dairy is held: you are #12 in line. 53 more homes and it unlocks. Share your link with your society group. |
+| FF-04 | `founding.line_moved` | a friend who applied the member's code pays the Rs 99 (a Founding Family join that moved money, once per referral ever) while the member waits on a farm still filling: the member swaps places with the waiting member directly ahead on their own farm's line. Not sent to an active member, a stopped one, or one already first in line (nothing moves). The Rs 100 referral credit (B-06) is separate | push, then whatsapp, then sms | push; or WA FF-04; or DLT FF-04 (T-FF04-UNLOCKED is its own registration) | INBOX-ONLY | Your friend Neha joined. You moved up to #11. They claimed Mishra Dairy: 79 more to unlock. / when the friend's join unlocked their farm (T-FF04-UNLOCKED): … They claimed Mishra Dairy, and it has unlocked. The friend is named by first name, else "(number ending 1234)". |
 
 ## 2. Awaiting a product event (21) and the alias
 
