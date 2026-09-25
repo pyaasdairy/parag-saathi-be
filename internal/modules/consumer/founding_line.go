@@ -196,19 +196,63 @@ func (r *repository) releaseFarmLineLease(ctx context.Context, farmID, token str
 		bson.D{{Key: "$unset", Value: bson.D{{Key: "line_lock_until", Value: ""}, {Key: "line_lock_by", Value: ""}}}})
 }
 
-// swapLineNumbers carries out a planned swap. Each update is guarded on the
-// number the member held before it, so running it again after a partial
-// run finishes it and running it after a full one changes nothing.
-func (r *repository) swapLineNumbers(ctx context.Context, plan referralLineMove) error {
-	if _, err := r.foundingMembers().UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: plan.AheadID}, {Key: "farm_id", Value: plan.FarmID}, {Key: "line_number", Value: plan.To}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "line_number", Value: plan.From}, {Key: "updated_at", Value: time.Now().UTC()}}}}); err != nil {
-		return errInternal("line swap failed")
+// moveLineNumber moves one member of a planned swap from one number to the
+// other, only while they are still WAITING on the plan's farm and hold from.
+// Each side of a swap is guarded on the number it held before it, so running
+// a plan again after a partial run finishes it and after a full one changes
+// nothing. Reports whether the member holds to afterwards: moved now, or by an
+// earlier run of the same plan (numbers are unique on a farm, so holding to
+// there can only be this swap). A member who stopped, or whose farm unlocked
+// (active), is never moved.
+func (r *repository) moveLineNumber(ctx context.Context, farmID string, id primitive.ObjectID, from, to int, at time.Time) (bool, error) {
+	res, err := r.foundingMembers().UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: id}, {Key: "farm_id", Value: farmID}, {Key: "status", Value: memberWaiting}, {Key: "line_number", Value: from}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "line_number", Value: to}, {Key: "updated_at", Value: at.UTC()}}}})
+	if err != nil {
+		return false, errInternal("line swap failed")
 	}
+	if res.ModifiedCount == 1 {
+		return true, nil
+	}
+	return r.holdsLineNumber(ctx, farmID, id, to)
+}
+
+// holdsLineNumber reports whether member id holds number line on farmID.
+func (r *repository) holdsLineNumber(ctx context.Context, farmID string, id primitive.ObjectID, line int) (bool, error) {
+	n, err := r.foundingMembers().CountDocuments(ctx,
+		bson.D{{Key: "_id", Value: id}, {Key: "farm_id", Value: farmID}, {Key: "line_number", Value: line}})
+	if err != nil {
+		return false, errInternal("line lookup failed")
+	}
+	return n == 1, nil
+}
+
+// undoLineNumber hands the member ahead their number back when the referrer
+// could not take it. Guarded on the number the swap gave them, so it does
+// nothing when their half of the swap never ran.
+func (r *repository) undoLineNumber(ctx context.Context, plan referralLineMove, at time.Time) error {
 	if _, err := r.foundingMembers().UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: plan.MemberID}, {Key: "farm_id", Value: plan.FarmID}, {Key: "line_number", Value: plan.From}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "line_number", Value: plan.To}, {Key: "updated_at", Value: time.Now().UTC()}}}}); err != nil {
-		return errInternal("line swap failed")
+		bson.D{{Key: "_id", Value: plan.AheadID}, {Key: "farm_id", Value: plan.FarmID}, {Key: "line_number", Value: plan.From}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "line_number", Value: plan.To}, {Key: "updated_at", Value: at.UTC()}}}}); err != nil {
+		return errInternal("line swap undo failed")
+	}
+	return nil
+}
+
+// dropReferralLineMovePlan clears a planned swap that can no longer be made as
+// planned (the member ahead left the line before their half ran), so the
+// referral is planned again against the line as it now stands. The referral
+// stays due (line_move_due_at is kept).
+func (r *repository) dropReferralLineMovePlan(ctx context.Context, id primitive.ObjectID, plan referralLineMove) error {
+	if _, err := r.referrals().UpdateOne(ctx,
+		bson.D{
+			{Key: "_id", Value: id},
+			{Key: "line_move.result", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}},
+			{Key: "line_move.member_id", Value: plan.MemberID}, {Key: "line_move.ahead_id", Value: plan.AheadID},
+			{Key: "line_move.from", Value: plan.From}, {Key: "line_move.to", Value: plan.To},
+		},
+		bson.D{{Key: "$unset", Value: bson.D{{Key: "line_move", Value: ""}}}}); err != nil {
+		return errInternal("referral update failed")
 	}
 	return nil
 }
@@ -315,12 +359,71 @@ func (s *service) applyReferralLineMove(ctx context.Context, refID primitive.Obj
 
 // finishPlannedLineMove carries out (or completes) a planned swap, stamps
 // the referral moved and tells the referrer. The caller holds the lease.
+//
+// Each side moves only while it is still waiting on a farm still filling: a
+// stop or an unlock does not take the farm's lease, so either can land
+// between the plan and the swap, or while a plan left by a crash waits for
+// the sweep.
+//   - The farm is no longer filling: a swap that completed stands (moved);
+//     a half-done one is undone; nobody else moves (not_waiting).
+//   - The member ahead left the line before their half ran: nothing moved;
+//     the plan is dropped and the referral planned again, on the next try,
+//     against the line as it stands ("" = retry).
+//   - The member ahead moved but the referrer left: the member ahead gets
+//     their number back and the move closes not_waiting, nobody told.
+//   - Both moved: moved, and FF-04 tells the referrer, once.
 func (s *service) finishPlannedLineMove(ctx context.Context, ref *referral, now time.Time) string {
 	plan := *ref.LineMove
-	if err := s.repo.swapLineNumbers(ctx, plan); err != nil {
-		s.log.WarnContext(ctx, "founding line: swap failed - the worker finishes it", "referral", ref.ID.Hex(), "err", err)
+	retry := func(step string, err error) string {
+		s.log.WarnContext(ctx, "founding line: "+step+" failed - the worker finishes it", "referral", ref.ID.Hex(), "err", err)
 		return ""
 	}
+	farm, err := s.repo.findFoundingFarm(ctx, plan.FarmID)
+	if err != nil {
+		return retry("farm read", err)
+	}
+	if farm == nil || farm.Status != farmFilling {
+		done, herr := s.repo.holdsLineNumber(ctx, plan.FarmID, plan.MemberID, plan.To)
+		if herr != nil {
+			return retry("line read", herr)
+		}
+		if done {
+			return s.stampLineMoved(ctx, ref, plan, now)
+		}
+		if uerr := s.repo.undoLineNumber(ctx, plan, now); uerr != nil {
+			return retry("swap undo", uerr)
+		}
+		return s.closeLineMove(ctx, ref, lineMoveNotWaiting, now)
+	}
+	aheadMoved, err := s.repo.moveLineNumber(ctx, plan.FarmID, plan.AheadID, plan.To, plan.From, now)
+	if err != nil {
+		return retry("swap", err)
+	}
+	if !aheadMoved {
+		if derr := s.repo.dropReferralLineMovePlan(ctx, ref.ID, plan); derr != nil {
+			return retry("stale plan drop", derr)
+		}
+		return ""
+	}
+	memberMoved, err := s.repo.moveLineNumber(ctx, plan.FarmID, plan.MemberID, plan.From, plan.To, now)
+	if err != nil {
+		return retry("swap", err)
+	}
+	if !memberMoved {
+		if uerr := s.repo.undoLineNumber(ctx, plan, now); uerr != nil {
+			return retry("swap undo", uerr)
+		}
+		return s.closeLineMove(ctx, ref, lineMoveNotWaiting, now)
+	}
+	return s.stampLineMoved(ctx, ref, plan, now)
+}
+
+// stampLineMoved records a swap that both members made and tells the
+// referrer, once (the stamp that finishes the plan is the one that tells).
+// A referrer who stopped after the swap ran (a plan left finished but not
+// stamped, then the stop) keeps the move and is not told: "You moved up"
+// is never sent to someone no longer in the line.
+func (s *service) stampLineMoved(ctx context.Context, ref *referral, plan referralLineMove, now time.Time) string {
 	plan.Result = lineMoveMoved
 	plan.At = now.UTC()
 	finished, err := s.repo.finishReferralLineMove(ctx, ref.ID, plan)
@@ -328,7 +431,9 @@ func (s *service) finishPlannedLineMove(ctx context.Context, ref *referral, now 
 		return ""
 	}
 	if finished {
-		s.tellLineMoved(ctx, ref, plan)
+		if m, _ := s.repo.findFoundingMember(ctx, ref.ReferrerID); m != nil && m.Status != memberStopped {
+			s.tellLineMoved(ctx, ref, plan)
+		}
 	}
 	return lineMoveMoved
 }

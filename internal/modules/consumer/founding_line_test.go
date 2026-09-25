@@ -258,3 +258,197 @@ func TestReferralLineMovesRacingOnOneFarmKeepNumbersUnique(t *testing.T) {
 		t.Fatalf("moves: %d", moved)
 	}
 }
+
+// planLineMove stages the state a crash leaves: R's referral earned (due) and
+// its swap with A planned, R holding from and A holding to, nothing moved.
+func planLineMove(t *testing.T, w *chainWorld, r, a, friend primitive.ObjectID, from, to int, at time.Time) *referral {
+	t.Helper()
+	ctx := context.Background()
+	ma, _ := w.svc.repo.findFoundingMember(ctx, a)
+	mr, _ := w.svc.repo.findFoundingMember(ctx, r)
+	ref, _ := w.svc.repo.findReferralByReferee(ctx, friend)
+	if ma == nil || mr == nil || ref == nil {
+		t.Fatalf("stage: members %v %v referral %v", ma, mr, ref)
+	}
+	if _, err := w.db.Collection(collReferrals).UpdateByID(ctx, ref.ID, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "line_move_due_at", Value: at}, {Key: "line_move_friend_farm", Value: "mishra-dairy"},
+		{Key: "line_move", Value: referralLineMove{FarmID: mr.FarmID, MemberID: mr.ID, From: from, AheadID: ma.ID, To: to, At: at}},
+	}}}); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	return ref
+}
+
+func lineMoveResult(t *testing.T, w *chainWorld, friend primitive.ObjectID) string {
+	t.Helper()
+	ref, _ := w.svc.repo.findReferralByReferee(context.Background(), friend)
+	if ref == nil || ref.LineMove == nil {
+		return ""
+	}
+	return ref.LineMove.Result
+}
+
+// RV-PR-03: a planned swap moves each member only while they are still
+// waiting on a farm still filling. A referrer who stopped before the swap ran
+// (a plan left by a crash, or a stop in the moment between the re-read and the
+// swap) never takes the waiting member's place and is never told "You moved
+// up"; a swap already half done is undone, so the member ahead keeps their
+// number.
+func TestReferralLineMoveNeverMovesAReferrerWhoLeftTheLine(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 10)
+	join := func(cid primitive.ObjectID) {
+		t.Helper()
+		if _, err := w.svc.joinFoundingFamily(ctx, cid, "gonard-dairy"); err != nil {
+			t.Fatalf("join: %v", err)
+		}
+	}
+	now := time.Now().UTC()
+
+	// The plan untouched, the referrer stopped before the sweep ran it.
+	a := w.customer(t, "9000019501", 300)
+	r := w.customer(t, "9000019502", 300)
+	f := w.customer(t, "9000019503", 300)
+	join(a)
+	join(r)
+	referFriend(t, w, r, f)
+	planLineMove(t, w, r, a, f, 2, 1, now)
+	if _, err := w.svc.stopFoundingFamily(ctx, r); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if n := w.svc.applyDueLineMoves(ctx, now.Add(time.Minute)); n != 0 {
+		t.Fatalf("a stopped referrer was moved: %d", n)
+	}
+	if lineOf(t, w, a) != 1 || lineOf(t, w, r) != 2 {
+		t.Fatalf("after the sweep: A #%d R #%d, want A #1 R #2", lineOf(t, w, a), lineOf(t, w, r))
+	}
+	if got := lineMoveResult(t, w, f); got != lineMoveNotWaiting {
+		t.Fatalf("the move closed %q, want %q", got, lineMoveNotWaiting)
+	}
+	if n := len(lineMovedEvents(t, w, r)); n != 0 {
+		t.Fatalf("a stopped referrer was told they moved up: %d", n)
+	}
+	farmLine(t, w, "gonard-dairy") // no number held twice
+
+	// Half done (A already moved to #2), then the referrer stopped: A gets #1
+	// back, nobody is told.
+	a2 := w.customer(t, "9000019504", 300)
+	r2 := w.customer(t, "9000019505", 300)
+	f2 := w.customer(t, "9000019506", 300)
+	join(a2) // #3
+	join(r2) // #4
+	referFriend(t, w, r2, f2)
+	planLineMove(t, w, r2, a2, f2, 4, 3, now)
+	ma2, _ := w.svc.repo.findFoundingMember(ctx, a2)
+	if _, err := w.db.Collection(collFoundingMembers).UpdateByID(ctx, ma2.ID, bson.D{{Key: "$set", Value: bson.D{{Key: "line_number", Value: 4}}}}); err != nil {
+		t.Fatalf("half swap: %v", err)
+	}
+	if _, err := w.svc.stopFoundingFamily(ctx, r2); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	w.svc.applyDueLineMoves(ctx, now.Add(time.Minute))
+	if lineOf(t, w, a2) != 3 || lineOf(t, w, r2) != 4 || lineMoveResult(t, w, f2) != lineMoveNotWaiting || len(lineMovedEvents(t, w, r2)) != 0 {
+		t.Fatalf("half-done swap of a stopped referrer: A2 #%d R2 #%d result %q events %d, want 3, 4, not_waiting, 0",
+			lineOf(t, w, a2), lineOf(t, w, r2), lineMoveResult(t, w, f2), len(lineMovedEvents(t, w, r2)))
+	}
+	farmLine(t, w, "gonard-dairy")
+
+	// The whole swap ran while R3 was waiting, the process died before the
+	// stamp, then R3 stopped: the swap stands (moved) but a member no longer
+	// in the line is not told "You moved up".
+	a3 := w.customer(t, "9000019507", 300)
+	r3 := w.customer(t, "9000019508", 300)
+	f3 := w.customer(t, "9000019509", 300)
+	join(a3) // #5
+	join(r3) // #6
+	referFriend(t, w, r3, f3)
+	planLineMove(t, w, r3, a3, f3, 6, 5, now)
+	ma3, _ := w.svc.repo.findFoundingMember(ctx, a3)
+	mr3, _ := w.svc.repo.findFoundingMember(ctx, r3)
+	for id, line := range map[primitive.ObjectID]int{ma3.ID: 6, mr3.ID: 5} {
+		if _, err := w.db.Collection(collFoundingMembers).UpdateByID(ctx, id, bson.D{{Key: "$set", Value: bson.D{{Key: "line_number", Value: line}}}}); err != nil {
+			t.Fatalf("whole swap: %v", err)
+		}
+	}
+	if _, err := w.svc.stopFoundingFamily(ctx, r3); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	w.svc.applyDueLineMoves(ctx, now.Add(time.Minute))
+	if lineOf(t, w, a3) != 6 || lineOf(t, w, r3) != 5 || lineMoveResult(t, w, f3) != lineMoveMoved || len(lineMovedEvents(t, w, r3)) != 0 {
+		t.Fatalf("a finished swap, then the stop: A3 #%d R3 #%d result %q events %d, want 6, 5, moved, 0",
+			lineOf(t, w, a3), lineOf(t, w, r3), lineMoveResult(t, w, f3), len(lineMovedEvents(t, w, r3)))
+	}
+	farmLine(t, w, "gonard-dairy")
+}
+
+// RV-PR-03: the member ahead left the line before their half of a planned
+// swap ran. Nothing moves on that plan; it is planned again against the line
+// as it stands, and the referrer moves up past the next waiting member, told
+// once. A plan on a farm that has since unlocked moves nobody.
+func TestReferralLineMoveReplansWhenTheMemberAheadLeft(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 10)
+	join := func(cid primitive.ObjectID) {
+		t.Helper()
+		if _, err := w.svc.joinFoundingFamily(ctx, cid, "gonard-dairy"); err != nil {
+			t.Fatalf("join: %v", err)
+		}
+	}
+	now := time.Now().UTC()
+	a := w.customer(t, "9000019601", 300)
+	b := w.customer(t, "9000019602", 300)
+	r := w.customer(t, "9000019603", 300)
+	f := w.customer(t, "9000019604", 300)
+	join(a) // #1
+	join(b) // #2
+	join(r) // #3
+	referFriend(t, w, r, f)
+	planLineMove(t, w, r, b, f, 3, 2, now)
+	if _, err := w.svc.stopFoundingFamily(ctx, b); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if n := w.svc.applyDueLineMoves(ctx, now.Add(time.Minute)); n != 0 {
+		t.Fatalf("the stale plan moved someone: %d", n)
+	}
+	if lineOf(t, w, a) != 1 || lineOf(t, w, b) != 2 || lineOf(t, w, r) != 3 || lineMoveResult(t, w, f) != "" {
+		t.Fatalf("after the stale plan: A #%d B #%d R #%d result %q", lineOf(t, w, a), lineOf(t, w, b), lineOf(t, w, r), lineMoveResult(t, w, f))
+	}
+	if n := w.svc.applyDueLineMoves(ctx, now.Add(2*time.Minute)); n != 1 {
+		t.Fatalf("the re-planned move: %d, want 1", n)
+	}
+	if lineOf(t, w, r) != 1 || lineOf(t, w, a) != 3 || lineOf(t, w, b) != 2 || len(lineMovedEvents(t, w, r)) != 1 {
+		t.Fatalf("after the re-plan: R #%d A #%d B #%d events %d", lineOf(t, w, r), lineOf(t, w, a), lineOf(t, w, b), len(lineMovedEvents(t, w, r)))
+	}
+	farmLine(t, w, "gonard-dairy")
+
+	// A plan (half done) on a farm that unlocked before the sweep: undone,
+	// nobody moves, nobody is told.
+	if _, err := w.svc.upsertFoundingFarms(ctx, []foundingFarmInput{{ID: "slow-farm", Name: "Slow Farm", Farmer: "Ram", UnlocksAt: 50}}, "test"); err != nil {
+		t.Fatalf("farm: %v", err)
+	}
+	c := w.customer(t, "9000019605", 300)
+	s := w.customer(t, "9000019606", 300)
+	g := w.customer(t, "9000019607", 300)
+	for _, cid := range []primitive.ObjectID{c, s} {
+		if _, err := w.svc.joinFoundingFamily(ctx, cid, "slow-farm"); err != nil {
+			t.Fatalf("join slow: %v", err)
+		}
+	}
+	referFriend(t, w, s, g)
+	planLineMove(t, w, s, c, g, 2, 1, now)
+	mc, _ := w.svc.repo.findFoundingMember(ctx, c)
+	if _, err := w.db.Collection(collFoundingMembers).UpdateByID(ctx, mc.ID, bson.D{{Key: "$set", Value: bson.D{{Key: "line_number", Value: 2}}}}); err != nil {
+		t.Fatalf("half swap: %v", err)
+	}
+	if _, err := w.db.Collection(collFoundingFarms).UpdateByID(ctx, "slow-farm", bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: farmUnlocked}}}}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	w.svc.applyDueLineMoves(ctx, now.Add(3*time.Minute))
+	if lineOf(t, w, c) != 1 || lineOf(t, w, s) != 2 || lineMoveResult(t, w, g) != lineMoveNotWaiting || len(lineMovedEvents(t, w, s)) != 0 {
+		t.Fatalf("a plan on an unlocked farm: C #%d S #%d result %q events %d", lineOf(t, w, c), lineOf(t, w, s), lineMoveResult(t, w, g), len(lineMovedEvents(t, w, s)))
+	}
+}
