@@ -539,19 +539,11 @@ func (s *service) foundingStanding(ctx context.Context, consumerID primitive.Obj
 	return m, m.perksOn(day)
 }
 
-// foundingActive: does member pricing apply to this consumer today?
+// foundingActive: does member pricing apply to this consumer today? A
+// one-off order is judged on its own delivery day instead (createOrderAt).
 func (s *service) foundingActive(ctx context.Context, consumerID primitive.ObjectID) bool {
 	_, active := s.foundingStanding(ctx, consumerID, istToday(time.Now()))
 	return active
-}
-
-// foundingActiveHex is foundingActive for the hex consumer id orders carry.
-func (s *service) foundingActiveHex(ctx context.Context, userID string) bool {
-	cid, err := primitive.ObjectIDFromHex(userID)
-	if err != nil {
-		return false
-	}
-	return s.foundingActive(ctx, cid)
 }
 
 // foundingGate applies spec rule 5.1 when FOUNDING_PYAAS_MEMBERS_ONLY is on:

@@ -336,10 +336,31 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	if err != nil {
 		return nil, err
 	}
-	// FOUNDING FAMILY (founding.go): an active member bills PYAAS milk lines
-	// at level 3 and never pays delivery; Parag is level 1 for everyone.
-	memberActive := s.foundingActiveHex(ctx, userID)
+	// Delivery lane: "morning" (5–7:30 subscription run) is the DEFAULT — the
+	// instant ≈20-min lane is an explicit, validated opt-in (an unknown value
+	// must never accidentally mint an instant ETA).
+	lane := in.Lane
+	if lane != "instant" {
+		lane = "morning"
+	}
+	// Scheduled morning date (instant orders never carry one; the FE sends
+	// null, and a stale client's date is ignored on the instant lane): a
+	// morning past its noon cut-off is already moved to the first open
+	// morning. A bad date is refused below, after the items, as before.
+	deliveryDate, requested, moved, derr := morningDeliveryDate(lane, in.DeliveryDate, at)
+	// FOUNDING FAMILY (founding.go): a member whose perks cover the DELIVERY
+	// day bills PYAAS milk lines at level 3 and never pays delivery; Parag is
+	// level 1 for everyone. The day is the morning the order goes out on (up
+	// to 7 days ahead), or today on the instant lane, on the order's own
+	// clock: the same per-day standing a subscription morning is judged by
+	// (pyaasPlanGate), so a member whose paid month ends before that morning
+	// is billed as a non-member.
 	consumerOID, _ := primitive.ObjectIDFromHex(userID)
+	standingDay := istToday(at)
+	if derr == nil && deliveryDate != "" {
+		standingDay = deliveryDate
+	}
+	_, memberActive := s.foundingStanding(ctx, consumerOID, standingDay)
 	var subtotal float64
 	var units int
 	items := make([]orderItem, 0, len(in.Items))
@@ -393,19 +414,10 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	if pm == "" {
 		pm = "wallet"
 	}
-	// Delivery lane: "morning" (5–7:30 subscription run) is the DEFAULT — the
-	// instant ≈20-min lane is an explicit, validated opt-in (an unknown value
-	// must never accidentally mint an instant ETA).
-	lane := in.Lane
-	if lane != "instant" {
-		lane = "morning"
-	}
-	// Scheduled morning date (instant orders never carry one; the FE sends
-	// null, and a stale client's date is ignored on the instant lane). Decided
-	// BEFORE the serviceability guard, so the guard judges the order as it will
-	// be delivered: its lane, and a morning past its noon cut-off already moved
+	// The scheduled morning date (decided above) is checked BEFORE the
+	// serviceability guard, so the guard judges the order as it will be
+	// delivered: its lane, and a morning past its noon cut-off already moved
 	// to the first open morning.
-	deliveryDate, requested, moved, derr := morningDeliveryDate(lane, in.DeliveryDate, at)
 	if derr != nil {
 		return nil, derr
 	}
