@@ -845,6 +845,13 @@ func (s *service) setSubscriptionStatusAt(ctx context.Context, consumerID primit
 	if !subscriptionTransitions[sub.Status][target] {
 		return nil, errConflict("SUBSCRIPTION_STATE", fmt.Sprintf("cannot %s a %s subscription", action, sub.Status))
 	}
+	// Spec 5.1 (FOUNDING_PYAAS_MEMBERS_ONLY): a PYAAS milk plan resumes only
+	// for a member whose perks cover the first morning it would deliver.
+	if target == "active" {
+		if gerr := s.pyaasPlanGate(ctx, sub, firstEditableDay(now)); gerr != nil {
+			return nil, gerr
+		}
+	}
 	// A day already past its cut-off keeps the plan as it stood then.
 	s.lockPreviewsBeforeChange(ctx, sub, now)
 	set := bson.D{{Key: "status", Value: target}, {Key: "changed_at", Value: now.UTC()}}
@@ -1401,6 +1408,13 @@ func (s *service) decideMemberDay(ctx context.Context, userID, day string, previ
 			}
 			o = s.refreshSubOrder(ctx, o, sub)
 		}
+		// Spec 5.1 (FOUNDING_PYAAS_MEMBERS_ONLY): a PYAAS milk morning the
+		// member's perks no longer cover is not locked; the day is skipped
+		// (its claim kept), with no task and no money.
+		if s.pyaasPlanGate(ctx, sub, day) != nil {
+			s.cancelScheduledSubOrder(ctx, o)
+			continue
+		}
 		cands = append(cands, lockCandidate{o: o, sub: sub})
 	}
 	if len(cands) == 0 {
@@ -1810,6 +1824,11 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 		if rs := routeStartFor(day); !rs.IsZero() && !now.Before(rs) {
 			continue
 		}
+		// Spec 5.1: a PYAAS milk day the member's perks do not cover is left
+		// unclaimed (it comes back if the standing does before its noon).
+		if s.pyaasPlanGate(ctx, sub, day) != nil {
+			continue
+		}
 		addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID)
 		if aerr != nil {
 			continue
@@ -1833,7 +1852,7 @@ func (s *service) sweepOneSubscription(ctx context.Context, sub *subscription, n
 	// 4) PREVIEW — materialise the first still-editable day as a visible,
 	//    modifiable upcoming order (no delivery task, no money, no wallet
 	//    gate — the member can top up until that day's noon cut-off).
-	if !sub.claimed(editable) && subscriptionDueOn(sub, editable) {
+	if !sub.claimed(editable) && subscriptionDueOn(sub, editable) && s.pyaasPlanGate(ctx, sub, editable) == nil {
 		if addr, aerr := s.subscriptionAddress(ctx, sub.ConsumerID); aerr == nil {
 			if won, _ := s.repo.claimSubscriptionDay(ctx, sub.SubscriptionID, editable); won {
 				if _, oerr := s.insertSubscriptionOrder(ctx, sub, addr, editable, false, now); oerr != nil {

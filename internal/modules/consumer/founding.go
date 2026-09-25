@@ -573,6 +573,26 @@ func (s *service) foundingGate(ctx context.Context, consumerID primitive.ObjectI
 	return errUnprocessable("FOUNDING_REQUIRED", "PYAAS milk is for Founding Family homes. Unlock it with Founding Family.")
 }
 
+// pyaasPlanGate is spec rule 5.1 for a subscription morning: with
+// FOUNDING_PYAAS_MEMBERS_ONLY on (the founder turns it on at launch), a
+// PYAAS milk plan delivers on day only while its member's perks cover day
+// (an active member, or a stopped or re-joined one inside the month already
+// paid). Without it a plan made while the perks ran kept delivering PYAAS
+// milk, at level 1, to a home that was no longer a member. Returns the
+// refusal, or nil. The same PYAAS test subscriptionLinePrice prices by; a
+// catalog that cannot be read refuses nothing; Parag is never touched.
+func (s *service) pyaasPlanGate(ctx context.Context, sub *subscription, day string) error {
+	if sub == nil || !s.deps.Cfg.FoundingPyaasMembersOnly || !isPyaasMilkSKU(sub.ProductID, "", "") {
+		return nil
+	}
+	ix, err := s.loadPriceIndex(ctx)
+	if err != nil || !ix.isPyaasLine(sub.ProductID) {
+		return nil
+	}
+	_, active := s.foundingStanding(ctx, sub.ConsumerID, day)
+	return s.foundingGate(ctx, sub.ConsumerID, true, active)
+}
+
 // ── Service: the view ───────────────────────────────────────────────────────
 
 var errFoundingClosed = &apiError{status: http.StatusNotFound, Code: "NOT_AVAILABLE", Message: "Founding Family opens in the app soon."}
