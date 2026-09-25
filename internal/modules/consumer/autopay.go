@@ -870,7 +870,7 @@ func (s *service) setMandatePolicy(ctx context.Context, consumerID primitive.Obj
 	if m.Status == "cancelled" {
 		return nil, errConflict("MANDATE_STATE", "AutoPay is cancelled.")
 	}
-	set := bson.D{{Key: "topup_failures", Value: 0}, {Key: "last_failure_day", Value: ""}, {Key: "updated_at", Value: time.Now().UTC()}}
+	set := bson.D{{Key: "topup_failures", Value: 0}, {Key: "last_failure_day", Value: ""}, {Key: "updated_at", Value: s.now().UTC()}}
 	if threshold != nil {
 		th := round2(*threshold)
 		if verr := validateThreshold(th); verr != nil {

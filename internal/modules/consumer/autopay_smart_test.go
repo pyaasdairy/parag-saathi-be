@@ -479,9 +479,12 @@ func TestAutopayPolicy(t *testing.T) {
 	ctx := context.Background()
 	cid := w.customer(t, "9000013051", 0)
 	m := armedMandate(t, w, cid, "mnd_pol", 500, 2000, 200)
+	// The injected clock stamps the change (RV-AP-11), never the wall clock.
+	at := istDayAt("2026-10-05", 10, 0)
+	w.svc.clock = func() time.Time { return at }
 	th, amt := 300.0, 1000.0
 	got, err := w.svc.setMandatePolicy(ctx, cid, m.MandateID, &th, &amt)
-	if err != nil || got.Threshold != 300 || got.Amount != 1000 {
+	if err != nil || got.Threshold != 300 || got.Amount != 1000 || !got.UpdatedAt.Equal(at) {
 		t.Fatalf("policy: %+v %v", got, err)
 	}
 	over := 2500.0
