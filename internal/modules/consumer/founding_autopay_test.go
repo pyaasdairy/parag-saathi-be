@@ -94,6 +94,60 @@ func TestFoundingSeatAutoPayTopsUpAndBillsOnce(t *testing.T) {
 	}
 }
 
+// RV-AP-06: the seat top-up honours Smart Recharge's failure hold. A
+// mandate the bank refused today starts no seat charge until tomorrow, and
+// one refused autopayMaxFailures times in a row starts none until the member
+// acts; billing goes on as for a member without AutoPay.
+func TestFoundingSeatAutoPayHonoursTheFailureHold(t *testing.T) {
+	t.Setenv("MANDATE_AUTODEBIT", "true")
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	f := liveRzp(t, w)
+	seedTestFarms(t, w, 2)
+	a := w.customer(t, "9000014011", 99)
+	b := w.customer(t, "9000014012", 99)
+	for _, cid := range []primitive.ObjectID{a, b} {
+		if _, err := w.svc.joinFoundingFamily(ctx, cid, "gonard-dairy"); err != nil {
+			t.Fatalf("join: %v", err)
+		}
+	}
+	hold := func(mandateID string, failures int, day string) {
+		t.Helper()
+		if _, err := w.db.Collection(collMandates).UpdateOne(ctx, bson.D{{Key: "mandate_id", Value: mandateID}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "topup_failures", Value: failures}, {Key: "last_failure_day", Value: day}}}}); err != nil {
+			t.Fatalf("hold: %v", err)
+		}
+	}
+
+	// Refused today (one refusal): no seat charge today, one tomorrow.
+	pinBillDate(t, w, a, "2026-10-31", 31)
+	ma := armedMandate(t, w, a, "mnd_seat_held", 500, 2000, 200)
+	hold(ma.MandateID, 1, "2026-10-31")
+	for h := 9; h < 12; h++ {
+		w.svc.billFoundingMembers(ctx, istDayAt("2026-10-31", h, 0))
+	}
+	if n := len(f.recurringCalls()); n != 0 {
+		t.Fatalf("the seat charged a mandate refused today: %d charges", n)
+	}
+	w.svc.billFoundingMembers(ctx, istDayAt("2026-11-01", 9, 0))
+	if tps := topupsOf(t, w, ma.MandateID); len(tps) != 1 || tps[0].Reason != "seat" || len(f.recurringCalls()) != 1 {
+		t.Fatalf("the day after the refusal the seat charge starts once: %+v", tps)
+	}
+
+	// Three refusals in a row: Smart Recharge waits for the member, so does
+	// the seat.
+	pinBillDate(t, w, b, "2026-10-31", 31)
+	mb := armedMandate(t, w, b, "mnd_seat_paused", 500, 2000, 200)
+	hold(mb.MandateID, autopayMaxFailures, "2026-10-29")
+	for _, day := range []string{"2026-10-31", "2026-11-01"} {
+		w.svc.billFoundingMembers(ctx, istDayAt(day, 10, 0))
+	}
+	if tps := topupsOf(t, w, mb.MandateID); len(tps) != 0 {
+		t.Fatalf("the seat charged a mandate waiting for the member: %+v", tps)
+	}
+}
+
 // A seat charge on its way holds the stop: the last retry day passes, the
 // member stays active until the charge is settled. Refused: the next short
 // day stops the membership as before.

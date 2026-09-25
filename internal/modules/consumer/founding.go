@@ -1009,7 +1009,11 @@ func (s *service) billFoundingMember(ctx context.Context, m *foundingMember, pri
 // short wallet on a Founding Family bill day, when MANDATE_AUTODEBIT is on
 // and the member has an ACTIVE mandate. Reports whether that bill's charge
 // is on its way (started now or earlier and not settled). No mandate, a
-// refused charge or AutoPay off: false, and billing goes on as before.
+// refused charge or AutoPay off: false, and billing goes on as before. Like
+// Smart Recharge it starts no new charge while the mandate is held after a
+// bank refusal (that IST day, or autopayMaxFailures in a row until the
+// member acts): a second decline and a second B-03 the same day help
+// nobody. A charge already on its way still holds the stop.
 func (s *service) foundingSeatTopup(ctx context.Context, m *foundingMember, price float64, now time.Time) bool {
 	if !autopayAutoEnabled() || s.rzpKeySecret == "" {
 		return false
@@ -1021,6 +1025,12 @@ func (s *service) foundingSeatTopup(ctx context.Context, m *foundingMember, pric
 	key := m.ID.Hex() + ":" + m.NextBillDate
 	if prior, _ := s.repo.findAutopayTopupByRef(ctx, autopayRef(autopayReasonSeat, md.MandateID, key)); prior != nil {
 		return prior.Open
+	}
+	if md.TopupFailures >= autopayMaxFailures || md.LastFailureDay == istToday(now) {
+		// Smart Recharge's failure hold. Another charge already on its way
+		// (a Smart Recharge one) still holds the stop.
+		open, _ := s.repo.openAutopayTopup(ctx, md.MandateID)
+		return open != nil
 	}
 	if !s.autopayTokenReady(ctx, md, now) {
 		return false
