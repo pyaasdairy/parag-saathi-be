@@ -11,6 +11,7 @@ package platformops
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -18,10 +19,11 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
 	"github.com/pyaas/saathi-backend/internal/platform/eventbus"
 	"github.com/pyaas/saathi-backend/internal/platform/middleware"
+	"github.com/pyaas/saathi-backend/internal/platform/push"
 )
 
 // Register wires the platformops module and mounts /admin, /audit,
-// /notifications and /support (the router hands us the /api/v1 subtree).
+// /notifications, /push and /support (the router hands us the /api/v1 subtree).
 func Register(r chi.Router, d *deps.Deps) {
 	log := d.Log.With(slog.String("module", "platformops"))
 	repo := newRepository(d.DB)
@@ -93,6 +95,19 @@ func Register(r chi.Router, d *deps.Deps) {
 		r.With(middleware.RequireRoles(domain.RoleSuperAdmin)).
 			Post("/worker/run", h.runWorker)
 	})
+
+	// Operator push devices (push_devices.go): the Saathi app registers the
+	// FCM token of the handset an operator is signed in on. The unique token
+	// index is built off the boot path: non-fatal, a failure only risks a
+	// duplicate row until the next boot.
+	mountPushRoutes(r, d, h)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := push.NewOperatorRegistry(d.DB).EnsureIndexes(ctx); err != nil {
+			log.Warn("operator push device indexes not built", slog.Any("err", err))
+		}
+	}()
 
 	r.Route("/support", func(r chi.Router) {
 		r.Use(middleware.Authenticate(d.JWT))

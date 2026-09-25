@@ -76,6 +76,14 @@ type Config struct {
 	FoundingClosed                 bool   // FOUNDING_FAMILY_CLOSED=true: GET /founding-family answers 404 (the app says opening soon)
 	FoundingPyaasMembersOnly       bool   // FOUNDING_PYAAS_MEMBERS_ONLY=true: PYAAS milk lines refuse non-active members (spec rule 5.1)
 	FoundingPyaasNonMemberFee      bool   // FOUNDING_PYAAS_NONMEMBER_FEE=true: DELIVERY-FEE on PYAAS-milk orders by non-members (spec rule 5.3, needs the founder's yes)
+
+	// ── Operator push (Saathi, Firebase Cloud Messaging) ────────────────────
+	// All optional: without a service account the sender is inert (devices
+	// still register at POST /push/register, nothing is sent) and the boot
+	// log says so. See internal/platform/push/fcm.go.
+	FCMServiceAccountJSON string // FCM_SERVICE_ACCOUNT_JSON: the Firebase service-account key file, raw JSON or base64
+	FCMProjectID          string // FCM_PROJECT_ID: optional; defaults to the service account's project_id
+	FCMBaseURL            string // FCM_BASE_URL: dry-run origin for FCM (never set in production)
 }
 
 // ReferralReward is the promo credit, in rupees, each side receives on the
@@ -184,6 +192,10 @@ func Load() (*Config, error) {
 		FoundingClosed:                 envBool("FOUNDING_FAMILY_CLOSED", false),
 		FoundingPyaasMembersOnly:       envBool("FOUNDING_PYAAS_MEMBERS_ONLY", false),
 		FoundingPyaasNonMemberFee:      envBool("FOUNDING_PYAAS_NONMEMBER_FEE", false),
+
+		FCMServiceAccountJSON: os.Getenv("FCM_SERVICE_ACCOUNT_JSON"),
+		FCMProjectID:          strings.TrimSpace(os.Getenv("FCM_PROJECT_ID")),
+		FCMBaseURL:            strings.TrimSpace(os.Getenv("FCM_BASE_URL")),
 	}
 
 	if cfg.MongoURI == "" {

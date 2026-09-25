@@ -55,3 +55,20 @@ func TestZeroSwitchesOffTheReferralRewardAndTheDerivedDiscount(t *testing.T) {
 		t.Fatalf("set values: reward %v off %v", set.ReferralReward(), set.FoundingLevel3OffPerLitre())
 	}
 }
+
+// Operator push (Saathi, FCM) is configured by two keys and a dry-run origin;
+// all optional, so an unset key leaves the sender inert rather than failing boot.
+func TestOperatorPushKeysAreRead(t *testing.T) {
+	cfg := loadForTest(t, map[string]string{
+		"FCM_SERVICE_ACCOUNT_JSON": `{"type":"service_account"}`,
+		"FCM_PROJECT_ID":           " pyaas-saathi ",
+		"FCM_BASE_URL":             "http://127.0.0.1:9009",
+	})
+	if cfg.FCMServiceAccountJSON != `{"type":"service_account"}` || cfg.FCMProjectID != "pyaas-saathi" || cfg.FCMBaseURL != "http://127.0.0.1:9009" {
+		t.Fatalf("fcm keys: %q %q %q", cfg.FCMServiceAccountJSON, cfg.FCMProjectID, cfg.FCMBaseURL)
+	}
+	off := loadForTest(t, map[string]string{"FCM_SERVICE_ACCOUNT_JSON": "", "FCM_PROJECT_ID": "", "FCM_BASE_URL": ""})
+	if off.FCMServiceAccountJSON != "" || off.FCMProjectID != "" || off.FCMBaseURL != "" {
+		t.Fatalf("unset fcm keys must stay empty: %+v", off)
+	}
+}
