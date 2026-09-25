@@ -287,6 +287,15 @@ for in context after the first delivery.
     {$match: {"form_grants.0": {$exists: true}}},
   ])
   ```
+- **A Message-preferences save re-sent every switch** in consumer builds before `e4e9b88`
+  (the shipped release/26.07.03 build included). Each save records the whole set of
+  switches, and those builds sent every type with the save's time; the server treats a
+  strictly newer grant as a re-grant, so it moved each untouched grant's 7-day anchor to
+  the save and logged another `granted:true` row. In the log, a `granted:true` row whose
+  kind's previous row was already `granted:true` is such a re-send, not a tick; the switch
+  the member flipped is the kind whose value changed at that `occurred_at`. From
+  `e4e9b88` the app sends each type with the time the member last changed it
+  (`lib/consentSync.ts` `consentChangeRecords`), so an untouched switch is a no-op here.
 - **What those grants still reach.** The server's promotional messages need a grant under
   7 days old (G2 `explicit_consent_ttl_days`), so a sign-up grant stops opening them 7
   days after sign-up. The app's taglines and cart reminder read the current state with no
