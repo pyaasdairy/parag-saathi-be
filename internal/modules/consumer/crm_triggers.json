@@ -321,6 +321,13 @@
    "en": "Your recharge didn't go through. Try again or use another method — no money was deducted.",
    "hi": "Recharge nahi hua. Dobara try karein — paise nahi kate."
   },
+  "T-B03-AUTOPAY": {
+   "dlt_category": "transactional",
+   "cta": "recharge",
+   "en": "AutoPay couldn't add ₹[X] to your Wallet this time. Add money in the app so your next delivery isn't paused.",
+   "hi": "AutoPay se ₹[X] Wallet mein nahi jud paaye. App mein paise jodein taaki agli delivery na ruke.",
+   "note": "B-03 for an AutoPay (Smart Recharge) charge the bank refused. The member did not try a recharge, so T-B03's 'Your recharge didn't go through' and its 'no money was deducted' do not apply."
+  },
   "T-B04": {
    "dlt_category": "service_implicit",
    "cta": "recharge",
@@ -900,17 +907,22 @@
    "delivery": {
     "primary": "sms",
     "parallel": [
-     "whatsapp"
+     "whatsapp",
+     "push"
     ],
     "fallback": []
    },
-   "template": "T-B03",
+   "template": {
+    "if": "payment.source != 'autopay'",
+    "then": "T-B03",
+    "else": "T-B03-AUTOPAY"
+   },
    "frequency_cap": {
     "per_failure": 1,
     "plus_one_retry_link": true
    },
    "success_metric": "recovery_pct",
-   "note": "'no money was deducted' must be verified against the gateway response before rendering. If the gateway reports a pending or captured state, use a different message — an inaccurate money statement is the highest-risk copy in the system. Held 10 minutes (delay PT10M) for a checkout retry on the same Razorpay order, and dropped at fire time when that top-up order is PAID or its TOPUP ledger row exists."
+   "note": "'no money was deducted' must be verified against the gateway response before rendering. If the gateway reports a pending or captured state, use a different message — an inaccurate money statement is the highest-risk copy in the system. Held 10 minutes (delay PT10M) for a checkout retry on the same Razorpay order, and dropped at fire time when that top-up order is PAID or its TOPUP ledger row exists. An AutoPay charge the bank refused (source autopay, founder decision 1 of 25 Sep: AutoPay FUNDS the wallet) is not a recharge the member tried, so it takes T-B03-AUTOPAY, which says what happened and makes no claim about the bank account; that body has no DLT or WhatsApp registration yet, so it reaches the inbox and push only."
   },
   {
    "id": "B-04",
