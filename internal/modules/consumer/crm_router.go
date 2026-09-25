@@ -49,10 +49,10 @@ const crmComplaintSLA = "24 hours"
 // triggers (operator-side, handled explicitly), triggers with no customer
 // template, aliases and schedules. A trigger with a non-zero "delay" is
 // queued instead (crm_schedule.go) and fired by the scheduler tick after
-// re-checking its conditions. The dispatch claim is (trigger, consumer, IST
-// day, scope): scoped to the order or complaint the event is about
-// (crmEventScopeKey), so a per_order trigger fires once per order, not once
-// per day.
+// re-checking its conditions; so is one the G5 quiet hours hold (crmDueAt).
+// The dispatch claim is (trigger, consumer, IST day, scope): scoped to the
+// order or complaint the event is about (crmEventScopeKey), so a per_order
+// trigger fires once per order, not once per day.
 func (s *service) crmRouteGeneric(ctx context.Context, ev crmEvent) {
 	s.crmRouteGenericAt(ctx, ev, time.Now().UTC())
 }
@@ -88,8 +88,11 @@ func (s *service) crmRouteGenericAt(ctx context.Context, ev crmEvent, now time.T
 		if !ok {
 			continue
 		}
-		if d := crmTriggerDelay(t); d > 0 {
-			s.crmEnqueueSchedule(ctx, t, ev, crmDelayBase(ev, now).Add(d))
+		// A delayed trigger, or one the quiet hours hold (G5: not order,
+		// delivery or money, drained between 22:00 and 07:00), waits in
+		// crm_schedules and is re-checked when it comes due.
+		if due, fireNow := crmDueAt(t, ev, now); !fireNow {
+			s.crmEnqueueSchedule(ctx, t, ev, due)
 			continue
 		}
 		s.crmFireTrigger(ctx, t, e, now)

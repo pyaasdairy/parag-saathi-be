@@ -74,7 +74,13 @@ func TestCRMDelayedRecheckReadsWhatHappenedMeanwhile(t *testing.T) {
 		t.Fatalf("createOrder: %v", err)
 	}
 	w.svc.crmProcessEventsAt(ctx, t0.Add(10*time.Minute))
-	w.svc.crmFireDueSchedules(ctx, t0.Add(2*time.Hour+time.Minute))
+	// The quiet hours (22:00-07:00 IST) hold C-03, A-05 and A-01 until 07:00,
+	// so a run whose wall clock puts the fire inside them fires as they end.
+	fire := t0.Add(2*time.Hour + time.Minute)
+	if next, open := crmQuietWindow(fire); !open {
+		fire = next.Add(time.Minute)
+	}
+	w.svc.crmFireDueSchedules(ctx, fire)
 
 	for _, c := range []struct {
 		name    string
