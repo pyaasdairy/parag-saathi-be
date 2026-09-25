@@ -537,3 +537,40 @@ func TestAutopayOrderCreateFailureIsOursNotARefusal(t *testing.T) {
 		t.Fatalf("top up now's order failure counted: %+v", mm)
 	}
 }
+
+// RV-AP-12: a one-off wallet order counts against the wallet only once its
+// day's noon lock falls within the funding horizon, the same cut the plan
+// days use; a morning booked a week ahead does not trigger a charge today.
+func TestAutopayOneOffOrdersCountOnlyInsideTheHorizon(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	cid := w.customer(t, "9000013081", 0)
+	placed := istDayAt("2026-10-04", 18, 0)
+	for i, o := range []struct {
+		day, scheduled string
+		total          float64
+	}{
+		{"2026-10-07", "", 120}, // lock 12:00 on 6 Oct: inside at 09:00 on 5 Oct
+		{"", "2026-10-06", 30},  // scheduled_for only: inside
+		{"2026-10-08", "", 80},  // lock 12:00 on 7 Oct: enters at 12:00 on 5 Oct
+		{"2026-10-12", "", 50},  // a week ahead: outside
+	} {
+		if _, err := w.svc.repo.orders.InsertOne(ctx, order{
+			MongoID: primitive.NewObjectID(), OrderID: "ord_h" + string(rune('a'+i)), UserID: cid.Hex(), Status: "placed",
+			Total: o.total, PaymentMethod: "wallet", DeliveryDate: o.day, ScheduledFor: o.scheduled, Lane: "morning",
+			PlacedAt: placed, CreatedAt: placed, UpdatedAt: placed,
+		}); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	if need, err := w.svc.autopayNeed(ctx, cid, istDayAt("2026-10-05", 9, 0)); err != nil || need != 150 {
+		t.Fatalf("need at 09:00 on 5 Oct: %v %v, want 150", need, err)
+	}
+	if need, err := w.svc.autopayNeed(ctx, cid, istDayAt("2026-10-05", 13, 0)); err != nil || need != 230 {
+		t.Fatalf("need at 13:00 on 5 Oct: %v %v, want 230", need, err)
+	}
+	if got := autopayHorizonLastDay(istDayAt("2026-10-05", 9, 0)); got != "2026-10-07" {
+		t.Fatalf("horizon's last day at 09:00: %s", got)
+	}
+}

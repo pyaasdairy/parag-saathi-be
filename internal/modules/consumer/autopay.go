@@ -305,10 +305,14 @@ var autopayOwedStatuses = bson.A{"placed", "confirmed", "preparing", "assigned",
 
 // listWalletOwedOrders: the member's wallet-paid orders not delivered yet
 // that the wallet will pay: locked subscription mornings and one-off morning
-// orders from fromDay on, and instant orders placed since instantSince. A
-// still-editable subscription preview is not here (the plan is costed by
-// day in autopayNeed).
-func (r *repository) listWalletOwedOrders(ctx context.Context, userID, fromDay string, instantSince time.Time) ([]order, error) {
+// orders for fromDay through toDay (the funding horizon's last day; a
+// morning booked further ahead is funded once it enters the horizon), and
+// instant orders placed since instantSince. A still-editable subscription
+// preview is not here (the plan is costed by day in autopayNeed).
+func (r *repository) listWalletOwedOrders(ctx context.Context, userID, fromDay, toDay string, instantSince time.Time) ([]order, error) {
+	// IST YYYY-MM-DD days; "before the day after" also bounds a value that
+	// carries a time of day.
+	within := bson.D{{Key: "$gte", Value: fromDay}, {Key: "$lt", Value: addDaysIST(toDay, 1)}}
 	cur, err := r.orders.Find(ctx, bson.D{
 		{Key: "user_id", Value: userID},
 		{Key: "status", Value: bson.D{{Key: "$in", Value: autopayOwedStatuses}}},
@@ -319,8 +323,8 @@ func (r *repository) listWalletOwedOrders(ctx context.Context, userID, fromDay s
 				bson.D{{Key: "subscription_id", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}},
 			}}},
 			bson.D{{Key: "$or", Value: bson.A{
-				bson.D{{Key: "delivery_date", Value: bson.D{{Key: "$gte", Value: fromDay}}}},
-				bson.D{{Key: "scheduled_for", Value: bson.D{{Key: "$gte", Value: fromDay}}}},
+				bson.D{{Key: "delivery_date", Value: within}},
+				bson.D{{Key: "scheduled_for", Value: within}},
 				bson.D{{Key: "lane", Value: "instant"}, {Key: "placed_at", Value: bson.D{{Key: "$gte", Value: instantSince}}}},
 			}}},
 		}},
@@ -635,7 +639,7 @@ func (s *service) autopayNeed(ctx context.Context, consumerID primitive.ObjectID
 	today := istToday(now)
 	horizonEnd := now.Add(autopayFundingHorizon)
 	need := 0.0
-	owed, err := s.repo.listWalletOwedOrders(ctx, consumerID.Hex(), today, now.Add(-24*time.Hour))
+	owed, err := s.repo.listWalletOwedOrders(ctx, consumerID.Hex(), today, autopayHorizonLastDay(now), now.Add(-24*time.Hour))
 	if err != nil {
 		return 0, err
 	}
@@ -677,6 +681,21 @@ func (s *service) autopayNeed(ctx context.Context, consumerID primitive.ObjectID
 		need += s.foundingPriceMonth(ctx)
 	}
 	return round2(need), nil
+}
+
+// autopayHorizonLastDay is the last delivery day whose 12:00 noon lock falls
+// within autopayFundingHorizon of now: the day autopayNeed's plan loop ends
+// on, and at least tomorrow.
+func autopayHorizonLastDay(now time.Time) string {
+	horizonEnd := now.Add(autopayFundingHorizon)
+	last := addDaysIST(istToday(now), 1)
+	for day := addDaysIST(last, 1); ; day = addDaysIST(day, 1) {
+		lockAt := lockMomentFor(day)
+		if lockAt.IsZero() || lockAt.After(horizonEnd) {
+			return last
+		}
+		last = day
+	}
 }
 
 // ── The sweep ───────────────────────────────────────────────────────────────
