@@ -17,6 +17,89 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
+// A store adjustment takes packs off an order the store could not fill. It
+// never adds a delivery fee the order did not carry: not to an order that
+// was over Rs 199 when the member placed it, not to a Founding Family
+// member's order, not to a subscription morning (which never carries one).
+// An order that already paid the One Voice Rs 5 keeps paying it.
+func TestStoreAdjustNeverRaisesTheDeliveryFee(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	adjust := func(o *order, productID string, qty int) *order {
+		t.Helper()
+		task := chainTaskFor(t, w, o.OrderID)
+		if _, err := w.svc.storeAdjustDelivery(ctx, w.mgr, w.storeID.Hex(), task.ID, []itemAdjust{{ProductID: productID, Qty: qty}}); err != nil {
+			t.Fatalf("adjust %s: %v", o.OrderID, err)
+		}
+		got := w.orderByID(t, o.OrderID)
+		if dt := chainTaskFor(t, w, o.OrderID); dt.Amount != got.Total {
+			t.Fatalf("the task amount %v disagrees with the order total %v", dt.Amount, got.Total)
+		}
+		return got
+	}
+	place := func(cid string, productID string, qty int) *order {
+		t.Helper()
+		o, err := w.svc.createOrder(ctx, cid, orderInput{
+			Items:         []orderItem{{ProductID: productID, Qty: qty, Price: 1}, {ProductID: "taaza-500ml", Qty: 1, Price: 1}},
+			PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow", Lane: "morning",
+		})
+		if err != nil {
+			t.Fatalf("createOrder: %v", err)
+		}
+		return o
+	}
+
+	// Over Rs 199 when placed (3 x 69 + 29 = 236, free): the store's shortage
+	// takes it to 98 and it stays free.
+	nm := w.customer(t, "9000005301", 1000)
+	big := place(nm.Hex(), "gold-1l", 3)
+	if big.DeliveryFee != 0 {
+		t.Fatalf("setup: an order over Rs 199 pays no fee: %+v", big.DeliveryFee)
+	}
+	if got := adjust(big, "gold-1l", 1); got.DeliveryFee != 0 || got.Total != 98 {
+		t.Fatalf("a shortage added a fee: fee %v total %v want 0 and 98", got.DeliveryFee, got.Total)
+	}
+
+	// Under Rs 199 when placed (69 + 29 + Rs 5): it keeps its Rs 5.
+	small := place(nm.Hex(), "gold-1l", 1)
+	if small.DeliveryFee != 5 {
+		t.Fatalf("setup: under Rs 199 pays Rs 5: %v", small.DeliveryFee)
+	}
+	if got := adjust(small, "taaza-500ml", 0); got.DeliveryFee != 5 || got.Total != 74 {
+		t.Fatalf("an order under Rs 199: fee %v total %v want 5 and 74", got.DeliveryFee, got.Total)
+	}
+
+	// A Founding Family member never pays it, adjusted or not.
+	seedTestFarms(t, w, 1)
+	member := w.customer(t, "9000005302", 1000)
+	if _, err := w.svc.joinFoundingFamily(ctx, member, "gonard-dairy"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	mo := place(member.Hex(), "gold-1l", 1)
+	if mo.DeliveryFee != 0 {
+		t.Fatalf("setup: a member pays no fee: %v", mo.DeliveryFee)
+	}
+	if got := adjust(mo, "taaza-500ml", 0); got.DeliveryFee != 0 || got.Total != 69 {
+		t.Fatalf("a member's adjusted order: fee %v total %v want 0 and 69", got.DeliveryFee, got.Total)
+	}
+
+	// A subscription morning (2 x 29 = 58, no fee) reduced to one pack.
+	const D = "2026-10-06"
+	D1 := addDaysIST(D, 1)
+	subber := w.customer(t, "9000005303", 1000)
+	sub := walletLockPlan(t, w, subber, "taaza-500ml", 2, D1, istDayAt(addDaysIST(D, -2), 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 9, 0))
+	w.svc.sweepSubscriptionOrders(ctx, istDayAt(D, 12, 5))
+	so := assertLocked(t, w, sub, D1)
+	if so.DeliveryFee != 0 || so.Total != 58 {
+		t.Fatalf("setup: a subscription morning carries no fee: %v %v", so.DeliveryFee, so.Total)
+	}
+	if got := adjust(so, "taaza-500ml", 1); got.DeliveryFee != 0 || got.Total != 29 {
+		t.Fatalf("an adjusted subscription morning: fee %v total %v want 0 and 29", got.DeliveryFee, got.Total)
+	}
+}
+
 // shareGoldName gives both Gold SKUs the one product name the real
 // catalogue gives them ("Full Cream Milk - Parag Gold"; the size is the
 // variant), which is what makes a name-only adjust ambiguous.

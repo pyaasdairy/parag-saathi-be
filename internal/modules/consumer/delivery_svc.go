@@ -587,7 +587,8 @@ func adjustKey(productID, name, variant string) string {
 // storeAdjustDelivery — the manager reduces item quantities before handover
 // (3 packets ordered, 1 damaged → deliver 2; qty 0 removes the line). The
 // ORDER and its TASK are re-billed server-side (subtotal, delivery fee and
-// total recomputed under the same rules as order creation), and because the
+// total recomputed under the One Voice rule of order creation, the fee never
+// above what the order already carried), and because the
 // wallet debit happens AT DELIVERY from the task's amount, the customer pays
 // exactly for what is actually delivered. COD collects the updated amount;
 // the morning Taaza trial maths also read the updated amount — no flow forks.
@@ -672,7 +673,13 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 		subtotal += it.Price * float64(it.Qty)
 	}
 	subtotal = round2(subtotal)
-	fee := s.orderDeliveryFee(ctx, subtotal, false)
+	// The One Voice fee on the smaller bill, never more than the order
+	// already carried: the store's shortage must not add a fee the member
+	// was not charged when they ordered (an order over Rs 199, a Founding
+	// Family member's, a subscription morning's, all fee-free). An order
+	// that paid the fee keeps it; one placed under an older, higher fee is
+	// re-billed at today's.
+	fee := math.Min(o.DeliveryFee, s.orderDeliveryFee(ctx, subtotal, false))
 	total := round2(subtotal + fee + o.MonsoonFee)
 	now := time.Now().UTC()
 	if _, uerr := s.repo.orders.UpdateOne(ctx,
