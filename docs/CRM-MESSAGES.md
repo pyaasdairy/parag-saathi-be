@@ -248,3 +248,50 @@ How a message waits:
 The app's own notifications keep the same hours (consumer `lib/quietHours.ts`): the
 taglines come every 2 hours from 07:00 to 21:00 IST, 8 a day instead of 12, and a cart
 reminder that would land between 22:00 and 07:00 comes at 07:00.
+
+## 6. Consent (founder decision 5, 25 Sep 2026)
+
+Consent defaults UNTICKED (DPDP "clear affirmative action", TRAI's promotional rules,
+Apple). Delivery, wallet and order messages are service and keep flowing; offers are asked
+for in context after the first delivery.
+
+- **The server grants nothing by itself.** The promotional gate (G2) and the per-channel
+  gate (G2b) read only `consumer_consents`, which only `POST /users/me/consents` writes;
+  the derived `promotional` row is active only while some `marketing_*` row is an active
+  grant (`consents.go` `recomputePromoConsent`). OTP sign-up, the profile step, a
+  promoter's Welcome Litre enrolment, `privacy_terms`, the phone and location disclosures,
+  reading the state back, and a batch with every marketing channel `granted:false` never
+  open it (`consents_explicit_grant_test.go`).
+- **The pre-ticked box is in the app.** The sign-up screen's "Send me offers and updates"
+  starts ticked (`app/complete-profile.tsx` `useState(true)`, and
+  `components/ConsentSheet.tsx` `defaultChoices()` returns offers, WhatsApp and SMS on),
+  so a member who does not untick it is recorded as granting offers on push, WhatsApp and
+  SMS. Both are screens (Kushagra's); the one-line changes are in the decisions report.
+  Until the build with them ships, nothing else changes.
+- **Grants already recorded under the pre-ticked box cannot be told apart** from a tick
+  the member made: both arrive as `granted:true`. What the log does show: the sign-up
+  form records every choice in one batch, so a `marketing_*` row in
+  `consumer_consent_log` with `granted:true` and the SAME `occurred_at` as the member's
+  first `privacy_terms` row came from that form; its `app_version` says which build. A
+  grant with its own `occurred_at` is a switch flipped later in Message preferences, which
+  is an affirmative action. Read-only query:
+
+  ```js
+  db.consumer_consent_log.aggregate([
+    {$match: {kind: "privacy_terms", granted: true}},
+    {$sort: {occurred_at: 1}},
+    {$group: {_id: "$consumer_id", first: {$first: "$occurred_at"}, app: {$first: "$app_version"}}},
+    {$lookup: {from: "consumer_consent_log", let: {c: "$_id", t: "$first"}, as: "form_grants",
+      pipeline: [{$match: {$expr: {$and: [{$eq: ["$consumer_id", "$$c"]}, {$eq: ["$occurred_at", "$$t"]},
+        {$eq: ["$granted", true]}, {$eq: [{$substrCP: ["$kind", 0, 10]}, "marketing_"]}]}}}]}},
+    {$match: {"form_grants.0": {$exists: true}}},
+  ])
+  ```
+- **What those grants still reach.** The server's promotional messages need a grant under
+  7 days old (G2 `explicit_consent_ttl_days`), so a sign-up grant stops opening them 7
+  days after sign-up. The app's taglines and cart reminder read the current state with no
+  expiry, so they keep running for such a member until Offers is switched off. A
+  re-consent prompt for those members is the founder's call (a screen).
+- **Asking in context.** Consumer `lib/offersAsk.ts` decides when the "Send me offers?"
+  prompt is due (signed in, a delivered order, offers not granted, not asked on this
+  device) and remembers the answer; the prompt itself is a screen.
