@@ -26,7 +26,11 @@ func TestCRMDelayedRecheckReadsWhatHappenedMeanwhile(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
 	ctx := context.Background()
-	t0 := time.Now()
+	// The worker runs on the test's clock, 09:00 IST today, so the delays
+	// and the quiet hours (22:00-07:00) never depend on when the test runs.
+	// The plans start on the wall clock's tomorrow, as creating one does.
+	nowIST := time.Now().In(istZone)
+	t0 := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 9, 0, 0, 0, istZone)
 	tomorrow := addDaysIST(istToday(time.Now()), 1)
 	plan := func(cid primitive.ObjectID) *subscription {
 		t.Helper()
@@ -60,6 +64,10 @@ func TestCRMDelayedRecheckReadsWhatHappenedMeanwhile(t *testing.T) {
 	for _, cid := range []primitive.ObjectID{shops, idle} {
 		w.svc.emitCRMEvent(ctx, "user.registered", cid, map[string]any{"source": "otp"})
 	}
+	// The pauses, the unfunded plan and the sign-ups happen on the test's clock.
+	for _, cid := range []primitive.ObjectID{resumed, stays, gaveUp, shops, idle} {
+		crmStampEvents(t, w, cid, t0)
+	}
 	w.svc.crmProcessEventsAt(ctx, t0)
 
 	status(resumed, subR, "resume")
@@ -74,13 +82,7 @@ func TestCRMDelayedRecheckReadsWhatHappenedMeanwhile(t *testing.T) {
 		t.Fatalf("createOrder: %v", err)
 	}
 	w.svc.crmProcessEventsAt(ctx, t0.Add(10*time.Minute))
-	// The quiet hours (22:00-07:00 IST) hold C-03, A-05 and A-01 until 07:00,
-	// so a run whose wall clock puts the fire inside them fires as they end.
-	fire := t0.Add(2*time.Hour + time.Minute)
-	if next, open := crmQuietWindow(fire); !open {
-		fire = next.Add(time.Minute)
-	}
-	w.svc.crmFireDueSchedules(ctx, fire)
+	w.svc.crmFireDueSchedules(ctx, t0.Add(2*time.Hour+time.Minute))
 
 	for _, c := range []struct {
 		name    string

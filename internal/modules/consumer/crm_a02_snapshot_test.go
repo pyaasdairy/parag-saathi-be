@@ -20,6 +20,12 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+// The worker's tick in these tests runs on a fixed clock, never the wall
+// clock: noon IST on a fixed day.
+const crmA02Day = "2026-10-06"
+
+var crmA02Tick = istDayAt(crmA02Day, 12, 0)
+
 // crmInboxOrderIDs lists the order ids on a member's inbox rows for one trigger.
 func crmInboxOrderIDs(t *testing.T, w *chainWorld, cid primitive.ObjectID, trigger string) []string {
 	t.Helper()
@@ -51,7 +57,7 @@ func TestCRMA02FirstOfTwoDeliveriesInOneTick(t *testing.T) {
 	second := instantOrderDelivered(t, w, cid)
 	// Both deliveries land before the worker's next tick; that one tick
 	// drains both order.delivered events.
-	w.svc.crmProcessEvents(ctx)
+	w.svc.crmProcessEventsAt(ctx, crmA02Tick)
 
 	if got := crmInboxOrderIDs(t, w, cid, "A-02"); len(got) != 1 || got[0] != first.OrderID {
 		t.Fatalf("A-02 must fire exactly once, for the first order %s (second %s): inbox order ids %v, dispatch %v",
@@ -86,9 +92,9 @@ func TestCRMA02SecondDeliveryAloneAndReplay(t *testing.T) {
 
 	cid := w.customer(t, "9000014102", 1000)
 	first := instantOrderDelivered(t, w, cid)
-	w.svc.crmProcessEvents(ctx)
+	w.svc.crmProcessEventsAt(ctx, crmA02Tick)
 	instantOrderDelivered(t, w, cid)
-	w.svc.crmProcessEvents(ctx)
+	w.svc.crmProcessEventsAt(ctx, crmA02Tick.Add(30*time.Minute))
 	if got := crmInboxOrderIDs(t, w, cid, "A-02"); len(got) != 1 || got[0] != first.OrderID {
 		t.Fatalf("A-02 inbox order ids %v, want only %s", got, first.OrderID)
 	}
@@ -104,7 +110,7 @@ func TestCRMA02SecondDeliveryAloneAndReplay(t *testing.T) {
 	if _, err := w.db.Collection(collCRMEvents).InsertOne(ctx, ev); err != nil {
 		t.Fatalf("replay: %v", err)
 	}
-	w.svc.crmProcessEventsAt(ctx, time.Now().Add(24*time.Hour))
+	w.svc.crmProcessEventsAt(ctx, istDayAt(addDaysIST(crmA02Day, 1), 12, 0))
 	if got := crmInboxOrderIDs(t, w, cid, "A-02"); len(got) != 1 {
 		t.Fatalf("A-02 after a next-day replay: %v", got)
 	}
@@ -175,7 +181,7 @@ func TestCRMA02EventWithoutSnapshotReadsLiveCount(t *testing.T) {
 	w.svc.emitCRMEvent(ctx, "order.delivered", cid, map[string]any{
 		"order_id": o.OrderID, "offer_pack": int32(0), "promotional_only": false, "labelled_product": crmLabelledProductOf(o),
 	})
-	w.svc.crmProcessEvents(ctx)
+	w.svc.crmProcessEventsAt(ctx, crmA02Tick)
 	if got := crmInboxOrderIDs(t, w, cid, "A-02"); len(got) != 1 || got[0] != o.OrderID {
 		t.Fatalf("A-02 from a pre-snapshot event: %v", got)
 	}
