@@ -1501,3 +1501,157 @@ Verify: `go test ./internal/modules/consumer/ -run 'TestInstant|TestOrderGuard' 
 (Mongo on 27017, fixed IST clock, no wall-clock dependence; the pause in
 `instant_pause_test.go`, the no-zone lane in `TestInstantHoursNoZoneFlagLaneFollowsTheConsoleHours`);
 Saathi `flutter test test/zone_api_test.dart`.
+
+## 12. Founder decisions of 25 Sep (part 1)
+
+Decisions 1 to 7 of the founder's 25 Sep list, built in three lanes and merged into backend
+`integration/delivery` on 26 Sep: `decisions/crm` (tip `c123369`, merge `6c20f78`),
+`decisions/pricing` (tip `a0952f0`, merge `2ac8a4a`), `decisions/autopay` (tip `f2b5947`,
+merge `65ddcfc`). Consumer `feature/consumer-revamp-phase2`: the same three lane branches
+(tips `e4e9b88`, `de0eb87`, `b343afa`), lib seams only. Saathi is not touched by part 1.
+Part 2 (decision 8 Saathi push, 9 hand-assign, 10 attendance) is `decisions/push` and
+`decisions/ops`, merged separately. Decision 11 is data the founder supplies, no code.
+
+**What the server does now, per decision**
+
+1. **AutoPay funds the wallet** (`autopay.go`, `mandate.go`, `razorpay.go`). One Razorpay
+   recurring (UPI AutoPay) mandate per member. The registration payment is credited to the
+   wallet exactly once (verify, the `payment.captured` / `order.paid` webhook or the
+   reconcile sweep, whichever lands first; ledger ref = the Razorpay order id), and it puts
+   the mandate ACTIVE even when the app never came back to verify. Smart Recharge (worker
+   every 15 min, `MANDATE_AUTODEBIT=true` + live keys) charges an ACTIVE, bank-confirmed
+   mandate when the wallet, less the undelivered wallet orders, the editable previews, the
+   plan days whose noon lock falls within 48 h and a Rs 99 bill due in that window, is below
+   the member's threshold: max(recharge amount, shortfall) within the cap, at most 2 a day,
+   one in flight per mandate, started only 07:00-22:00 IST. The wallet is credited only on
+   capture. A refusal holds the next try to the next IST day, 3 in a row wait for the
+   member, and B-03 says it in AutoPay's words (`T-B03-AUTOPAY`). The old per-day wallet
+   DEBIT (`runMandateCharge`, `mandate_worker.go`) is gone; `POST /mandate/{id}/execute` is
+   the member's "top up now" (202, never a debit). The Rs 99 seat on the same mandate: a
+   short wallet on the bill day gets ONE AutoPay charge for that bill
+   (`autopay:seat:<mandate>:<member>:<bill day>`), the month is billed the moment it is
+   captured (same ledger ref `founding:bill:<member>:<day>`), and the stop is held while the
+   charge is in flight. An erased account's mandates and bank tokens are cancelled, and a
+   charge captured after erasure is refunded.
+2. **One Voice fee** (`orders.go` `orderDeliveryFee`). A one-off order whose goods (after
+   member prices, Parag included, before the fee and the monsoon surcharge) come to less
+   than Rs 199 pays DELIVERY-FEE (the ERP price with GST once synced, else
+   `FOUNDING_DELIVERY_FEE_PAISE` = Rs 5); free from Rs 199.00; never for a member whose perks
+   cover the order's delivery day (judged on that day, on the order's own clock); never on
+   a subscription morning. Parag stays at MRP with nothing added. It replaces the old
+   Rs 15 (2 x 35 now bills 75, was 85). `FOUNDING_PYAAS_NONMEMBER_FEE` stays off and is
+   superseded (on or off, one fee at most). `FOUNDING_PYAAS_MEMBERS_ONLY` (off) is the
+   launch switch: with it on, a PYAAS milk plan the perks no longer cover is paused
+   (`pause_reason: founding_required`) on its first refused morning and
+   `founding.pyaas_plan_paused` is recorded (no message until FF-05 has copy). Before
+   switching it on, read `GET /api/v1/consumer/admin/founding/members-only-impact`.
+3. **Referral credit pays the seat; a referral moves the line** (`founding_line.go`). The
+   Rs 99 leaves the wallet promo-first, so the Rs 100 referral credit pays it. When a friend
+   who applied the member's code pays the Rs 99 (a join that moved money), the referrer, if
+   waiting on a farm still filling, swaps places with the member directly ahead, once per
+   referral ever; FF-04 tells them. The Rs 100 + Rs 100 credit at the friend's first paid
+   delivery is unchanged.
+4. **Re-join inside a paid month** keeps the perks at no cost: unchanged, pinned by the
+   existing tests.
+5. **Consent unticked** (`consents_explicit_grant_test.go`). No server path grants a
+   promotional consent; only an explicit `marketing_*` grant through
+   `POST /users/me/consents` opens its channel. The pre-tick lives in the app's screens
+   (Kushagra, below). `docs/CRM-MESSAGES.md` section 6 has the read-only query that lists
+   grants made under the pre-ticked box, for the founder's re-consent call.
+6. **Quiet hours 22:00-07:00 IST** (`crm_schedule.go` `crmSendWindow`, config
+   `guards.G5_quiet_hours`). Order, delivery and money messages always send; everything else
+   waits for 07:00 (deferred, never dropped), and a promotional one for 10:00. The consumer
+   app's taglines and cart reminder keep the same hours (`lib/quietHours.ts`,
+   `lib/taglines.ts`): 8 taglines a day instead of 12. Classes: `docs/CRM-MESSAGES.md`
+   section 5.
+7. **A-02** reads `orders_count` from the `order.delivered` payload (the member's delivered
+   orders as of that delivery), so two first deliveries inside one worker tick still thank
+   the first; `per_customer 1`.
+
+**Resolved at the merge**
+
+- RV-PR-09: with both branches, section FF counted as always-send, so FF-04 would have gone
+  out at night. `always_send` now names FF-01, FF-02, FF-03 by id (the member's own seat)
+  and FF-04 is deferred to 07:00; `crm_quiet_hours_test.go` and `CRM-MESSAGES.md` section 5
+  say the same.
+- `crm_router.go` keeps both new condition facts (`founding.friend_farm_unlocked`,
+  `payment.source`) and both token cases (FF-04's `founding.line_moved`, B-03's `[X]`).
+  Config: 59 triggers (`meta.trigger_count` 59), 55 templates (T-FF04, T-FF04-UNLOCKED and
+  T-B03-AUTOPAY added to the 52).
+
+**Wire changes (all additive; no key removed or renamed)**
+
+- `GET /serviceability` and `GET /founding-family`: `delivery {fee, free_from}`, the rule
+  the server bills. Founding member: `perks_active`. Subscription: `pause_reason`
+  `founding_required` (the member's own pause stays `member`).
+- Mandate answers: `order_id`, `customer_id`, `token_status`, `smart_recharge_on` (true only
+  while the server really tops the wallet up); `POST /mandate/create` adds `orderId`,
+  `customerId`, `amountPaise`. New `POST /mandate/{id}/policy {threshold, amount}`.
+
+**Deploy checklist (founder / ops)**
+
+- `MANDATE_AUTODEBIT` (default off, not in `render.yaml`): set it `true` in Render only once
+  recurring payments are enabled on the live Razorpay account and the webhook is subscribed
+  to `payment.captured`, `order.paid`, `payment.failed`, `token.confirmed`,
+  `token.rejected`, `token.paused`, `token.cancelled`. First post-deploy check: one real
+  UPI AutoPay registration and one charge. `RAZORPAY_API_BASE_URL` is for the stub only and
+  is never set in production.
+- The ERP's DELIVERY-FEE must be Rs 5.00 including GST (the sync logs a warning otherwise,
+  and the server bills what the ERP says).
+- SMS (DLT) and WhatsApp registrations for `T-B03-AUTOPAY`, `T-FF04`, `T-FF04-UNLOCKED`;
+  until then they reach the member by inbox and push only.
+- `FOUNDING_PYAAS_MEMBERS_ONLY=true` at launch, after reading members-only-impact.
+
+**The shipped consumer build (release/26.07.03) after this deploy**
+
+- Its cart quotes Rs 15 below Rs 199 (`lib/api.ts` `DELIVERY_FEE = 15`); the server bills
+  Rs 5, so the member pays Rs 10 less than the cart showed, and the order answer carries
+  the billed total. No order is refused over it. The new build quotes `delivery.fee`.
+- Its sign-up box is still pre-ticked and its Message-preferences save re-sends every
+  channel, so grants arrive as it sends them (`CRM-MESSAGES.md` section 6 says how to tell
+  them apart). The new build fixes the re-send in `lib/consentSync.ts`.
+- Its AutoPay entry points are `__DEV__`-only, so a Play build never reaches the mandate
+  endpoints.
+- Orders placed before the deploy keep the fee they were agreed at (Rs 15) unless a store
+  adjusts them.
+
+**Open for the founder (decisions, not code)**
+
+- Subscription mornings carry no fee (18 Aug "subscriptions sell at MRP"; both apps'
+  Subscribe button quotes the bare subtotal). Charging Rs 5 below Rs 199 on them would add
+  about Rs 150 a month to a non-member's daily 1 L Parag plan and needs a screen change.
+- A Parag-only order below Rs 199 pays the Rs 5 ("nothing added" read as the pack price). If
+  Parag-only orders should be exempt: one line in `orders.go` `orderDeliveryFee` and
+  `lib/api.ts` `deliveryFeeFor`.
+- The line moves when the friend pays the Rs 99 (spec 5.8 and the app's copy), not at the
+  friend's first paid delivery.
+- FF-05 copy for `founding.pyaas_plan_paused`.
+- Re-consent for grants made under the pre-ticked box. A server rule against re-grants from
+  the shipped build would also block a future deliberate re-consent prompt.
+- Offers wait for 10:00 (the promotional window, TRAI), not 07:00. A W-06 day-3 nudge is
+  skipped only if the worker is down from 10:30 until after 22:00 (day 5 still goes).
+- An erased account's order left REFUNDING (only if the process dies between claiming the
+  order and the gateway's refund answer) is returned by hand; it is logged.
+
+**Kushagra UI follow-up (consumer; nothing on screen changed)**
+
+1. `app/complete-profile.tsx:32` `useState(true)` to `useState(false)` (offers unticked).
+2. `components/ConsentSheet.tsx:70` `defaultChoices()`: every `marketing_*` channel false.
+3. A new in-context "Send me offers?" prompt after the first delivery: `lib/offersAsk.ts`
+   `offersAskDue()` decides when, `markOffersAsked()` records it, and the grant goes through
+   `lib/consentSync.ts`.
+4. AutoPay: un-gate `app/(tabs)/profile.tsx:179` and `app/(tabs)/wallet.tsx:223`
+   (`__DEV__`), and replace the Paytm wording (`wallet.tsx:228, 239, 242, 250, 263, 272`,
+   `app/autopay.tsx:119`) with UPI AutoPay / Smart Recharge. The checkout is
+   `lib/autopay.ts` (it needs a native build bundling `react-native-razorpay`). Show the
+   "top up now" and threshold controls from `smart_recharge_on`.
+5. `components/AutoTopupCard.tsx:49, :87`: its copy is true as it stands (the card no longer
+   touches the AutoPay policy); change it only if the card becomes the AutoPay control.
+6. `app/cart.tsx:188-190`: a member's line price is shown at level 1 while the server bills
+   level 3 (the member pays less than shown); price the lines from the member price the
+   server sends.
+
+Verify: `go test ./internal/modules/consumer/ -run
+'TestCRMQuietHours|TestCRMA02|TestConsent|TestOneVoice|TestReferral|TestFounding|TestMembersOnly|TestAutopay|TestMandate|TestCRMB03'
+-count=1 -v` (Mongo on 27017, injected clocks), then the full gate in section 7. Consumer:
+`npx tsc --noEmit`.

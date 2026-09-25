@@ -9,7 +9,10 @@ sent beside D-07, A-05 and FF-01 naming the real day; then W-01 naming the morni
 free pack really comes, B-06 by push too, every body under its own SMS / WhatsApp
 registration, and a refused send recorded on its dispatch row), plus FF-04 of 25 Sep
 (`decisions/pricing`: a referred friend's Rs 99 join moves a waiting referrer up the
-line). The source of truth is `internal/modules/consumer/crm_triggers.json`;
+line), and the rest of the founder's 25 Sep decisions merged on 26 Sep (`decisions/crm`:
+quiet hours, section 5, A-02 counted at its own delivery, offers consent only from an
+explicit grant, section 6; `decisions/autopay`: B-03 in AutoPay's words, T-B03-AUTOPAY;
+handoff section 12). The source of truth is `internal/modules/consumer/crm_triggers.json`;
 this file is written from it by hand, so when the two disagree the JSON wins and this
 file is out of date. How the engine works: `docs/HANDOFF-CODEV-2026-09-24.md` section 4.
 The per-trigger audit that led here: `docs/CRM-AUDIT-2026-09-24.md`.
