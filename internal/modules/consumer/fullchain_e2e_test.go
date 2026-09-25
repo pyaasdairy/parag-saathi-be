@@ -236,7 +236,7 @@ func TestFullChainNewCustomerOrderToDelivered(t *testing.T) {
 	}
 
 	// (a) the customer's cart becomes an order. The server reprices: 2×₹35 = ₹70
-	// subtotal, under ₹199 so the ₹15 delivery fee applies → ₹85.
+	// subtotal, under ₹199 so the One Voice ₹5 delivery fee applies → ₹75.
 	ord, err := w.svc.createOrder(ctx, cid.Hex(), orderInput{
 		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Qty: 2, Price: 35}},
 		PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
@@ -246,8 +246,8 @@ func TestFullChainNewCustomerOrderToDelivered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createOrder: %v", err)
 	}
-	if ord.Total != 85 {
-		t.Fatalf("server repricing: total %v want 85 (2x35 + 15 fee)", ord.Total)
+	if ord.Total != 75 {
+		t.Fatalf("server repricing: total %v want 75 (2x35 + 5 fee)", ord.Total)
 	}
 	if ord.Status != "placed" {
 		t.Fatalf("new order status %q want placed", ord.Status)
@@ -306,8 +306,8 @@ func TestFullChainNewCustomerOrderToDelivered(t *testing.T) {
 	if final.Status != "delivered" {
 		t.Fatalf("final order status %q want delivered", final.Status)
 	}
-	if got := w.cash(t, cid); got != 415 {
-		t.Fatalf("wallet after delivery: %v want 415 (500 - 85)", got)
+	if got := w.cash(t, cid); got != 425 {
+		t.Fatalf("wallet after delivery: %v want 425 (500 - 75)", got)
 	}
 	n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{
 		{Key: "consumer_id", Value: cid},

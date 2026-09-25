@@ -24,19 +24,48 @@ import (
 
 const collOrders = "consumer_orders"
 
-// Delivery-fee policy — kept identical to the FE (lib/api.ts).
+// DELIVERY CHARGE: the One Voice rule, one rule everywhere (pyaas-one-voice.md
+// 1.2, the founder's call of 25 Sep 2026): "Free above Rs 199. Below Rs 199,
+// Rs 5 a delivery. Founding Family members: always free. Parag always at
+// printed MRP with nothing extra."
+//
+//   - "Above Rs 199" is judged on the goods the order bills: the subtotal
+//     after member prices, Parag lines included at MRP, before this fee and
+//     before the instant monsoon surcharge. Rs 199.00 is free, anything below
+//     pays; an order that bills nothing pays nothing.
+//   - The amount is DELIVERY-FEE: the ERP service's price once the Dolibarr
+//     sync has seen it, else FOUNDING_DELIVERY_FEE_PAISE (Rs 5).
+//   - An active Founding Family member (foundingStanding) never pays it.
+//   - Parag carries nothing extra: priceForMember never discounts or marks up
+//     a PRG line, and this fee is the only charge an order can add.
+//   - One-off orders only: a subscription morning never carries it
+//     (subscriptionDeliveryFee, the founder's 18 Aug "subscriptions sell at
+//     MRP", which the Subscribe button quotes).
+//
+// The consumer app computes the same number (lib/api.ts deliveryFeeFor) so
+// the cart shows what is billed.
 const freeDeliveryOver = 199.0
-const deliveryFee = 15.0
 
 // Fair-use order caps — kept identical to the FE (lib/pricing.ts).
 const maxQtyPerProduct = 10
 const maxItemsPerOrder = 30
 
-func deliveryFeeFor(subtotal float64) float64 {
-	if subtotal >= freeDeliveryOver || subtotal == 0 {
+// oneVoiceDeliveryFee applies the rule to a billed subtotal: fee (the
+// DELIVERY-FEE amount) below freeDeliveryOver, nothing at or above it,
+// nothing for a member and nothing on an empty bill.
+func oneVoiceDeliveryFee(subtotal, fee float64, member bool) float64 {
+	if member || subtotal <= 0 || subtotal >= freeDeliveryOver || fee <= 0 {
 		return 0
 	}
-	return deliveryFee
+	return round2(fee)
+}
+
+// orderDeliveryFee is the One Voice charge for a one-off order's subtotal.
+func (s *service) orderDeliveryFee(ctx context.Context, subtotal float64, member bool) float64 {
+	if member || subtotal <= 0 || subtotal >= freeDeliveryOver {
+		return 0 // no DELIVERY-FEE read for an order that pays none
+	}
+	return oneVoiceDeliveryFee(subtotal, s.foundingDeliveryFee(ctx), member)
 }
 
 // errCodeCutoffPassed is the 422 code a one-off morning order for a closed
@@ -311,7 +340,6 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 	// at level 3 and never pays delivery; Parag is level 1 for everyone.
 	memberActive := s.foundingActiveHex(ctx, userID)
 	consumerOID, _ := primitive.ObjectIDFromHex(userID)
-	hasPyaas := false
 	var subtotal float64
 	var units int
 	items := make([]orderItem, 0, len(in.Items))
@@ -329,7 +357,6 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 			return nil, errBadRequest("unknown product in order: " + it.ProductID)
 		}
 		if priceIx.isPyaasLine(it.ProductID) {
-			hasPyaas = true
 			if gerr := s.foundingGate(ctx, consumerOID, true, memberActive); gerr != nil {
 				return nil, gerr
 			}
@@ -350,16 +377,13 @@ func (s *service) createOrderAt(ctx context.Context, userID string, in orderInpu
 		return nil, errBadRequest("too many items in one order")
 	}
 	subtotal = round2(subtotal)
-	fee := deliveryFeeFor(subtotal)
-	// One Voice 1.2: Founding Family members never pay delivery. Spec rule
-	// 5.3 (DELIVERY-FEE on a PYAAS-milk order by a non-member) waits on the
-	// founder's yes: FOUNDING_PYAAS_NONMEMBER_FEE, off by default, and never
-	// on a Parag-only order.
-	if memberActive {
-		fee = 0
-	} else if hasPyaas && s.deps.Cfg.FoundingPyaasNonMemberFee && fee == 0 {
-		fee = s.foundingDeliveryFee(ctx)
-	}
+	// One Voice (see freeDeliveryOver): Rs 5 below Rs 199, free from Rs 199,
+	// never for a member. Spec rule 5.3's separate non-member fee on PYAAS
+	// milk (FOUNDING_PYAAS_NONMEMBER_FEE) is superseded by it: the founder
+	// kept it off on 25 Sep, and switched on it adds nothing this rule does
+	// not already charge, so an order never pays two fees and never pays one
+	// from Rs 199.
+	fee := s.orderDeliveryFee(ctx, subtotal, memberActive)
 	total := round2(subtotal + fee)
 	// Payment mode defaults to 'wallet' — the order is settled from the server
 	// wallet on delivery (the settle sweep debits /wallet/debit, idempotent by

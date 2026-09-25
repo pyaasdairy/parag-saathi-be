@@ -672,7 +672,7 @@ func (s *service) storeAdjustDelivery(ctx context.Context, actor auth.Actor, sto
 		subtotal += it.Price * float64(it.Qty)
 	}
 	subtotal = round2(subtotal)
-	fee := deliveryFeeFor(subtotal)
+	fee := s.orderDeliveryFee(ctx, subtotal, false)
 	total := round2(subtotal + fee + o.MonsoonFee)
 	now := time.Now().UTC()
 	if _, uerr := s.repo.orders.UpdateOne(ctx,

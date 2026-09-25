@@ -488,7 +488,8 @@ func (s *service) foundingPriceMonth(ctx context.Context) float64 {
 	return round2(s.deps.Cfg.FoundingPriceMonth())
 }
 
-// foundingDeliveryFee is DELIVERY-FEE in rupees, same precedence.
+// foundingDeliveryFee is DELIVERY-FEE in rupees, same precedence: the One
+// Voice charge on a one-off order below Rs 199 (orderDeliveryFee).
 func (s *service) foundingDeliveryFee(ctx context.Context) float64 {
 	if p := s.repo.foundingERPPrices(ctx); p.DeliveryFee > 0 {
 		return round2(p.DeliveryFee)
@@ -603,18 +604,15 @@ func (s *service) foundingSavings(ctx context.Context) *foundingSavingsView {
 		}
 	}
 	l3, _ := ix.memberPriceFor(sku, "")
-	// delivery_fee is the fee a non-member actually pays per delivery, the
-	// saving the app adds to the price gap: DELIVERY-FEE only once the
-	// founder has switched it on (spec 5.3, FOUNDING_PYAAS_NONMEMBER_FEE),
-	// else nothing. Sending Rs 5 while no non-member is charged it made the
-	// join screen promise "1 L a day saves Rs 111 a month" to a daily
-	// subscriber who in fact pays Rs 39 more as a member.
-	fee := 0.0
-	if s.deps.Cfg.FoundingPyaasNonMemberFee {
-		fee = s.foundingDeliveryFee(ctx)
-	}
+	// delivery_fee is the fee a non-member actually pays on the line's "1 L
+	// a day", the saving the app adds to the price gap. A daily litre is a
+	// subscription, and subscription mornings never carry the One Voice fee
+	// (subscriptionDeliveryFee), so it is 0 whatever
+	// FOUNDING_PYAAS_NONMEMBER_FEE says: sending Rs 5 made the join screen
+	// promise "1 L a day saves Rs 111 a month" to a daily subscriber who in
+	// fact pays Rs 39 more as a member.
 	return &foundingSavingsView{
-		Level1PerLitre: round2(l1), Level3PerLitre: round2(l3), DeliveryFee: fee,
+		Level1PerLitre: round2(l1), Level3PerLitre: round2(l3), DeliveryFee: subscriptionDeliveryFee,
 	}
 }
 
