@@ -456,7 +456,8 @@ func (s *service) autopayFail(ctx context.Context, t *autopayTopup, reason strin
 // autopaySettleCaptured closes the charge behind a captured AutoPay order
 // once the wallet holds its money (called by creditCapturedPayment, after the
 // credit). A registration order has no charge row and is left alone. A
-// captured charge clears the mandate's failure hold.
+// captured charge clears the mandate's failure hold, and a seat charge bills
+// the Founding Family month straight away.
 func (s *service) autopaySettleCaptured(ctx context.Context, orderID, paymentID string, now time.Time) {
 	t, err := s.repo.findAutopayTopupByOrder(ctx, orderID)
 	if err != nil || t == nil {
@@ -475,6 +476,9 @@ func (s *service) autopaySettleCaptured(ctx context.Context, orderID, paymentID 
 		{Key: "topup_failures", Value: 0}, {Key: "last_failure_day", Value: ""}, {Key: "updated_at", Value: now}}}})
 	s.log.InfoContext(ctx, "autopay: top-up captured and credited", "mandate", t.MandateID, "reason", t.Reason,
 		"amount", round2(float64(t.AmountPaise)/100))
+	if t.Reason == autopayReasonSeat {
+		s.foundingBillAfterTopup(ctx, t.ConsumerID, now)
+	}
 }
 
 // autopayPaymentFailed handles payment.failed on an AutoPay order: the

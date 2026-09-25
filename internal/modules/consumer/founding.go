@@ -916,6 +916,14 @@ func (s *service) stopFoundingFamily(ctx context.Context, consumerID primitive.O
 // tick, but counted once per IST day (last_attempt_date): after
 // FoundingBillRetries whole short days the membership stops on the next
 // short tick, with the perks ending the day before the missed bill.
+//
+// AutoPay (founder decisions 1 and 3, 25 Sep): the Rs 99 still leaves the
+// WALLET (so Pyaas credit, the referral reward included, pays it first). A
+// member whose wallet is short on the bill day and who has an ACTIVE AutoPay
+// mandate gets one Smart Recharge charge for that bill (the recharge amount,
+// or the shortfall when more, within the cap); the month is billed the
+// moment it is captured (foundingBillAfterTopup), and while it is in flight
+// the membership is not stopped.
 func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (billed, stopped int) {
 	today := istToday(now)
 	due, err := s.repo.listMembersDueForBilling(ctx, today)
@@ -924,56 +932,126 @@ func (s *service) billFoundingMembers(ctx context.Context, now time.Time) (bille
 	}
 	price := s.foundingPriceMonth(ctx)
 	for i := range due {
-		m := &due[i]
-		ref := "founding:bill:" + m.ID.Hex() + ":" + m.NextBillDate
-		if _, derr := s.debitAs(ctx, m.ConsumerID, price, "founding", ref, foundingLedgerLabel); derr != nil {
-			var ae *apiError
-			if !errors.As(derr, &ae) || ae.Code != "INSUFFICIENT_FUNDS" {
-				continue // transient: try again next tick
-			}
-			// The worker ticks every 15 minutes, but the member is promised three
-			// billing DAYS ("we will try again tomorrow"). Every tick still
-			// tries the debit, so a top-up later today is billed on the next
-			// tick, but only the first short tick of an IST day counts.
-			if m.LastAttemptDate == today {
-				continue
-			}
-			attempts := m.BillAttempts + 1
-			// The guard on last_attempt_date makes the day's count exactly
-			// one even when two replicas tick in the same hour.
-			guard := bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate},
-				{Key: "last_attempt_date", Value: bson.D{{Key: "$ne", Value: today}}}}
-			// Stop only once the last retry DAY has ended: the first short
-			// tick of the day after it. Stopping on the first tick of the
-			// last day (00:30 on a 15-minute worker) left the member no
-			// daytime on it, and as little as 25 h in all when the first
-			// attempt fell late on the bill day.
-			if m.BillAttempts >= s.deps.Cfg.FoundingBillRetries() {
-				if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
-					bson.D{{Key: "status", Value: memberStopped}, {Key: "stopped_at", Value: now.UTC()},
-						{Key: "stop_reason", Value: "wallet_short"}, {Key: "perks_until", Value: addDaysIST(m.NextBillDate, -1)},
-						{Key: "last_attempt_date", Value: today}},
-					nil, guard); upd != nil {
-					stopped++
-				}
-				continue
-			}
-			_, _ = s.repo.updateFoundingMember(ctx, m.ID,
-				bson.D{{Key: "bill_attempts", Value: attempts}, {Key: "last_attempt_date", Value: today}}, nil, guard)
-			continue
-		}
-		next := nextBillDate(m.NextBillDate, m.BillDay)
-		if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
-			bson.D{{Key: "last_bill_date", Value: m.NextBillDate}, {Key: "next_bill_date", Value: next}, {Key: "bill_attempts", Value: 0}},
-			bson.D{{Key: "last_attempt_date", Value: ""}},
-			bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate}}); upd != nil {
+		b, st := s.billFoundingMember(ctx, &due[i], price, today, now)
+		if b {
 			billed++
+		}
+		if st {
+			stopped++
 		}
 	}
 	if billed > 0 || stopped > 0 {
 		s.log.InfoContext(ctx, "founding family billing", "day", today, "billed", billed, "stopped", stopped)
 	}
 	return billed, stopped
+}
+
+// billFoundingMember is one member's bill on one tick (billFoundingMembers).
+func (s *service) billFoundingMember(ctx context.Context, m *foundingMember, price float64, today string, now time.Time) (billed, stopped bool) {
+	ref := "founding:bill:" + m.ID.Hex() + ":" + m.NextBillDate
+	if _, derr := s.debitAs(ctx, m.ConsumerID, price, "founding", ref, foundingLedgerLabel); derr != nil {
+		var ae *apiError
+		if !errors.As(derr, &ae) || ae.Code != "INSUFFICIENT_FUNDS" {
+			return false, false // transient: try again next tick
+		}
+		// The wallet is short: AutoPay tops it up for this bill (one charge
+		// per bill), and a charge on its way holds the stop.
+		topupOnItsWay := s.foundingSeatTopup(ctx, m, price, now)
+		// The worker ticks every 15 minutes, but the member is promised three
+		// billing DAYS ("we will try again tomorrow"). Every tick still
+		// tries the debit, so a top-up later today is billed on the next
+		// tick, but only the first short tick of an IST day counts.
+		if m.LastAttemptDate == today {
+			return false, false
+		}
+		attempts := m.BillAttempts + 1
+		// The guard on last_attempt_date makes the day's count exactly
+		// one even when two replicas tick in the same hour.
+		guard := bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate},
+			{Key: "last_attempt_date", Value: bson.D{{Key: "$ne", Value: today}}}}
+		// Stop only once the last retry DAY has ended: the first short
+		// tick of the day after it. Stopping on the first tick of the
+		// last day (00:30 on a 15-minute worker) left the member no
+		// daytime on it, and as little as 25 h in all when the first
+		// attempt fell late on the bill day.
+		if m.BillAttempts >= s.deps.Cfg.FoundingBillRetries() {
+			if topupOnItsWay {
+				// The AutoPay money is on its way: the day is recorded, the
+				// stop waits for the charge (captured: billed; refused: the
+				// next short day stops it).
+				_, _ = s.repo.updateFoundingMember(ctx, m.ID, bson.D{{Key: "last_attempt_date", Value: today}}, nil, guard)
+				return false, false
+			}
+			if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
+				bson.D{{Key: "status", Value: memberStopped}, {Key: "stopped_at", Value: now.UTC()},
+					{Key: "stop_reason", Value: "wallet_short"}, {Key: "perks_until", Value: addDaysIST(m.NextBillDate, -1)},
+					{Key: "last_attempt_date", Value: today}},
+				nil, guard); upd != nil {
+				return false, true
+			}
+			return false, false
+		}
+		_, _ = s.repo.updateFoundingMember(ctx, m.ID,
+			bson.D{{Key: "bill_attempts", Value: attempts}, {Key: "last_attempt_date", Value: today}}, nil, guard)
+		return false, false
+	}
+	next := nextBillDate(m.NextBillDate, m.BillDay)
+	if upd, _ := s.repo.updateFoundingMember(ctx, m.ID,
+		bson.D{{Key: "last_bill_date", Value: m.NextBillDate}, {Key: "next_bill_date", Value: next}, {Key: "bill_attempts", Value: 0}},
+		bson.D{{Key: "last_attempt_date", Value: ""}},
+		bson.D{{Key: "status", Value: memberActive}, {Key: "next_bill_date", Value: m.NextBillDate}}); upd != nil {
+		return true, false
+	}
+	return false, false
+}
+
+// foundingSeatTopup starts (once per bill) the AutoPay charge that covers a
+// short wallet on a Founding Family bill day, when MANDATE_AUTODEBIT is on
+// and the member has an ACTIVE mandate. Reports whether that bill's charge
+// is on its way (started now or earlier and not settled). No mandate, a
+// refused charge or AutoPay off: false, and billing goes on as before.
+func (s *service) foundingSeatTopup(ctx context.Context, m *foundingMember, price float64, now time.Time) bool {
+	if !autopayAutoEnabled() || s.rzpKeySecret == "" {
+		return false
+	}
+	md, err := s.repo.activeMandateFor(ctx, m.ConsumerID)
+	if err != nil || md == nil {
+		return false
+	}
+	key := m.ID.Hex() + ":" + m.NextBillDate
+	if prior, _ := s.repo.findAutopayTopupByRef(ctx, autopayRef(autopayReasonSeat, md.MandateID, key)); prior != nil {
+		return prior.Open
+	}
+	if !s.autopayTokenReady(ctx, md, now) {
+		return false
+	}
+	wv, err := s.wallet(ctx, m.ConsumerID)
+	if err != nil {
+		return false
+	}
+	amount := autopayAmountFor(md, price-wv.Available)
+	t, err := s.autopayStartTopup(ctx, md, rupeesToPaise(amount), autopayReasonSeat, key, now)
+	if err != nil || t == nil {
+		if open, _ := s.repo.openAutopayTopup(ctx, md.MandateID); open != nil {
+			return true // another charge is already on its way to this wallet
+		}
+		return false
+	}
+	s.log.InfoContext(ctx, "founding family: AutoPay top-up for a short bill", "member", m.ID.Hex(), "amount", amount)
+	return t.Open
+}
+
+// foundingBillAfterTopup bills a member's due month right after an AutoPay
+// seat charge is captured, instead of waiting for the next tick.
+func (s *service) foundingBillAfterTopup(ctx context.Context, consumerID primitive.ObjectID, now time.Time) {
+	m, err := s.repo.findFoundingMember(ctx, consumerID)
+	today := istToday(now)
+	if err != nil || m == nil || m.Status != memberActive || m.NextBillDate == "" || m.NextBillDate > today {
+		return
+	}
+	if billed, _ := s.billFoundingMember(ctx, m, s.foundingPriceMonth(ctx), today, now); billed {
+		s.log.InfoContext(ctx, "founding family: month billed after the AutoPay top-up", "member", m.ID.Hex())
+	}
 }
 
 // foundingBillingWorker bills once at boot, then every 15 minutes (the
