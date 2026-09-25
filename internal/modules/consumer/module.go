@@ -122,9 +122,11 @@ func Register(r chi.Router, d *deps.Deps) {
 		go svc.dolibarrWorkers(context.Background())
 	}
 
-	// Subscription auto-renewal (mandate_worker.go): charges due ACTIVE
-	// mandates through the same idempotent money gate as the manual/dev path.
-	go svc.mandateAutoRenewalWorker(context.Background())
+	// AutoPay Smart Recharge (autopay.go): charges an ACTIVE, bank-confirmed
+	// mandate to TOP UP the wallet when it will not cover the next locked and
+	// upcoming days above the member's threshold; credited only on capture.
+	// OFF unless MANDATE_AUTODEBIT=true and the Razorpay keys are set.
+	go svc.autopayWorker(context.Background())
 
 	// Founding Family monthly billing (founding.go): the Rs 99 month from the
 	// wallet on next_bill_date, retried for three days, then stopped.
@@ -321,19 +323,20 @@ func Register(r chi.Router, d *deps.Deps) {
 			pr.Post("/wallet/debit", h.walletDebit)
 			pr.Post("/wallet/refund", h.walletRefund)
 
-			// UPI-AutoPay / e-mandate — subscription auto-renewal (mandate.go).
-			// Create a recurring authorization (mock token in the dev seam), verify
-			// its registration payment, and drive the pause/resume/cancel state
-			// machine. Daily EXECUTIONS charge via the SAME exactly-once wallet
-			// settle path, idempotent by (mandateId, day). GET /me lists the
-			// caller's mandates.
+			// UPI AutoPay / e-mandate: Smart Recharge that FUNDS the wallet
+			// (mandate.go, autopay.go). Create a recurring authorization (a
+			// mock in the dev seam), verify its registration payment (credited
+			// to the wallet), set the Smart Recharge threshold and amount, ask
+			// for a top-up now, and drive pause/resume/cancel. Nothing here
+			// debits the wallet. GET /me lists the caller's mandates.
 			pr.Post("/mandate/create", h.createMandate)
 			pr.Post("/mandate/verify", h.verifyMandate)
 			pr.Get("/mandate/me", h.listMandates)
 			pr.Post("/mandate/{id}/pause", h.mandateAction("pause"))
 			pr.Post("/mandate/{id}/resume", h.mandateAction("resume"))
 			pr.Post("/mandate/{id}/cancel", h.mandateAction("cancel"))
-			pr.Post("/mandate/{id}/execute", h.executeMandate) // dev-only manual tick
+			pr.Post("/mandate/{id}/policy", h.mandatePolicy)
+			pr.Post("/mandate/{id}/execute", h.executeMandate) // top up now (202); never a debit
 
 			// Server-owned subscriptions (subscriptions.go) — the backend twin of
 			// the app's local subscription rows. The worker turns these into the

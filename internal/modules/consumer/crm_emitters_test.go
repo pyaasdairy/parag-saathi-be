@@ -324,28 +324,40 @@ func TestCRMEmitPaymentFailed(t *testing.T) {
 		t.Fatalf("an unknown order must emit nothing: %d events", n)
 	}
 
-	// The mandate charge cannot be funded.
+	// An AutoPay (Smart Recharge) charge the bank refused: payment.failed
+	// with source autopay, once per charge however often the gateway reports
+	// it, and B-03 in AutoPay's words. (The retired mandate charge DEBITED
+	// the wallet and announced a short wallet here; AutoPay never debits.)
+	liveRzp(t, w)
 	m := &mandate{
 		ID: primitive.NewObjectID(), MandateID: "mnd_test1", ConsumerID: cid, Plan: "daily", Status: "active",
-		Amount: 100, MaxAmount: 100, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Amount: 100, MaxAmount: 100, Token: "token_test1", TokenStatus: "confirmed", RzpCustomerID: "cust_test1",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := w.svc.repo.insertMandate(ctx, m); err != nil {
 		t.Fatalf("insertMandate: %v", err)
 	}
-	at := time.Now()
-	for i := 0; i < 2; i++ { // the sweep retries every tick
-		if _, err := w.svc.runMandateCharge(ctx, cid, m.MandateID, at); err == nil {
-			t.Fatal("an unfunded mandate charge must fail")
+	tp, err := w.svc.autopayTopupNow(ctx, cid, m.MandateID, 100, "emit-r1", time.Now())
+	if err != nil {
+		t.Fatalf("top up now: %v", err)
+	}
+	refused := rzpPaymentEvent("payment.failed", tp.RzpOrderID, tp.RzpPaymentID, 10000, m.Token, "Payment was declined by the bank")
+	for i := 0; i < 2; i++ { // Razorpay retries webhooks
+		if err := w.svc.razorpayWebhookEvent(ctx, refused); err != nil {
+			t.Fatalf("webhook: %v", err)
 		}
 	}
 	evs = crmEventsOf(t, w.db, cid, "payment.failed")
-	if len(evs) != 4 || evs[2].Payload["source"] != "mandate" || evs[2].Payload["scope_key"] != mandateChargeRef(m.MandateID, dayKey(at)) {
-		t.Fatalf("payment.failed from the mandate: %+v", evs)
+	if len(evs) != 3 || evs[2].Payload["source"] != "autopay" || evs[2].Payload["scope_key"] != tp.Ref {
+		t.Fatalf("payment.failed from AutoPay: %+v", evs)
 	}
 	w.svc.crmProcessEvents(ctx)
 	w.svc.crmFireDueSchedules(ctx, time.Now().Add(11*time.Minute))
-	if got := crmDispatchScopes(t, w.db, cid, "B-03"); len(got) != 2 || got[mandateChargeRef(m.MandateID, dayKey(at))] != "SENT" {
-		t.Fatalf("B-03 once per (mandate, day): %v", got)
+	if got := crmDispatchScopes(t, w.db, cid, "B-03"); len(got) != 2 || got[tp.Ref] != "SENT" {
+		t.Fatalf("B-03 once per AutoPay charge: %v", got)
+	}
+	if got := w.cash(t, cid); got != 0 {
+		t.Fatalf("a refused AutoPay charge moved money: %v", got)
 	}
 }
 

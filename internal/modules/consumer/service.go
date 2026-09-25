@@ -74,6 +74,9 @@ type service struct {
 	// the Razorpay dashboard when the webhook URL is registered. Empty → the
 	// webhook endpoint rejects every request, so this ships inert.
 	rzpWebhookSecret string
+	// rzpBase is the gateway REST root (razorpay.go rzpAPIBase): empty is the
+	// real gateway; RAZORPAY_API_BASE_URL or a test points it at a stub.
+	rzpBase string
 	// trace is the operator's public QR resolver, reused READ-ONLY for the
 	// consumer traceability bridge (tracebridge.go). Never mutates operator state.
 	trace *publictrace.Service
@@ -132,6 +135,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		rzpKeyID:           os.Getenv("RAZORPAY_KEY_ID"),
 		rzpKeySecret:       os.Getenv("RAZORPAY_KEY_SECRET"),
 		rzpWebhookSecret:   os.Getenv("RAZORPAY_WEBHOOK_SECRET"),
+		rzpBase:            rzpBaseFromEnv(),
 		trace:              publictrace.NewService(d, log),
 		appKey:             os.Getenv("CONSUMER_APP_KEY"),
 		sms:                sms.NewMSG91(os.Getenv("MSG91_AUTHKEY"), os.Getenv("MSG91_TEMPLATE_ID")),
@@ -445,6 +449,12 @@ func (s *service) updateMe(ctx context.Context, consumerID primitive.ObjectID, p
 }
 
 func (s *service) erase(ctx context.Context, consumerID primitive.ObjectID) error {
+	s.autopayCancelForErasure(ctx, consumerID) // the bank tokens, best effort
+	// An AutoPay charge the bank may still complete keeps its payment order,
+	// with no owner, so a late capture is refunded rather than lost.
+	if err := s.autopayKeepForErasure(ctx, consumerID); err != nil {
+		return err
+	}
 	return s.repo.deleteAccountCascade(ctx, consumerID)
 }
 
@@ -606,9 +616,13 @@ func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID
 		"amount": amount, "method": method, "ref": ref,
 	})
 	// wallet.credited (B-06, the top-up receipt): one per ledger ref, the
-	// refundable account, worded as a recharge.
+	// refundable account, worded as a recharge (an AutoPay one says so).
+	reason := "recharge"
+	if method == "autopay" {
+		reason = "AutoPay recharge"
+	}
 	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
-		"amount": amount, "account": "topup", "reason": "recharge", "ref": ref, "scope_key": ref,
+		"amount": amount, "account": "topup", "reason": reason, "ref": ref, "scope_key": ref,
 	})
 	if bonus > 0 {
 		_, _ = s.repo.insertWalletTxnGate(ctx, walletTxn{

@@ -2,7 +2,6 @@ package consumer
 
 import (
 	"testing"
-	"time"
 )
 
 // TestMandateStateMachine pins every edge of the mandate lifecycle: which
@@ -83,66 +82,39 @@ func TestActionTargetsAreReachable(t *testing.T) {
 	}
 }
 
-// TestMandateChargeRefIdempotencyKey pins the exactly-once execution key: it is
-// STABLE for a given (mandate, IST day) — so two ticks on the same delivery day
-// collapse onto one wallet gate row and can't double-charge — and DISTINCT
-// across days and across mandates. IST, not UTC: the trial ledger and delivery
-// settle key on the consumer's calendar day, and a mandate tick between IST and
-// UTC midnight must land on the same day as the delivery it pays for.
-func TestMandateChargeRefIdempotencyKey(t *testing.T) {
-	// Two instants on the same IST day → same day key → same ref.
-	morning := time.Date(2026, 7, 29, 5, 30, 0, 0, time.UTC) // 11:00 IST, 29 Jul
-	evening := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC) // 23:30 IST, 29 Jul
-	if dayKey(morning) != dayKey(evening) {
-		t.Fatalf("same-day keys differ: %q vs %q", dayKey(morning), dayKey(evening))
+// TestAutopayRefAndAmount pins a Smart Recharge charge's exactly-once key
+// (its reason, the mandate and the occasion) and its amount: the member's
+// recharge amount, or the shortfall when that is more, never above the
+// per-debit cap the bank approved.
+func TestAutopayRefAndAmount(t *testing.T) {
+	if got := autopayRef(autopayReasonThreshold, "mnd_abc", "2026-10-05-1"); got != "autopay:threshold:mnd_abc:2026-10-05-1" {
+		t.Errorf("ref shape %q", got)
 	}
-	refA := mandateChargeRef("mnd_abc", dayKey(morning))
-	refB := mandateChargeRef("mnd_abc", dayKey(evening))
-	if refA != refB {
-		t.Errorf("same (mandate, day) must yield the same ref: %q vs %q", refA, refB)
+	if autopayRef(autopayReasonApp, "mnd_abc", "r1") == autopayRef(autopayReasonSeat, "mnd_abc", "r1") ||
+		autopayRef(autopayReasonApp, "mnd_abc", "r1") == autopayRef(autopayReasonApp, "mnd_xyz", "r1") {
+		t.Error("refs must be distinct across reasons and mandates")
 	}
-	if refA != "mandate:mnd_abc:2026-07-29" {
-		t.Errorf("unexpected ref shape %q", refA)
-	}
-
-	// A different day → a different ref (the next charge is a distinct gate row).
-	nextDay := morning.Add(24 * time.Hour)
-	if r := mandateChargeRef("mnd_abc", dayKey(nextDay)); r == refA {
-		t.Errorf("next day must yield a distinct ref, got %q for both", r)
-	}
-	// A different mandate → a different ref (per-mandate isolation).
-	if r := mandateChargeRef("mnd_xyz", dayKey(morning)); r == refA {
-		t.Errorf("distinct mandates must not share a ref, got %q for both", r)
-	}
-	// IST midnight is the boundary, not UTC midnight: 18:29 UTC is 23:59 IST
-	// (still 29 Jul), 18:31 UTC is 00:01 IST (already 30 Jul). Same UTC day,
-	// different charge days — this is precisely the delivery-day alignment.
-	if got := dayKey(time.Date(2026, 7, 29, 18, 29, 0, 0, time.UTC)); got != "2026-07-29" {
-		t.Errorf("pre-IST-midnight key = %q, want 2026-07-29", got)
-	}
-	if got := dayKey(time.Date(2026, 7, 29, 18, 31, 0, 0, time.UTC)); got != "2026-07-30" {
-		t.Errorf("post-IST-midnight key = %q, want 2026-07-30", got)
-	}
-}
-
-// TestNextChargeAfter pins the plan cadence used to advance the schedule.
-func TestNextChargeAfter(t *testing.T) {
-	from := time.Date(2026, 7, 29, 6, 0, 0, 0, time.UTC)
-	cases := []struct {
-		plan string
-		want time.Time
-		ok   bool
-	}{
-		{"daily", from.Add(24 * time.Hour), true},
-		{"weekly", from.Add(7 * 24 * time.Hour), true},
-		{"monthly", time.Time{}, false},
-		{"", time.Time{}, false},
-	}
-	for _, c := range cases {
-		got, ok := nextChargeAfter(c.plan, from)
-		if ok != c.ok || (ok && !got.Equal(c.want)) {
-			t.Errorf("nextChargeAfter(%q) = (%v, %v), want (%v, %v)", c.plan, got, ok, c.want, c.ok)
+	m := &mandate{Amount: 500, MaxAmount: 2000}
+	for _, c := range []struct{ short, want float64 }{
+		{0, 500}, {120, 500}, {740.2, 741}, {1999.5, 2000}, {5000, 2000},
+	} {
+		if got := autopayAmountFor(m, c.short); got != c.want {
+			t.Errorf("autopayAmountFor(short %v) = %v, want %v", c.short, got, c.want)
 		}
+	}
+	if got := (&mandate{}).effectiveThreshold(); got != autopayDefaultThreshold {
+		t.Errorf("default threshold %v", got)
+	}
+	if got := (&mandate{Threshold: 350}).effectiveThreshold(); got != 350 {
+		t.Errorf("member threshold %v", got)
+	}
+	// The horizon must outlast the UPI lead, or a charge started when a day
+	// enters it could land after that day's noon lock.
+	if autopayFundingHorizon <= autopayChargeLead {
+		t.Errorf("horizon %v must exceed the charge lead %v", autopayFundingHorizon, autopayChargeLead)
+	}
+	if rupeesToPaise(19.99) != 1999 || rupeesToPaise(0.1+0.2) != 30 {
+		t.Error("rupeesToPaise rounding")
 	}
 }
 

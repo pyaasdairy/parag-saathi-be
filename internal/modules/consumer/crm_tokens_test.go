@@ -150,9 +150,9 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	if err := json.Unmarshal(embeddedCRMConfig, &meta); err != nil {
 		t.Fatalf("embedded config: %v", err)
 	}
-	// 54 templates: the 50 of the founding merge, T-E04-REDELIVER, T-W01-LATER,
-	// and FF-04's two bodies (T-FF04, T-FF04-UNLOCKED).
-	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 59 || len(meta.Templates) != 54 {
+	// 55 templates: the 50 of the founding merge, T-E04-REDELIVER, T-W01-LATER,
+	// FF-04's two bodies (T-FF04, T-FF04-UNLOCKED) and T-B03-AUTOPAY.
+	if meta.Meta.TriggerCount != len(meta.Triggers) || len(meta.Triggers) != 59 || len(meta.Templates) != 55 {
 		t.Fatalf("meta.trigger_count=%d triggers=%d templates=%d", meta.Meta.TriggerCount, len(meta.Triggers), len(meta.Templates))
 	}
 }

@@ -421,13 +421,19 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 			return v, nil
 		}
 		return nil, fmt.Errorf("payload carries no account")
-	case "founding.friend_farm_unlocked":
-		// FF-04: the friend's own join unlocked their farm (0 homes to go),
-		// so the message says it has unlocked instead of counting homes.
-		if v, ok := p["friend_farm_unlocked"].(bool); ok {
-			return v, nil
-		}
-		return nil, fmt.Errorf("payload carries no friend_farm_unlocked")
+	case "founding.friend_farm_unlocked":
+		// FF-04: the friend's own join unlocked their farm (0 homes to go),
+		// so the message says it has unlocked instead of counting homes.
+		if v, ok := p["friend_farm_unlocked"].(bool); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("payload carries no friend_farm_unlocked")
+	case "payment.source":
+		// payment.failed (B-03): "razorpay" for a checkout top-up,
+		// "autopay" for a Smart Recharge charge the bank refused. An event
+		// with no source (none is emitted today) reads as a checkout.
+		v, _ := p["source"].(string)
+		return v, nil
 	case "order.contains_promotional_line":
 		// The shipped model mints each free pack as its own order, so an
 		// order carries a promotional line iff it is a pack order.
@@ -867,6 +873,10 @@ func crmEventParams(topic string, payload map[string]any, o *order) map[string]s
 	case "payment.failed":
 		if v := str("reason"); v != "" {
 			p["REASON"] = v
+		}
+		// [X] in T-B03-AUTOPAY: the rupees the refused AutoPay charge was for.
+		if n, ok := crmPayloadNumber(payload["amount"]); ok && n > 0 {
+			p["X"] = crmRupees(n)
 		}
 	case "founding.farm_unlocked", "founding.member_active", "founding.seat_waiting", "founding.line_moved":
 		// Spec section 6: the farm and farmer by name, the member's place in
