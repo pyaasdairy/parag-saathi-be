@@ -107,6 +107,12 @@ func (s *service) createDeliveryForOrderAt(ctx context.Context, o *order, when t
 	if err := s.repo.insertDelivery(ctx, del); err != nil {
 		return
 	}
+	// A new instant order rings the store's managers and riders
+	// (operator_push.go): the broadcast they race to accept. Only a task
+	// that was actually inserted gets here, so a backfill never re-rings.
+	if del.Status == "OFFERED" {
+		s.pushNewInstantOrder(ctx, when, del)
+	}
 	// CRM (contract C6, inert unless CRM_ENABLED): order.confirmed once the
 	// task exists. Instant and subscription orders both pass through here, so
 	// this is the one place the confirmation is emitted. Best-effort.

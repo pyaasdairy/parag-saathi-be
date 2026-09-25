@@ -16,6 +16,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/modules/publictrace"
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/deps"
+	"github.com/pyaas/saathi-backend/internal/platform/push"
 	"github.com/pyaas/saathi-backend/internal/platform/sms"
 )
 
@@ -109,6 +110,11 @@ type service struct {
 	// built; module.go marks one missing when its boot build fails.
 	foundingIdx indexGuard
 	referralIdx indexGuard
+	// opPush rings store managers' and riders' Saathi phones for the store
+	// alerts (operator_push.go). deps.OperatorPush: nil-safe, inert until
+	// FCM_SERVICE_ACCOUNT_JSON is set. opPushSync sends inline (tests).
+	opPush     *push.Operator
+	opPushSync bool
 	// clock is the service's "now" for the instant hours (orders, the
 	// serviceability answer, the store's extend / close-now): nil is the wall
 	// clock; tests pin a fixed moment. Read it through now().
@@ -141,6 +147,7 @@ func newService(d *deps.Deps, repo *repository, log *slog.Logger) *service {
 		crmSMS:             newSMSChannel(log),
 		crmWA:              newWhatsAppChannel(log),
 		crmPush:            newPushChannel(log, repo),
+		opPush:             d.OperatorPush,
 		dolibarrKick:       make(chan struct{}, 1),
 	}
 }

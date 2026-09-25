@@ -209,14 +209,15 @@ func (r *OperatorRegistry) Prune(ctx context.Context, token string) error {
 	return err
 }
 
-// deviceStore is what the fan-out needs from the registry.
-type deviceStore interface {
+// DeviceStore is what the fan-out needs from the registry
+// (*OperatorRegistry in production).
+type DeviceStore interface {
 	TokensFor(ctx context.Context, parties []primitive.ObjectID) ([]string, error)
 	Prune(ctx context.Context, token string) error
 }
 
-// fcmSender is what the fan-out needs from FCM.
-type fcmSender interface {
+// Sender is what the fan-out needs from FCM (*FCM in production).
+type Sender interface {
 	Enabled() bool
 	Send(ctx context.Context, m FCMMessage) (string, error)
 }
@@ -244,8 +245,8 @@ type NotifyResult struct {
 
 // Operator is the operator fan-out: registry + FCM.
 type Operator struct {
-	devices deviceStore
-	fcm     fcmSender
+	devices DeviceStore
+	fcm     Sender
 	status  string
 }
 
@@ -261,9 +262,10 @@ func NewOperator(reg *OperatorRegistry, fcm *FCM) *Operator {
 	return o
 }
 
-// newOperatorWith is the test seam: any device store and sender.
-func newOperatorWith(devices deviceStore, fcm fcmSender) *Operator {
-	return &Operator{devices: devices, fcm: fcm, status: "test"}
+// NewOperatorWith is the test seam: any device store and sender (a module's
+// test records what would have gone out without a Firebase project).
+func NewOperatorWith(devices DeviceStore, sender Sender) *Operator {
+	return &Operator{devices: devices, fcm: sender, status: "operator push (Saathi): test sender"}
 }
 
 // Enabled reports whether anything can be sent.

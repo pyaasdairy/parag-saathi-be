@@ -84,7 +84,7 @@ func TestOperatorNotifyHoldsAlertsInQuietHoursButNeverOrders(t *testing.T) {
 	mgr := primitive.NewObjectID()
 	devs := &fakeDevices{tokens: map[primitive.ObjectID][]string{mgr: {"tok-mgr"}}}
 	fcm := &fakeFCM{}
-	o := newOperatorWith(devs, fcm)
+	o := NewOperatorWith(devs, fcm)
 	ctx := context.Background()
 
 	res, err := o.Notify(ctx, ist(23, 0), []primitive.ObjectID{mgr}, OperatorAlert{Kind: "STORE_INSTANT_CLOSED", Title: "Instant delivery is now closed"})
@@ -117,7 +117,7 @@ func TestOperatorNotifyPrunesDeadTokensAndKeepsGoing(t *testing.T) {
 	a, b := primitive.NewObjectID(), primitive.NewObjectID()
 	devs := &fakeDevices{tokens: map[primitive.ObjectID][]string{a: {"dead-a", "live-a"}, b: {"flaky-b", "live-b"}}}
 	fcm := &fakeFCM{dead: map[string]bool{"dead-a": true}, down: map[string]bool{"flaky-b": true}}
-	res, err := newOperatorWith(devs, fcm).Notify(context.Background(), ist(10, 0), []primitive.ObjectID{a, b},
+	res, err := NewOperatorWith(devs, fcm).Notify(context.Background(), ist(10, 0), []primitive.ObjectID{a, b},
 		OperatorAlert{Kind: "STORE_INSTANT_CLOSING", Title: "Instant delivery closes at 10:00 PM", Urgent: true})
 	if err != nil {
 		t.Fatalf("one good send makes the fan-out a success: %v", err)
@@ -132,7 +132,7 @@ func TestOperatorNotifyPrunesDeadTokensAndKeepsGoing(t *testing.T) {
 	// Every send failing surfaces the error so the caller logs it.
 	allDown := &fakeFCM{down: map[string]bool{"live-a": true}}
 	one := &fakeDevices{tokens: map[primitive.ObjectID][]string{a: {"live-a"}}}
-	if _, err := newOperatorWith(one, allDown).Notify(context.Background(), ist(10, 0), []primitive.ObjectID{a}, OperatorAlert{Urgent: true}); !errors.Is(err, ErrUnavailable) {
+	if _, err := NewOperatorWith(one, allDown).Notify(context.Background(), ist(10, 0), []primitive.ObjectID{a}, OperatorAlert{Urgent: true}); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("a fan-out where nothing went out must say why, got %v", err)
 	}
 }

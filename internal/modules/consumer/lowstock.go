@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -40,11 +41,24 @@ func (h *handler) lowStock(w http.ResponseWriter, r *http.Request) {
 	if body.StoreName == "" {
 		body.StoreName = storeID
 	}
-	if err := h.svc.repo.raiseLowStock(r.Context(), storeID, body); err != nil {
+	if err := h.svc.raiseLowStockAlert(r.Context(), storeID, body); err != nil {
 		httpx.Error(w, r, toHTTPErr(err))
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// raiseLowStockAlert writes the admins' inbox rows on the service clock and
+// rings the admins whose alert re-armed (operator_push.go); the same set
+// posted again re-arms nobody, so a Saathi launch stays silent.
+func (s *service) raiseLowStockAlert(ctx context.Context, storeID string, body lowStockRequest) error {
+	now := s.now()
+	rearmed, err := s.repo.raiseLowStockAt(ctx, storeID, body, now)
+	if err != nil {
+		return err
+	}
+	s.pushLowStock(ctx, now, storeID, body, rearmed)
+	return nil
 }
 
 // raiseLowStock resolves the platform admins and upserts (or clears) one
@@ -57,11 +71,21 @@ func (h *handler) lowStock(w http.ResponseWriter, r *http.Request) {
 // but leaves the admin's read, its status and its place in the inbox alone.
 // POST /notifications/{id}/read treats the re-armed read_at: null as unread.
 func (r *repository) raiseLowStock(ctx context.Context, storeID string, body lowStockRequest) error {
+	_, err := r.raiseLowStockAt(ctx, storeID, body, time.Now())
+	return err
+}
+
+// raiseLowStockAt is raiseLowStock on an explicit clock, answering which
+// admins' alerts re-armed (a new row, or a changed summary or count): the
+// ones to ring. Each row is read and written in one atomic step, so two
+// concurrent posts of one change re-arm (and ring) an admin once.
+func (r *repository) raiseLowStockAt(ctx context.Context, storeID string, body lowStockRequest, at time.Time) ([]primitive.ObjectID, error) {
 	admins, err := r.adminRecipients(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	now := time.Now().UTC()
+	now := at.UTC()
+	var rearmed []primitive.ObjectID
 	count := fmt.Sprintf("%d", body.ItemCount)
 	// Every value that comes from the request or the database goes in as a
 	// $literal: this is a pipeline update, where a string starting with "$"
@@ -85,7 +109,7 @@ func (r *repository) raiseLowStock(ctx context.Context, storeID string, body low
 		if body.Summary == "" || body.ItemCount == 0 {
 			// Stock recovered — clear this store's alert for the admin.
 			if _, err := r.notifications.DeleteMany(ctx, filter); err != nil {
-				return httpx.Internal(fmt.Errorf("clear low-stock notification: %w", err))
+				return nil, httpx.Internal(fmt.Errorf("clear low-stock notification: %w", err))
 			}
 			continue
 		}
@@ -105,11 +129,21 @@ func (r *repository) raiseLowStock(ctx context.Context, storeID string, body low
 			{Key: "queued_at", Value: onChange("queued_at", now)},
 			{Key: "read_at", Value: onChange("read_at", nil)},
 		}}}}
-		if _, err := r.notifications.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true)); err != nil {
-			return httpx.Internal(fmt.Errorf("upsert low-stock notification: %w", err))
+		var before struct {
+			Params map[string]string `bson:"params"`
+		}
+		err := r.notifications.FindOneAndUpdate(ctx, filter, update,
+			options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.Before)).Decode(&before)
+		switch {
+		case errors.Is(err, mongo.ErrNoDocuments):
+			rearmed = append(rearmed, a.id) // a first raise
+		case err != nil:
+			return nil, httpx.Internal(fmt.Errorf("upsert low-stock notification: %w", err))
+		case before.Params["summary"] != body.Summary || before.Params["item_count"] != count:
+			rearmed = append(rearmed, a.id) // the same test the pipeline's $cond made
 		}
 	}
-	return nil
+	return rearmed, nil
 }
 
 type adminRecipient struct {
