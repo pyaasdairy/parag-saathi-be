@@ -51,7 +51,9 @@ import (
 
 const collMandates = "consumer_mandates"
 
-// mandatePlans maps a subscription plan to its charge cadence.
+// mandatePlans are the plans the app may name at registration. Smart
+// Recharge charges when the wallet needs money, not on this cadence; the
+// plan is kept because the app sends it (and validates it).
 var mandatePlans = map[string]time.Duration{
 	"daily":     24 * time.Hour,
 	"alternate": 48 * time.Hour, // every 2nd day — matches the FE cadence
@@ -85,29 +87,6 @@ func mandateActionTarget(action string) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// dayKey is the IST calendar-day idempotency key a mandate charges at most once
-// against (YYYY-MM-DD). IST, not UTC: every other money boundary in this module
-// (the trial day, the morning window) is IST, and the UTC flip lands at 05:30
-// IST — inside the delivery window — so a UTC key would let one IST morning
-// span two "days" and double-charge the day a real scheduler runs this.
-func dayKey(t time.Time) string { return t.In(istZone).Format("2006-01-02") }
-
-// mandateChargeRef is the exactly-once wallet ref for a single day's execution.
-// Stable per (mandateId, day) so a duplicate tick reuses the same gate row and
-// the debit is idempotent — the money side can never double-charge.
-func mandateChargeRef(mandateID, day string) string {
-	return "mandate:" + mandateID + ":" + day
-}
-
-// nextChargeAfter returns from + the plan's cadence (and false for an unknown plan).
-func nextChargeAfter(plan string, from time.Time) (time.Time, bool) {
-	d, ok := mandatePlans[plan]
-	if !ok {
-		return time.Time{}, false
-	}
-	return from.Add(d), true
 }
 
 // ── Document + wire shapes ──────────────────────────────────────────────────
@@ -195,7 +174,7 @@ func (r *repository) ensureMandateIndexes(ctx context.Context) error {
 	if _, err := r.mandates.Indexes().CreateMany(ctx, specs); err != nil {
 		return err
 	}
-	return nil
+	return r.ensureAutopayIndexes(ctx)
 }
 
 func (r *repository) insertMandate(ctx context.Context, m *mandate) error {
@@ -253,26 +232,6 @@ func (r *repository) transitionMandate(ctx context.Context, mandateID string, co
 		return nil, errInternal("mandate update failed")
 	}
 	return &m, nil
-}
-
-// advanceMandateCharge records a completed day's charge and moves next_charge
-// forward — IDEMPOTENTLY by the calendar day. The guard `last_charge_date != day`
-// means a duplicated execution for the same day never double-advances the
-// schedule (the money side is already gated by the wallet ref). Returns whether
-// THIS call advanced the schedule.
-func (r *repository) advanceMandateCharge(ctx context.Context, mandateID, day string, at, next time.Time) (bool, error) {
-	res, err := r.mandates.UpdateOne(ctx,
-		bson.D{{Key: "mandate_id", Value: mandateID}, {Key: "last_charge_date", Value: bson.D{{Key: "$ne", Value: day}}}},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "last_charge_date", Value: day},
-			{Key: "last_charge_at", Value: at},
-			{Key: "next_charge", Value: next},
-			{Key: "updated_at", Value: at},
-		}}})
-	if err != nil {
-		return false, errInternal("mandate charge advance failed")
-	}
-	return res.ModifiedCount == 1, nil
 }
 
 // ── Razorpay recurring seam ─────────────────────────────────────────────────
@@ -586,46 +545,6 @@ func (s *service) listMandatesFor(ctx context.Context, consumerID primitive.Obje
 	return s.repo.listMandates(ctx, consumerID)
 }
 
-// runMandateCharge executes ONE day's subscription charge for an ACTIVE mandate.
-// It debits the wallet through the SAME exactly-once settle path as a delivery
-// (service.debit), keyed by mandate:<id>:<day>, so a retried or duplicated
-// scheduler tick charges AT MOST once per UTC day. Only `active` mandates charge
-// (a paused/cancelled/pending mandate is a no-op error). The schedule advance is
-// separately idempotent by the same day key.
-func (s *service) runMandateCharge(ctx context.Context, consumerID primitive.ObjectID, mandateID string, at time.Time) (walletView, error) {
-	m, err := s.repo.findMandate(ctx, mandateID, consumerID)
-	if err != nil {
-		return walletView{}, err
-	}
-	if m.Status != "active" {
-		return walletView{}, errConflict("MANDATE_STATE", "only an active mandate can be charged")
-	}
-	day := dayKey(at)
-	ref := mandateChargeRef(mandateID, day)
-	// The money gate: idempotent by (consumer, ref, DEBIT). A duplicate tick for
-	// the same day reuses this ref and does NOT move money a second time.
-	view, err := s.debit(ctx, consumerID, m.Amount, ref, "subscription auto-renewal")
-	if err != nil {
-		// CRM payment.failed (B-03): the wallet could not fund the charge.
-		// Once per (mandate, day) - the sweep retries every tick, the claim
-		// scopes on the same day ref. A transient error is not a failure to
-		// announce.
-		if crmErrCode(err) == "INSUFFICIENT_FUNDS" {
-			s.emitCRMEvent(ctx, "payment.failed", consumerID, map[string]any{
-				"mandate_id": mandateID, "amount": m.Amount, "reason": "insufficient wallet balance",
-				"source": "mandate", "scope_key": ref,
-			})
-		}
-		return walletView{}, err
-	}
-	// Bookkeeping — advance the schedule at most once per day (guarded by the day
-	// key), so a duplicate tick can't skip a future charge by double-advancing.
-	if next, ok := nextChargeAfter(m.Plan, at.UTC()); ok {
-		_, _ = s.repo.advanceMandateCharge(ctx, mandateID, day, at.UTC(), next)
-	}
-	return view, nil
-}
-
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 func (h *handler) createMandate(w http.ResponseWriter, r *http.Request) {
@@ -708,23 +627,56 @@ func (h *handler) mandateAction(action string) http.HandlerFunc {
 	}
 }
 
-// executeMandate triggers ONE day's charge. DEV-gated: in production the daily
-// execution is driven by the backend scheduler calling runMandateCharge, never
-// by a client. Exposed here so the subscribe→charge flow is testable end-to-end.
+// executeMandate is POST /mandate/{id}/execute, the app's executeMandate: a
+// "top up now" request. It charges the member's own mandate for body.amount
+// (default: their recharge amount; never above the per-debit cap), keyed by
+// body.ref so a retry answers the same charge, and answers 202 with the
+// charge. It NEVER debits the wallet: the money is credited when the bank's
+// payment is captured (webhook or reconcile). body.purpose is accepted for
+// the app's contract and ignored. Needs live Razorpay keys (503 otherwise).
 func (h *handler) executeMandate(w http.ResponseWriter, r *http.Request) {
 	id, aerr := actorID(r)
 	if aerr != nil {
 		writeErr(w, aerr)
 		return
 	}
-	if !h.svc.deps.Cfg.OTPDevMode {
-		writeErr(w, errForbidden("not available"))
+	var body struct {
+		Amount  float64 `json:"amount"`
+		Ref     string  `json:"ref"`
+		Purpose string  `json:"purpose"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, err)
 		return
 	}
-	view, err := h.svc.runMandateCharge(r.Context(), id, chi.URLParam(r, "id"), time.Now().UTC())
+	t, err := h.svc.autopayTopupNow(r.Context(), id, chi.URLParam(r, "id"), body.Amount, body.Ref, h.svc.now())
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, view)
+	writeJSON(w, http.StatusAccepted, t.view())
+}
+
+// mandatePolicy is POST /mandate/{id}/policy: the member's Smart Recharge
+// threshold and top-up amount (either may be omitted).
+func (h *handler) mandatePolicy(w http.ResponseWriter, r *http.Request) {
+	id, aerr := actorID(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var body struct {
+		Threshold *float64 `json:"threshold"`
+		Amount    *float64 `json:"amount"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	m, err := h.svc.setMandatePolicy(r.Context(), id, chi.URLParam(r, "id"), body.Threshold, body.Amount)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
 }

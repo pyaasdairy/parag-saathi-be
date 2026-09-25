@@ -25,7 +25,7 @@
   "awaiting_event": {
    "A-04": "no server-side cart: the basket lives on the phone (app cart.tsx); no scheduled runner",
    "A-06": "no scheduled runner for days_since_registration; data exists (accounts.created_at, orders)",
-   "B-04": "wallet plans have no renewal date; the nearest fact is a mandate's next_charge",
+   "B-04": "wallet plans have no renewal date; AutoPay (Smart Recharge) tops the wallet up on need, not on a date",
    "B-05": "ai_call is not a transport; the pause_subscription action is not built",
    "C-01": "no scheduled runner for days_since_last_order",
    "C-02": "no scheduled runner; the Rs75 promo credit has no production grant path (promoCredit is dev-only)",

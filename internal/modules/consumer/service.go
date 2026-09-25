@@ -449,6 +449,7 @@ func (s *service) updateMe(ctx context.Context, consumerID primitive.ObjectID, p
 }
 
 func (s *service) erase(ctx context.Context, consumerID primitive.ObjectID) error {
+	s.autopayCancelForErasure(ctx, consumerID) // the bank tokens, best effort
 	return s.repo.deleteAccountCascade(ctx, consumerID)
 }
 

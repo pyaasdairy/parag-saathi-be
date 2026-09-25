@@ -130,6 +130,11 @@ func (s *service) razorpayWebhookEvent(ctx context.Context, raw []byte) error {
 	}
 	switch ev.Event {
 	case "payment.captured", "order.paid":
+	case "token.confirmed", "token.rejected", "token.paused", "token.cancelled":
+		// The bank's word on an AutoPay token (autopay.go): a confirmed token
+		// may be charged; a cancelled or rejected one ends its mandate.
+		s.autopayTokenEvent(ctx, raw, s.now())
+		return nil
 	case "payment.failed":
 		// Nothing to credit; the member is told the recharge did not go
 		// through (CRM B-03, payment.failed). The owner comes from OUR order
@@ -181,16 +186,24 @@ func (h *handler) razorpayWebhook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// crmPaymentFailed emits payment.failed (CRM B-03) for a gateway payment that
-// failed against one of our top-up orders. Once per gateway payment (the
-// claim scopes on the payment id), and only when the order is a wallet
-// top-up we issued - an order payment or an unknown order is ignored.
+// crmPaymentFailed handles a gateway payment that failed against one of our
+// orders. An AutoPay charge is closed as refused (autopayPaymentFailed, which
+// tells the member in AutoPay's words). A checkout top-up emits
+// payment.failed (CRM B-03) once per gateway payment (the claim scopes on
+// the payment id). An order payment or an unknown order is ignored.
 func (s *service) crmPaymentFailed(ctx context.Context, orderID, paymentID, reason string) {
-	if !crmEnabled() || orderID == "" {
+	if orderID == "" {
 		return
 	}
 	ord, err := s.repo.findPaymentOrderByID(ctx, orderID)
-	if err != nil || (ord.Purpose != "" && ord.Purpose != "topup") || ord.Status == "PAID" {
+	if err != nil {
+		return
+	}
+	if ord.Purpose == "autopay" {
+		s.autopayPaymentFailed(ctx, ord, paymentID, reason, s.now())
+		return
+	}
+	if !crmEnabled() || (ord.Purpose != "" && ord.Purpose != "topup") || ord.Status == "PAID" {
 		return
 	}
 	scope := paymentID
@@ -237,6 +250,9 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 		// Fast path only. The ledger gate below is still the authority: a row
 		// marked PAID whose credit failed mid-flight is repaired by the sweep
 		// calling us again, because creditTopup is keyed by the order id.
+		if ord.Purpose == "autopay" {
+			s.autopaySettleCaptured(ctx, orderID, paymentID, s.now())
+		}
 		return false, nil
 	}
 	amount := round2(float64(ord.AmountPaise) / 100)
@@ -257,6 +273,10 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 		return false, err // transient — the caller retries
 	}
 	_, _ = s.repo.markPaymentOrderPaid(ctx, orderID, paymentID, time.Now().UTC())
+	if ord.Purpose == "autopay" {
+		// The money is in: the Smart Recharge charge behind it is done.
+		s.autopaySettleCaptured(ctx, orderID, paymentID, s.now())
+	}
 
 	// A balance that did not move means the ledger gate saw this order before;
 	// that is a successful no-op, not a new credit.

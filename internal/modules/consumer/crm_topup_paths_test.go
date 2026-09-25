@@ -236,25 +236,49 @@ func TestCRMTopupMessageEveryCreditPath(t *testing.T) {
 		t.Fatalf("rider undo: %d B-06 rows mention the reversal, want 1", undoRows)
 	}
 
-	// 8) Mandate execution DEBITS the wallet (subscription auto-renewal); it
-	//    is never a credit, so it must never say money was added.
+	// 8) AutoPay (Smart Recharge) FUNDS the wallet (founder, 25 Sep): a
+	//    charge the bank captured is a top-up, announced once as an AutoPay
+	//    recharge however often the webhook and the sweep report it, and it
+	//    never debits the wallet.
 	h := w.customer(t, "9000008108", 500)
 	w.svc.crmProcessEvents(ctx)
 	before := len(crmB06Rows(t, w, h))
+	oldID, oldSecret, oldWH, oldBase := w.svc.rzpKeyID, w.svc.rzpKeySecret, w.svc.rzpWebhookSecret, w.svc.rzpBase
+	fake := liveRzp(t, w)
 	m := &mandate{
 		ID: primitive.NewObjectID(), MandateID: "mnd_topup_paths", ConsumerID: h, Plan: "daily", Status: "active",
-		Amount: 100, MaxAmount: 100, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Amount: 100, MaxAmount: 100, Token: "token_paths", TokenStatus: "confirmed", RzpCustomerID: "cust_paths",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := w.svc.repo.insertMandate(ctx, m); err != nil {
 		t.Fatalf("insertMandate: %v", err)
 	}
-	if _, err := w.svc.runMandateCharge(ctx, h, m.MandateID, time.Now()); err != nil {
-		t.Fatalf("runMandateCharge: %v", err)
+	tp, err := w.svc.autopayTopupNow(ctx, h, m.MandateID, 100, "paths-r1", time.Now())
+	if err != nil {
+		t.Fatalf("AutoPay top up now: %v", err)
 	}
+	for i := 0; i < 2; i++ {
+		if err := w.svc.razorpayWebhookEvent(ctx, capturedEvent(tp.RzpOrderID, tp.RzpPaymentID, 10000)); err != nil {
+			t.Fatalf("AutoPay capture webhook: %v", err)
+		}
+	}
+	fake.captured[tp.RzpOrderID] = tp.RzpPaymentID
+	w.svc.reconcilePendingPaymentsAt(ctx, time.Now().Add(time.Hour), fake.base())
 	w.svc.crmProcessEvents(ctx)
-	if after := len(crmB06Rows(t, w, h)); after != before {
-		t.Fatalf("a mandate DEBIT produced a wallet-credit message: %d -> %d rows", before, after)
+	rows := crmB06Rows(t, w, h)
+	autopayRows := 0
+	for _, r := range rows {
+		if strings.Contains(r.EN, "₹100 added to your Wallet (AutoPay recharge). Refundable.") {
+			autopayRows++
+		}
 	}
+	if len(rows) != before+1 || autopayRows != 1 {
+		t.Fatalf("AutoPay capture: want one \"added\" message, got %+v", rows)
+	}
+	if got := w.cash(t, h); got != 600 {
+		t.Fatalf("AutoPay capture cash = %v, want 600", got)
+	}
+	w.svc.rzpKeyID, w.svc.rzpKeySecret, w.svc.rzpWebhookSecret, w.svc.rzpBase = oldID, oldSecret, oldWH, oldBase
 
 	// 9) A credit whose balance move fails must not announce money that never
 	//    arrived: the member would read "added to your Wallet" over an

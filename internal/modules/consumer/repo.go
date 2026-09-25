@@ -251,10 +251,21 @@ func (r *repository) deleteAccountCascade(ctx context.Context, id primitive.Obje
 		// erasure takes it with everything else. Push tokens go too, or a
 		// deleted account keeps receiving notifications on its old phone.
 		db.Collection(collComplaints), db.Collection(collPushDevices),
+		// AutoPay charges (autopay.go) name the member and their mandate.
+		db.Collection(collAutopayTopups),
 	} {
 		if _, err := c.DeleteMany(ctx, filter); err != nil {
 			return errInternal("erasure failed")
 		}
+	}
+	// Nothing may charge an erased account: every live AutoPay mandate is
+	// cancelled (the service asked the gateway to cancel its bank token
+	// first, autopayCancelForErasure). The row stays as the record of it.
+	if _, err := r.mandates.UpdateMany(ctx,
+		bson.D{{Key: "consumer_id", Value: id}, {Key: "status", Value: bson.D{{Key: "$ne", Value: "cancelled"}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "cancelled"}, {Key: "cancel_reason", Value: "erased"},
+			{Key: "updated_at", Value: time.Now().UTC()}}}}); err != nil {
+		return errInternal("erasure failed")
 	}
 	// Delivery tasks carry name, phone and precise geo, keyed by the hex id.
 	if _, err := r.deliveries.DeleteMany(ctx, bson.D{{Key: "consumer_id", Value: id.Hex()}}); err != nil {
