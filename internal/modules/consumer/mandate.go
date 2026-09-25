@@ -135,6 +135,28 @@ type mandate struct {
 	LastChargeAt   *time.Time `bson:"last_charge_at,omitempty"   json:"last_charge_at,omitempty"`
 	CreatedAt      time.Time  `bson:"created_at"             json:"created_at"`
 	UpdatedAt      time.Time  `bson:"updated_at"             json:"updated_at"`
+	// SmartRechargeOn tells the app the server is really topping the wallet
+	// up off this mandate (withSmartRecharge): automatic top-ups switched on
+	// (MANDATE_AUTODEBIT and the keys), ACTIVE, the bank token CONFIRMED and
+	// not waiting for the member after refused debits. ACTIVE alone is not
+	// enough for the app's low-balance reminder to stand down. Computed for
+	// each answer, never stored. Additive key.
+	SmartRechargeOn bool `bson:"-" json:"smart_recharge_on"`
+}
+
+// smartRechargeOn reports whether Smart Recharge is really funding the
+// wallet off m right now (see mandate.SmartRechargeOn).
+func (s *service) smartRechargeOn(m *mandate) bool {
+	return autopayAutoEnabled() && s.rzpKeySecret != "" && m.Status == "active" &&
+		m.Token != "" && m.TokenStatus == "confirmed" && m.TopupFailures < autopayMaxFailures
+}
+
+// withSmartRecharge fills m.SmartRechargeOn for an answer to the app.
+func (s *service) withSmartRecharge(m *mandate) *mandate {
+	if m != nil {
+		m.SmartRechargeOn = s.smartRechargeOn(m)
+	}
+	return m
 }
 
 // effectiveThreshold is the member's threshold, or the default for a
@@ -701,7 +723,7 @@ func (h *handler) verifyMandate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, m)
+	writeJSON(w, http.StatusOK, h.svc.withSmartRecharge(m))
 }
 
 func (h *handler) listMandates(w http.ResponseWriter, r *http.Request) {
@@ -714,6 +736,9 @@ func (h *handler) listMandates(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	for i := range list {
+		h.svc.withSmartRecharge(&list[i])
 	}
 	writeJSON(w, http.StatusOK, list)
 }
@@ -732,7 +757,7 @@ func (h *handler) mandateAction(action string) http.HandlerFunc {
 			writeErr(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, m)
+		writeJSON(w, http.StatusOK, h.svc.withSmartRecharge(m))
 	}
 }
 
@@ -787,5 +812,5 @@ func (h *handler) mandatePolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, m)
+	writeJSON(w, http.StatusOK, h.svc.withSmartRecharge(m))
 }

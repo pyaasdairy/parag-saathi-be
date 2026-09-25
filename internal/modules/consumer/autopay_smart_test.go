@@ -13,6 +13,7 @@ package consumer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -575,5 +576,76 @@ func TestAutopayOneOffOrdersCountOnlyInsideTheHorizon(t *testing.T) {
 	}
 	if got := autopayHorizonLastDay(istDayAt("2026-10-05", 9, 0)); got != "2026-10-07" {
 		t.Fatalf("horizon's last day at 09:00: %s", got)
+	}
+}
+
+// RV-AP-04: the app's low-balance reminder stands down only while the server
+// is really topping the wallet up. GET /mandate/me says so per mandate
+// (smart_recharge_on, an additive key): automatic top-ups switched on
+// (MANDATE_AUTODEBIT and the keys), ACTIVE, the bank token confirmed and
+// not waiting for the member after refused debits.
+func TestAutopaySmartRechargeOnTellsTheApp(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	liveRzp(t, w)
+	cid := w.customer(t, "9000013091", 0)
+	m := armedMandate(t, w, cid, "mnd_on", 500, 2000, 200)
+	h := &handler{svc: w.svc}
+	read := func() map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/mandate/me", nil)
+		req = req.WithContext(context.WithValue(req.Context(), consumerCtxKey, consumerActor{ID: cid.Hex()}))
+		rec := httptest.NewRecorder()
+		h.listMandates(rec, req)
+		var list []map[string]any
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &list) != nil || len(list) != 1 {
+			t.Fatalf("GET /mandate/me: %d %s", rec.Code, rec.Body.String())
+		}
+		return list[0]
+	}
+	set := func(fields bson.D) {
+		t.Helper()
+		if _, err := w.db.Collection(collMandates).UpdateOne(ctx, bson.D{{Key: "mandate_id", Value: m.MandateID}},
+			bson.D{{Key: "$set", Value: fields}}); err != nil {
+			t.Fatalf("set: %v", err)
+		}
+	}
+	// The default deploy (MANDATE_AUTODEBIT unset): ACTIVE, but nothing tops
+	// the wallet up, so the key says false and the reminder keeps speaking.
+	if got := read(); got["status"] != "active" || got["smart_recharge_on"] != false {
+		t.Fatalf("automatic top-ups off: %v", got)
+	}
+	t.Setenv("MANDATE_AUTODEBIT", "true")
+	if got := read(); got["smart_recharge_on"] != true {
+		t.Fatalf("armed: %v", got)
+	}
+	set(bson.D{{Key: "token_status", Value: "initiated"}})
+	if got := read(); got["smart_recharge_on"] != false {
+		t.Fatalf("token not confirmed: %v", got)
+	}
+	set(bson.D{{Key: "token_status", Value: "confirmed"}, {Key: "topup_failures", Value: autopayMaxFailures}})
+	if got := read(); got["smart_recharge_on"] != false {
+		t.Fatalf("waiting for the member after refusals: %v", got)
+	}
+	set(bson.D{{Key: "topup_failures", Value: 0}, {Key: "status", Value: "paused"}})
+	if got := read(); got["smart_recharge_on"] != false {
+		t.Fatalf("paused: %v", got)
+	}
+	set(bson.D{{Key: "status", Value: "active"}})
+	w.svc.rzpKeySecret = ""
+	if got := read(); got["smart_recharge_on"] != false {
+		t.Fatalf("keyless: %v", got)
+	}
+	// Never stored.
+	var raw bson.M
+	if err := w.db.Collection(collMandates).FindOne(ctx, bson.D{{Key: "mandate_id", Value: m.MandateID}}).Decode(&raw); err != nil {
+		t.Fatalf("raw: %v", err)
+	}
+	if _, stored := raw["smartrechargeon"]; stored {
+		t.Fatalf("smart_recharge_on was stored: %v", raw)
+	}
+	if _, stored := raw["smart_recharge_on"]; stored {
+		t.Fatalf("smart_recharge_on was stored: %v", raw)
 	}
 }
