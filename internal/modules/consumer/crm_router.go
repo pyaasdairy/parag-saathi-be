@@ -296,6 +296,16 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 		return "morning_delivery", nil
 	case "orders_count":
 		// The consumer's completed orders, this one included once delivered.
+		// On order.delivered it is the count AS OF that delivery, the
+		// snapshot the emitter wrote (syncOrderDelivered): read here instead,
+		// two orders delivered inside one worker tick both saw 2 and A-02
+		// ("first Quick Pyaas order completed") thanked neither (founder
+		// decision 7, 25 Sep). An event without the snapshot (A-01's
+		// user.registered, or an order.delivered written before it existed)
+		// reads the live count.
+		if n, ok := crmPayloadNumber(p["orders_count"]); ok {
+			return n, nil
+		}
 		n, err := e.s.repo.orders.CountDocuments(e.ctx, bson.D{
 			{Key: "user_id", Value: e.ev.ConsumerID.Hex()}, {Key: "status", Value: "delivered"},
 		})
@@ -438,6 +448,34 @@ func (e *crmEventCtx) fact(key string) (any, error) {
 		return !due, nil
 	}
 	return nil, fmt.Errorf("unknown condition key %q", key)
+}
+
+// deliveredOrderRank is o's place among its member's delivered orders by
+// delivery time, 1 for the first: the orders_count snapshot order.delivered
+// carries. An order delivered before delivered_at existed comes first, and
+// two deliveries stamped in the same second go by which order was placed
+// first (_id). Orders that are not delivered, and other members' orders,
+// never count. delivered_at is RFC3339 UTC, so its strings sort by time.
+func (r *repository) deliveredOrderRank(ctx context.Context, o *order) (int, error) {
+	undated := bson.E{Key: "delivered_at", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}
+	placedBefore := bson.E{Key: "_id", Value: bson.D{{Key: "$lt", Value: o.MongoID}}}
+	earlier := bson.A{bson.D{undated, placedBefore}}
+	if o.DeliveredAt != "" {
+		earlier = bson.A{
+			bson.D{undated},
+			bson.D{{Key: "delivered_at", Value: bson.D{{Key: "$lt", Value: o.DeliveredAt}}}},
+			bson.D{{Key: "delivered_at", Value: o.DeliveredAt}, placedBefore},
+		}
+	}
+	n, err := r.orders.CountDocuments(ctx, bson.D{
+		{Key: "user_id", Value: o.UserID}, {Key: "status", Value: "delivered"},
+		{Key: "order_id", Value: bson.D{{Key: "$ne", Value: o.OrderID}}},
+		{Key: "$or", Value: earlier},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return int(n) + 1, nil
 }
 
 // crmMemberStarted answers the member.started condition key: any order that

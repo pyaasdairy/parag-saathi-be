@@ -664,12 +664,14 @@
    },
    "template": "T-A02",
    "frequency_cap": {
-    "per_order": 1
+    "per_order": 1,
+    "per_customer": 1
    },
    "success_metric": "second_order_rate_14d",
    "corrections": [
     "C-01"
-   ]
+   ],
+   "note": "Founder decision 7 (25 Sep 2026). orders_count is the member's delivered orders as of THIS delivery, the snapshot the order.delivered event carries: read when the worker drained the event, two first orders delivered inside one tick both saw 2 and neither was thanked. The first delivery (by delivery time) is thanked; per_customer 1 keeps it to one thank-you ever, also when two deliveries race."
   },
   {
    "id": "A-03",

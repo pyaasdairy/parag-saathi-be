@@ -1121,10 +1121,18 @@ func (s *service) syncOrderDelivered(ctx context.Context, d *delivery) {
 	// router fires D-06 for ordinary orders only. Best-effort by contract.
 	if crmEnabled() {
 		if cid, cerr := primitive.ObjectIDFromHex(o.UserID); cerr == nil {
-			s.emitCRMEvent(ctx, "order.delivered", cid, map[string]any{
+			payload := map[string]any{
 				"order_id": o.OrderID, "offer_pack": o.OfferPack,
 				"promotional_only": o.OfferPack > 0, "labelled_product": crmLabelledProductOf(o),
-			})
+			}
+			// orders_count is the member's delivered orders as of THIS delivery
+			// (A-02's "first order" condition reads it): counted when the worker
+			// drains the event, two deliveries inside one tick both read 2.
+			// Without it (a failed read) the condition reads the live count.
+			if n, err := s.repo.deliveredOrderRank(ctx, o); err == nil {
+				payload["orders_count"] = n
+			}
+			s.emitCRMEvent(ctx, "order.delivered", cid, payload)
 		}
 	}
 	// Referral reward (referrals.go): the referee's first paid delivery marks

@@ -25,7 +25,7 @@ func TestCRMEventTriggerTokensSupplied(t *testing.T) {
 	sample := map[string]map[string]any{
 		"order.confirmed":    {"order_id": "ord_1", "labelled_product": label, "promotional_only": false, "eta": "today by 7 am"},
 		"order.dispatched":   {"order_id": "ord_1", "labelled_product": label, "partner": "Ravi", "eta_min": int32(12)},
-		"order.delivered":    {"order_id": "ord_1", "offer_pack": int32(0), "promotional_only": false, "labelled_product": label},
+		"order.delivered":    {"order_id": "ord_1", "offer_pack": int32(0), "promotional_only": false, "labelled_product": label, "orders_count": int32(1)},
 		"order.failed":       {"order_id": "ord_1", "labelled_product": label, "reason": "Customer not home"},
 		"complaint.created":  {"complaint_id": "cmp_1", "ref": "PYS-1", "category": "missing", "order_id": "ord_1"},
 		"complaint.resolved": {"complaint_id": "cmp_1", "ref": "PYS-1", "resolution": "Refunded one pack"},
