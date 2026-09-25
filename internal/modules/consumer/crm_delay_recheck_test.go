@@ -26,7 +26,11 @@ func TestCRMDelayedRecheckReadsWhatHappenedMeanwhile(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
 	ctx := context.Background()
-	t0 := time.Now()
+	// The worker runs on the test's clock, 09:00 IST today, so the delays
+	// and the quiet hours (22:00-07:00) never depend on when the test runs.
+	// The plans start on the wall clock's tomorrow, as creating one does.
+	nowIST := time.Now().In(istZone)
+	t0 := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 9, 0, 0, 0, istZone)
 	tomorrow := addDaysIST(istToday(time.Now()), 1)
 	plan := func(cid primitive.ObjectID) *subscription {
 		t.Helper()
@@ -59,6 +63,10 @@ func TestCRMDelayedRecheckReadsWhatHappenedMeanwhile(t *testing.T) {
 	idle := w.customer(t, "9000007805", 0)
 	for _, cid := range []primitive.ObjectID{shops, idle} {
 		w.svc.emitCRMEvent(ctx, "user.registered", cid, map[string]any{"source": "otp"})
+	}
+	// The pauses, the unfunded plan and the sign-ups happen on the test's clock.
+	for _, cid := range []primitive.ObjectID{resumed, stays, gaveUp, shops, idle} {
+		crmStampEvents(t, w, cid, t0)
 	}
 	w.svc.crmProcessEventsAt(ctx, t0)
 

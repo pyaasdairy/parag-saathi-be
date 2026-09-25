@@ -6,6 +6,10 @@
 // crmFireTrigger path, re-evaluating the conditions and refusing an event
 // whose order has since been cancelled. Replays are harmless: the row is
 // unique per (trigger, event), and the dispatch claim still applies at fire.
+//
+// The same rows carry a message the quiet hours defer (G5, founder decision
+// 6): one that may not go out when its event is drained, or when its delay
+// elapses, waits until it may (crmSendWindow) and is re-checked then.
 package consumer
 
 import (
@@ -132,8 +136,11 @@ func (s *service) crmFireDueSchedules(ctx context.Context, now time.Time) {
 		}
 		status, reason := s.crmFireSchedule(ctx, row, now)
 		set := bson.D{{Key: "status", Value: status}, {Key: "reason", Value: reason}}
-		if status == "NEW" { // a promotional row outside its window waits for the next opening
-			next, _ := crmPromoWindow(now)
+		if status == "NEW" { // a row that may not go out now waits for the moment it may
+			next := now.Add(time.Hour)
+			if t, ok := crmConfigLoad().Triggers[row.TriggerID]; ok {
+				next, _ = crmSendWindow(t, now)
+			}
 			set = append(set, bson.E{Key: "due_at", Value: next.UTC()})
 		}
 		_, _ = col.UpdateOne(ctx, bson.D{{Key: "_id", Value: row.ID}}, bson.D{{Key: "$set", Value: set}})
@@ -161,6 +168,105 @@ func crmPromoWindow(now time.Time) (next time.Time, inside bool) {
 	return next, false
 }
 
+// crmQuietWindow reports whether now is outside the member quiet hours of G5
+// (windows.service_transactional.avoid, IST: 22:00-07:00, wrapping midnight)
+// and, when it is inside them, when they end.
+func crmQuietWindow(now time.Time) (next time.Time, open bool) {
+	g := crmConfigLoad().Guards
+	ist := now.In(istZone)
+	hm := ist.Format("15:04")
+	quiet := hm >= g.QuietStart && hm < g.QuietEnd
+	if g.QuietStart > g.QuietEnd { // the usual case: the hours wrap midnight
+		quiet = hm >= g.QuietStart || hm < g.QuietEnd
+	}
+	if !quiet {
+		return now, true
+	}
+	end, err := time.ParseInLocation("15:04", g.QuietEnd, istZone)
+	if err != nil {
+		return now.Add(time.Hour), false // unreadable config: look again in an hour
+	}
+	next = time.Date(ist.Year(), ist.Month(), ist.Day(), end.Hour(), end.Minute(), 0, 0, istZone)
+	if hm >= g.QuietEnd { // 22:00-23:59: the hours end tomorrow morning
+		next = next.AddDate(0, 0, 1)
+	}
+	return next, false
+}
+
+// crmAlwaysSends reports a trigger that goes out the moment it is due, day or
+// night (G5 quiet_hours.always_send; founder decision 6, 25 Sep 2026: order,
+// delivery and money-added messages always send). It qualifies by category
+// (transactional, internal), by the trigger's own critical flag, by section
+// (D the order and delivery lifecycle, E a complaint or rating and its
+// answer, FF a Founding Family seat) or by name. A promotional trigger never
+// does: it waits for its own window and the end of the quiet hours.
+func crmAlwaysSends(t crmTrigger) bool {
+	if t.Category == "promotional" {
+		return false
+	}
+	a := crmConfigLoad().Guards.AlwaysSend
+	return a.Categories[t.Category] || (a.Critical && t.Critical) || a.Sections[t.Section] || a.Triggers[t.ID]
+}
+
+// crmSendWindow is when t may go out: (now, true) when it may now, else
+// (the first moment it may, false). An always_send trigger goes at once; any
+// other member message waits out the quiet hours; a promotional one must also
+// be inside the promotional window. Every caller DEFERS on false (the router
+// and the schedule fire re-queue the event, a scheduled sweep tries again on
+// its next run) except the promotional G5 guard, which suppresses and logs.
+func crmSendWindow(t crmTrigger, now time.Time) (time.Time, bool) {
+	if crmAlwaysSends(t) {
+		return now, true
+	}
+	at := now
+	for i := 0; i < 4; i++ { // two windows: settles in at most two moves
+		moved := false
+		if next, open := crmQuietWindow(at); !open {
+			at, moved = next, true
+		}
+		if t.Category == "promotional" {
+			if next, open := crmPromoWindow(at); !open {
+				at, moved = next, true
+			}
+		}
+		if !moved {
+			return at, at.Equal(now)
+		}
+	}
+	return at, false
+}
+
+// crmDueAt is when an event trigger whose conditions hold is sent: now
+// (fireNow), or the moment its crm_schedules row comes due, which is the
+// event time plus its delay, or, for a message that may not go out now
+// (crmSendWindow: the quiet hours, the promotional window), the moment it
+// may. The row is re-checked when it fires, so the wait never sends a message
+// whose event was undone meanwhile.
+func crmDueAt(t crmTrigger, ev crmEvent, now time.Time) (due time.Time, fireNow bool) {
+	if d := crmTriggerDelay(t); d > 0 {
+		return crmDelayBase(ev, now).Add(d), false
+	}
+	if next, open := crmSendWindow(t, now); !open {
+		return next, false
+	}
+	return now, true
+}
+
+// crmScheduledOpen reports whether the scheduled trigger id may go out at
+// now (crmSendWindow). The scheduled sweeps run from 09:00 and reach the
+// quiet hours only when the worker was down until after 22:00; such a run
+// sends nothing that night and the next run decides again (B-01 and W-07
+// re-check every morning; W-06's day-3 nudge gives way to its day-5 one).
+// An unknown id is open: the dispatch itself reports it.
+func crmScheduledOpen(id string, now time.Time) bool {
+	t, ok := crmConfigLoad().Triggers[id]
+	if !ok {
+		return true
+	}
+	_, open := crmSendWindow(t, now)
+	return open
+}
+
 // crmFireSchedule is the fire-time half of a delayed trigger: the same
 // condition evaluation the enqueue ran, plus the stale-event check, then the
 // ordinary dispatch. Returns the schedule row's final status and reason.
@@ -179,11 +285,14 @@ func (s *service) crmFireSchedule(ctx context.Context, row crmSchedule, now time
 	}
 	// A promotional message that comes due outside 10:00-21:00 (E-07, 4 h after
 	// an evening rating) would be suppressed by G5 and lost; it waits for the
-	// window instead, and everything below is re-checked when it opens.
-	if t.Category == "promotional" {
-		if _, inside := crmPromoWindow(now); !inside {
+	// window instead, and everything below is re-checked when it opens. Any
+	// other member message that comes due inside the quiet hours (A-01 two
+	// hours after a 21:00 sign-up) waits for them to end the same way.
+	if _, open := crmSendWindow(t, now); !open {
+		if t.Category == "promotional" {
 			return "NEW", "waiting for the promotional window"
 		}
+		return "NEW", "waiting for the quiet hours to end"
 	}
 	ev := crmEvent{ID: row.EventID, Topic: row.Topic, ConsumerID: row.ConsumerID, Payload: row.Payload}
 	e := &crmEventCtx{s: s, ctx: ctx, ev: ev}

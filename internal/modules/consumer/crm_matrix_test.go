@@ -164,7 +164,8 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 		"A-02": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			cid := member(0)
 			id := stageOrder(cid, "instant", "delivered") // the member's first delivered order is a Quick Pyaas one
-			return cid, map[string]any{"order_id": id, "offer_pack": int32(0), "promotional_only": false, "labelled_product": label}
+			return cid, map[string]any{"order_id": id, "offer_pack": int32(0), "promotional_only": false, "labelled_product": label,
+				"orders_count": int32(1)}
 		}, crmMatrixInbox},
 		"A-03": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			return member(0), map[string]any{"subscription_id": "sub_mx_a03", "product_id": "gold-500ml", "qty": int32(2),
@@ -210,7 +211,8 @@ func TestCRMMatrixEveryLiveTriggerFires(t *testing.T) {
 		}, crmMatrixInbox},
 		"D-06": {func(t *testing.T) (primitive.ObjectID, map[string]any) {
 			cid := member(0)
-			return cid, map[string]any{"order_id": stageOrder(cid, "morning", "delivered"), "offer_pack": int32(0), "promotional_only": false, "labelled_product": label}
+			return cid, map[string]any{"order_id": stageOrder(cid, "morning", "delivered"), "offer_pack": int32(0), "promotional_only": false, "labelled_product": label,
+				"orders_count": int32(1)}
 		}, crmMatrixInbox},
 		// The noon lock skipped tomorrow for want of funds (skipSubPreview).
 		"D-07": {func(t *testing.T) (primitive.ObjectID, map[string]any) {

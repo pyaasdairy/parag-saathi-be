@@ -78,6 +78,9 @@ type crmTrigger struct {
 	// Delay is an ISO-8601 duration ("PT2H") an event trigger waits after
 	// its event before sending (crm_schedule.go); PT0S or absent = now.
 	Delay string `json:"delay"`
+	// Critical marks a message that may not wait (B-02, D-07, E-05, W-03a):
+	// one of the G5 quiet-hours always_send criteria (crmAlwaysSends).
+	Critical bool `json:"critical"`
 }
 
 // crmTemplateRef tolerates the three shapes the Rev3 config actually uses for
@@ -143,10 +146,16 @@ type crmConfig struct {
 	Guards struct {
 		QuietPromoStart string
 		QuietPromoEnd   string
-		PromoPerDay     int
-		PromoPerWeek    int
-		DedupMinutes    int
-		ConsentTTLDays  int // TCCCPR: explicit promo consent expires after N days
+		// QuietStart / QuietEnd are the member quiet hours (G5
+		// windows.service_transactional.avoid, IST, wrapping midnight):
+		// only an AlwaysSend message goes out inside them.
+		QuietStart     string
+		QuietEnd       string
+		AlwaysSend     crmAlwaysSend
+		PromoPerDay    int
+		PromoPerWeek   int
+		DedupMinutes   int
+		ConsentTTLDays int // TCCCPR: explicit promo consent expires after N days
 	}
 	Triggers  map[string]crmTrigger
 	Templates map[string]crmTemplate
@@ -155,6 +164,18 @@ type crmConfig struct {
 	// event or runner does not exist yet, with the reason. Visible in the
 	// config, skipped by the matrix test, never evaluated by the router.
 	AwaitingEvent map[string]string
+}
+
+// crmAlwaysSend is G5 quiet_hours.always_send: what goes out the moment it is
+// due, day or night (founder decision 6, 25 Sep 2026: order, delivery and
+// money added always send). A trigger qualifies by its category, by its
+// section, by name, or by its own critical flag; a promotional trigger never
+// does (crmAlwaysSends).
+type crmAlwaysSend struct {
+	Categories map[string]bool
+	Sections   map[string]bool
+	Triggers   map[string]bool
+	Critical   bool
 }
 
 var (
@@ -198,15 +219,47 @@ func crmConfigParse() {
 	// Guard numbers from config, with the spec's values as the documented
 	// fallback (they are configuration, not law, but never compiled surprises).
 	c.Guards.QuietPromoStart, c.Guards.QuietPromoEnd = "10:00", "21:00"
+	c.Guards.QuietStart, c.Guards.QuietEnd = "22:00", "07:00"
+	c.Guards.AlwaysSend = crmAlwaysSend{
+		Categories: map[string]bool{"transactional": true, "internal": true}, Critical: true,
+	}
 	c.Guards.PromoPerDay, c.Guards.PromoPerWeek, c.Guards.DedupMinutes = 1, 3, 30
 	if g, ok := raw.Guards["G5_quiet_hours"]; ok {
 		var q struct {
 			Windows struct {
-				Promo struct{ Start, End string } `json:"promotional_message"`
+				Promo   struct{ Start, End string } `json:"promotional_message"`
+				Service struct {
+					Avoid struct{ Start, End string } `json:"avoid"`
+				} `json:"service_transactional"`
 			} `json:"windows"`
+			Quiet struct {
+				AlwaysSend *struct {
+					Categories []string `json:"categories"`
+					Critical   bool     `json:"critical"`
+					Sections   []string `json:"sections"`
+					Triggers   []string `json:"triggers"`
+				} `json:"always_send"`
+			} `json:"quiet_hours"`
 		}
-		if json.Unmarshal(g, &q) == nil && q.Windows.Promo.Start != "" {
-			c.Guards.QuietPromoStart, c.Guards.QuietPromoEnd = q.Windows.Promo.Start, q.Windows.Promo.End
+		if json.Unmarshal(g, &q) == nil {
+			if q.Windows.Promo.Start != "" {
+				c.Guards.QuietPromoStart, c.Guards.QuietPromoEnd = q.Windows.Promo.Start, q.Windows.Promo.End
+			}
+			if a := q.Windows.Service.Avoid; crmClockValid(a.Start) && crmClockValid(a.End) {
+				c.Guards.QuietStart, c.Guards.QuietEnd = a.Start, a.End
+			}
+			if a := q.Quiet.AlwaysSend; a != nil {
+				set := func(xs []string) map[string]bool {
+					m := make(map[string]bool, len(xs))
+					for _, x := range xs {
+						m[x] = true
+					}
+					return m
+				}
+				c.Guards.AlwaysSend = crmAlwaysSend{
+					Categories: set(a.Categories), Sections: set(a.Sections), Triggers: set(a.Triggers), Critical: a.Critical,
+				}
+			}
 		}
 	}
 	if g, ok := raw.Guards["G6_frequency_cap"]; ok {
@@ -256,6 +309,13 @@ func crmConfigParse() {
 		c.Offer.Pack2GraceDays = 7
 	}
 	crmCfg = c
+}
+
+// crmClockValid reports an IST wall-clock time the windows can compare as a
+// string: "HH:MM", 00:00 to 23:59.
+func crmClockValid(hm string) bool {
+	_, err := time.Parse("15:04", hm)
+	return err == nil && len(hm) == 5
 }
 
 func crmOfferConfig() crmOffer {
@@ -338,10 +398,12 @@ func (s *service) crmGuardCheckScoped(ctx context.Context, t crmTrigger, consume
 		// G4 — DND scrub applies to SMS/WhatsApp/calls; the in-app inbox is not
 		// a telecom channel, so Phase A passes structurally. Phase B channels
 		// must implement the scrub before sending.
-		// G5 — promotional quiet hours (IST).
+		// G5 — promotional quiet hours (IST): inside the promotional window
+		// and outside the member quiet hours (crmSendWindow). A non-promotional
+		// message is not suppressed here: the router and the scheduler hold it
+		// until it may go out (crm_schedule.go), so it is deferred, not lost.
 		cfg := crmConfigLoad()
-		hm := now.In(istZone).Format("15:04")
-		if hm < cfg.Guards.QuietPromoStart || hm >= cfg.Guards.QuietPromoEnd {
+		if _, open := crmSendWindow(t, now); !open {
 			return "G5_quiet_hours", false
 		}
 		// G6 — promotional frequency caps (all channels combined).
@@ -1013,8 +1075,11 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 			continue // pack 1 not delivered yet — no schedule anchors
 		}
 		// 10:30 block (catch-up: fire any time AFTER 10:30 IST, once per day).
+		// A catch-up that only runs inside the quiet hours (after 22:00) holds
+		// every message that is not always_send (crmScheduledOpen); W-03b is
+		// promotional and its G5 guard records the suppression.
 		if hm >= "10:30" {
-			if day == 0 && o.Pack1State == pack1Delivered {
+			if day == 0 && o.Pack1State == pack1Delivered && crmScheduledOpen("W-03a", now) {
 				if bal, err := s.wallet(ctx, o.ConsumerID); err == nil && bal.Cash == 0 {
 					s.crmDispatchAt(ctx, "W-03a", o.ConsumerID, nil, now)
 				}
@@ -1022,7 +1087,7 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 			if day == 0 && o.Pack2State == pack2Locked && hm >= "10:32" {
 				s.crmDispatchAt(ctx, "W-03b", o.ConsumerID, nil, now) // promotional — guards decide
 			}
-			if (day == 3 || day == 5) && o.Pack2State == pack2Locked {
+			if (day == 3 || day == 5) && o.Pack2State == pack2Locked && crmScheduledOpen("W-06", now) {
 				s.crmDispatchAt(ctx, "W-06", o.ConsumerID, nil, now)
 			}
 			// Expiry fires from the day AFTER the advertised window: W-06 names
@@ -1038,7 +1103,11 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 				// here). A suppressed or unclaimed W-07 leaves the pack locked
 				// and the next day's claim tries again; the recharge unlock is
 				// already closed past the grace day, so nothing is promised
-				// meanwhile that cannot be honoured.
+				// meanwhile that cannot be honoured. Held by the quiet hours, it
+				// is not even claimed: the pack stays locked until the morning.
+				if !crmScheduledOpen("W-07", now) {
+					continue
+				}
 				status, _ := s.crmDispatchAt(ctx, "W-07", o.ConsumerID, nil, now)
 				if status != "SENT" && s.crmCountTriggerSent(ctx, o.ConsumerID, "W-07") == 0 {
 					continue
@@ -1078,7 +1147,9 @@ func (s *service) crmProcessSchedules(ctx context.Context, now time.Time) {
 // per-minute scheduler tick costs one indexed query, not a collection walk.
 func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm string) {
 	day := istDay(now)
-	if hm >= "09:00" {
+	// A sweep the quiet hours hold (a catch-up after 22:00) is not claimed:
+	// the next morning's run decides again (crmScheduledOpen).
+	if hm >= "09:00" && crmScheduledOpen("B-01", now) {
 		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-01-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
 			s.crmSweepWalletCover(ctx, now)
 		}
@@ -1095,7 +1166,7 @@ func (s *service) crmWalletHealthSweep(ctx context.Context, now time.Time, hm st
 	// once no preview for tomorrow is still undecided, or from 13:00 in any
 	// case (one member's lock that keeps failing must not silence B-02 for
 	// everyone).
-	if hm >= "12:00" && s.noonLockRan(ctx, lockedThroughDay(now)) && (hm >= "13:00" || s.noonLockDecided(ctx, now)) {
+	if hm >= "12:00" && crmScheduledOpen("B-02", now) && s.noonLockRan(ctx, lockedThroughDay(now)) && (hm >= "13:00" || s.noonLockDecided(ctx, now)) {
 		if _, won := s.crmClaimDispatch(ctx, crmTrigger{ID: "B-02-SWEEP", Category: "internal"}, primitive.NilObjectID, day); won {
 			s.crmSweepTomorrowShortfall(ctx, now)
 		}

@@ -180,8 +180,41 @@
      "avoid": {
       "start": "22:00",
       "end": "07:00",
-      "unless": "critical"
+      "unless": "quiet_hours.always_send"
      }
+    }
+   },
+   "quiet_hours": {
+    "decision": "Founder decision 6, 25 Sep 2026: quiet hours 10 PM to 7 AM IST. Order, delivery and money-added messages always send; offers and the app's taglines wait for morning.",
+    "window": "windows.service_transactional.avoid (22:00-07:00 IST). Change the hours there and nowhere else.",
+    "rule": "A member message that is not always_send and comes due inside the quiet hours is DEFERRED, never dropped. An event trigger waits in crm_schedules until the hours end and is re-checked then (its conditions, an order cancelled meanwhile, every guard). A scheduled sweep that only reaches its time inside the hours (a worker down until after 22:00) sends nothing that night and its next run decides again. A promotional message must ALSO be inside windows.promotional_message, so it waits for that window's next opening; a promotional trigger is never always_send. Operator alerts (internal) and a manual operator send are not held.",
+    "always_send": {
+     "categories": [
+      "transactional",
+      "internal"
+     ],
+     "critical": true,
+     "sections": [
+      "D",
+      "E",
+      "FF"
+     ],
+     "triggers": [
+      "A-02",
+      "A-03",
+      "W-01",
+      "W-02",
+      "W-04",
+      "W-05",
+      "W-08"
+     ],
+     "why": {
+      "categories": "transactional: money moved or failed to move (B-03, B-06, D-05); internal: operator alerts, not member messages (W-09, W-10)",
+      "critical": "a trigger flagged critical itself may not wait (B-02, D-07, E-05, W-03a)",
+      "sections": "D: the order and delivery lifecycle; E: a complaint or rating the member just made, and its answer; FF: a Rs 99 Founding Family seat held, unlocked, price on",
+      "triggers": "A-02 first Quick Pyaas order delivered; A-03 the member's own plan confirmed; W-01 the member's own Welcome Litre enrolment confirmed; W-02 and W-05 free pack delivered; W-04 recharge received; W-08 the answer to the member's own address check"
+     },
+     "deferred": "Every other member trigger waits for 07:00: live today A-01, A-05, B-01, C-03, W-06, W-07, and the promotional E-07 and W-03b for their own window. A trigger added later is deferred unless it is listed here, carries critical, or has a listed category or section."
     }
    },
    "note": "TRAI prohibits commercial calls 21:00–09:00. The windows above are deliberately tighter than the regulation. Do not widen them without a written decision.",
@@ -664,12 +697,14 @@
    },
    "template": "T-A02",
    "frequency_cap": {
-    "per_order": 1
+    "per_order": 1,
+    "per_customer": 1
    },
    "success_metric": "second_order_rate_14d",
    "corrections": [
     "C-01"
-   ]
+   ],
+   "note": "Founder decision 7 (25 Sep 2026). orders_count is the member's delivered orders as of THIS delivery, the snapshot the order.delivered event carries: read when the worker drained the event, two first orders delivered inside one tick both saw 2 and neither was thanked. The first delivery (by delivery time) is thanked; per_customer 1 keeps it to one thank-you ever, also when two deliveries race."
   },
   {
    "id": "A-03",
