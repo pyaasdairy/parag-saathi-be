@@ -390,12 +390,12 @@ func (s *service) autopayStartTopup(ctx context.Context, m *mandate, amountPaise
 		"notes": map[string]string{"mandate_id": m.MandateID, "autopay_ref": ref, "purpose": "autopay_topup"},
 	}, &ord)
 	if err != nil || ord.ID == "" {
-		refused := status >= 400 && status < 500
-		s.autopayFail(ctx, t, "the AutoPay order was not created", refused, now)
-		s.log.WarnContext(ctx, "autopay: order not created", "mandate", m.MandateID, "status", status, "err", err)
-		if refused {
-			return t, errAutopayRefused
-		}
+		// Nothing reached the bank (a bad key, a gateway config error, the
+		// gateway down): our failure, not a refusal. It is not counted toward
+		// the pause, holds no day and messages no member; only a refused
+		// recurring charge or a payment.failed does.
+		s.autopayFail(ctx, t, "the AutoPay order was not created", false, now)
+		s.log.WarnContext(ctx, "autopay: order not created (our side, not a bank refusal)", "mandate", m.MandateID, "status", status, "err", err)
 		return t, errAutopayGateway
 	}
 	t.RzpOrderID = ord.ID

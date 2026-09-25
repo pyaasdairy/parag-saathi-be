@@ -14,6 +14,8 @@ package consumer
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -490,5 +492,48 @@ func TestAutopayPolicy(t *testing.T) {
 	zero := 0.0
 	if got, err := w.svc.setMandatePolicy(ctx, cid, m.MandateID, &zero, nil); err != nil || got.Threshold != autopayDefaultThreshold {
 		t.Fatalf("threshold 0 = the default: %+v %v", got, err)
+	}
+}
+
+// RV-AP-09: a failed POST /orders (a bad key, a gateway config error) never
+// reached the bank. It is our failure: not counted toward the three-refusal
+// pause, no day hold, no "AutoPay couldn't add" message; the member's own
+// top up now answers 502 AUTOPAY_GATEWAY, not a bank refusal.
+func TestAutopayOrderCreateFailureIsOursNotARefusal(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	liveRzp(t, w)
+	bad := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.WriteHeader(http.StatusUnauthorized)
+		_, _ = rw.Write([]byte(`{"error":{"description":"The api key provided is invalid"}}`))
+	}))
+	defer bad.Close()
+	w.svc.rzpBase = bad.URL + "/v1"
+	cid := w.customer(t, "9000013071", 10)
+	m := armedMandate(t, w, cid, "mnd_badkey", 500, 2000, 200)
+	day := istDayAt("2026-10-05", 9, 0)
+	for i := 0; i < 4; i++ {
+		if n := w.svc.sweepAutopay(ctx, day.Add(time.Duration(i)*15*time.Minute)); n != 0 {
+			t.Fatalf("a charge whose order failed counted as started")
+		}
+	}
+	mm, _ := w.svc.repo.findMandate(ctx, m.MandateID, cid)
+	if mm.TopupFailures != 0 || mm.LastFailureDay != "" {
+		t.Fatalf("an order failure counted as a bank refusal: %+v", mm)
+	}
+	if evs := crmEventsOf(t, w.db, cid, "payment.failed"); len(evs) != 0 {
+		t.Fatalf("the member was told AutoPay failed for our own order failure: %+v", evs)
+	}
+	// Bounded: at most autopayMaxPerDay automatic tries a day.
+	if tps := topupsOf(t, w, m.MandateID); len(tps) != autopayMaxPerDay || tps[0].Status != "failed" || tps[0].Open {
+		t.Fatalf("order-failure rows: %+v", tps)
+	}
+	var ae *apiError
+	if _, err := w.svc.autopayTopupNow(ctx, cid, m.MandateID, 300, "app-badkey", day); !errors.As(err, &ae) || ae.Code != "AUTOPAY_GATEWAY" {
+		t.Fatalf("top up now on an order failure: %v", err)
+	}
+	if mm, _ = w.svc.repo.findMandate(ctx, m.MandateID, cid); mm.TopupFailures != 0 {
+		t.Fatalf("top up now's order failure counted: %+v", mm)
 	}
 }
