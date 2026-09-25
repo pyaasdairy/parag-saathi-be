@@ -253,6 +253,11 @@ func (s *service) creditCapturedPaymentToken(ctx context.Context, orderID, payme
 			"order", orderID, "gateway_paise", gatewayAmountPaise, "our_paise", ord.AmountPaise, "via", via)
 		return false, nil
 	}
+	if ord.Erased {
+		// The account was erased while this AutoPay payment was in flight:
+		// there is no wallet to credit, so the money goes back to the bank.
+		return false, s.autopayRefundErased(ctx, ord, paymentID)
+	}
 	if ord.Status == "PAID" {
 		// Fast path only. The ledger gate below is still the authority: a row
 		// marked PAID whose credit failed mid-flight is repaired by the sweep

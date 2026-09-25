@@ -450,6 +450,11 @@ func (s *service) updateMe(ctx context.Context, consumerID primitive.ObjectID, p
 
 func (s *service) erase(ctx context.Context, consumerID primitive.ObjectID) error {
 	s.autopayCancelForErasure(ctx, consumerID) // the bank tokens, best effort
+	// An AutoPay charge the bank may still complete keeps its payment order,
+	// with no owner, so a late capture is refunded rather than lost.
+	if err := s.autopayKeepForErasure(ctx, consumerID); err != nil {
+		return err
+	}
 	return s.repo.deleteAccountCascade(ctx, consumerID)
 }
 

@@ -38,6 +38,8 @@ type fakeRzp struct {
 	cancelled []string
 	// tokenLookups counts GET customers/{id}/tokens.
 	tokenLookups int
+	// refunds: payments a POST /payments/{id}/refund reached.
+	refunds []string
 }
 
 func newFakeRzp(t *testing.T) *fakeRzp {
@@ -81,6 +83,10 @@ func (f *fakeRzp) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.n++
 		write(map[string]any{"razorpay_payment_id": fmt.Sprintf("pay_rec_%d", f.n)})
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/payments/") && strings.HasSuffix(path, "/refund"):
+		f.refunds = append(f.refunds, strings.TrimSuffix(strings.TrimPrefix(path, "/payments/"), "/refund"))
+		f.n++
+		write(map[string]any{"id": fmt.Sprintf("rfnd_%d", f.n), "status": "processed"})
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/payments/"):
 		write(map[string]any{"token_id": f.paymentTokens[strings.TrimPrefix(path, "/payments/")]})
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/customers/") && strings.HasSuffix(path, "/tokens"):

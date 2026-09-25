@@ -649,3 +649,78 @@ func TestAutopaySmartRechargeOnTellsTheApp(t *testing.T) {
 		t.Fatalf("smart_recharge_on was stored: %v", raw)
 	}
 }
+
+// RV-AP-10: an account erased while an AutoPay charge is in flight. The bank
+// may still execute the already-notified debit (the token cancel is
+// asynchronous there). The charge's payment order is kept with no owner, and
+// the capture (webhook or reconcile sweep, whichever lands, however often) is
+// refunded at the gateway once and never credited.
+func TestAutopayCaptureAfterErasureIsRefunded(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	f := liveRzp(t, w)
+	at := istDayAt("2026-10-05", 10, 0)
+
+	// Webhook path.
+	a := w.customer(t, "9000013101", 0)
+	ma := armedMandate(t, w, a, "mnd_erased_wh", 500, 500, 200)
+	ta, err := w.svc.autopayTopupNow(ctx, a, ma.MandateID, 500, "erase-a", at)
+	if err != nil {
+		t.Fatalf("start a: %v", err)
+	}
+	// Another member's charge in flight is left alone by a's erasure.
+	keep := w.customer(t, "9000013103", 0)
+	mk := armedMandate(t, w, keep, "mnd_kept", 300, 500, 200)
+	tk, err := w.svc.autopayTopupNow(ctx, keep, mk.MandateID, 300, "keep", at)
+	if err != nil {
+		t.Fatalf("start keep: %v", err)
+	}
+	if err := w.svc.erase(ctx, a); err != nil {
+		t.Fatalf("erase a: %v", err)
+	}
+	po, err := w.svc.repo.findPaymentOrderByID(ctx, ta.RzpOrderID)
+	if err != nil || !po.Erased || !po.ConsumerID.IsZero() || po.Status != "CREATED" {
+		t.Fatalf("the in-flight charge's order must be kept with no owner: %+v %v", po, err)
+	}
+	if n, _ := w.db.Collection(collPayOrders).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: a}}); n != 0 {
+		t.Fatalf("the erased member still owns %d payment orders", n)
+	}
+	for i := 0; i < 2; i++ {
+		if err := w.svc.razorpayWebhookEvent(ctx, rzpPaymentEvent("payment.captured", ta.RzpOrderID, ta.RzpPaymentID, 50000, ma.Token, "")); err != nil {
+			t.Fatalf("webhook: %v", err)
+		}
+	}
+	f.captured[ta.RzpOrderID] = ta.RzpPaymentID
+	w.svc.reconcilePendingPaymentsAt(ctx, at.Add(time.Hour), f.base())
+	if len(f.refunds) != 1 || f.refunds[0] != ta.RzpPaymentID {
+		t.Fatalf("the capture after erasure must be refunded once: %v", f.refunds)
+	}
+	if po, _ = w.svc.repo.findPaymentOrderByID(ctx, ta.RzpOrderID); po.Status != "REFUNDED" {
+		t.Fatalf("refunded order: %+v", po)
+	}
+	if n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "ref_id", Value: ta.RzpOrderID}}); n != 0 {
+		t.Fatalf("a capture on an erased account was credited: %d rows", n)
+	}
+	if po, _ := w.svc.repo.findPaymentOrderByID(ctx, tk.RzpOrderID); po.Erased || po.ConsumerID != keep {
+		t.Fatalf("another member's order was touched: %+v", po)
+	}
+
+	// Reconcile sweep only.
+	b := w.customer(t, "9000013102", 0)
+	mb := armedMandate(t, w, b, "mnd_erased_sw", 400, 500, 200)
+	tb, err := w.svc.autopayTopupNow(ctx, b, mb.MandateID, 400, "erase-b", at)
+	if err != nil {
+		t.Fatalf("start b: %v", err)
+	}
+	if err := w.svc.erase(ctx, b); err != nil {
+		t.Fatalf("erase b: %v", err)
+	}
+	f.captured[tb.RzpOrderID] = tb.RzpPaymentID
+	for i := 0; i < 2; i++ {
+		w.svc.reconcilePendingPaymentsAt(ctx, at.Add(time.Hour), f.base())
+	}
+	if len(f.refunds) != 2 || f.refunds[1] != tb.RzpPaymentID {
+		t.Fatalf("a swept capture after erasure must be refunded once: %v", f.refunds)
+	}
+}

@@ -902,6 +902,68 @@ func (s *service) setMandatePolicy(ctx context.Context, consumerID primitive.Obj
 	return &out, nil
 }
 
+// autopayKeepForErasure runs before an account's erasure cascade. An
+// AutoPay payment the bank may still complete (a charge in flight, whose
+// token cancel is asynchronous at the bank and whose debit was already
+// notified, or a registration not yet paid) keeps its payment order,
+// pseudonymised: no owner, marked erased. A capture that lands on it
+// afterwards is then refunded at the gateway (autopayRefundErased) instead
+// of being ignored as an unknown order with the member's money gone and no
+// record. An error stops the erasure (retryable), so no charge is lost.
+func (s *service) autopayKeepForErasure(ctx context.Context, consumerID primitive.ObjectID) error {
+	if _, err := s.repo.payOrders.UpdateMany(ctx,
+		bson.D{{Key: "consumer_id", Value: consumerID}, {Key: "purpose", Value: "autopay"}, {Key: "status", Value: "CREATED"}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "consumer_id", Value: primitive.NilObjectID}, {Key: "erased", Value: true}}}},
+	); err != nil {
+		return errInternal("erasure failed")
+	}
+	return nil
+}
+
+// autopayRefundErased returns a payment captured on an erased account's
+// kept AutoPay order to the member's bank (POST /payments/{id}/refund, the
+// full amount). The order is claimed CREATED -> REFUNDING first, so the
+// webhook and the reconcile sweep refund it once; a gateway that did not
+// answer releases the claim and the error makes the webhook retry (the
+// sweep tries again too); a refusal leaves it REFUND_FAILED and logged for
+// ops. Nothing is ever credited.
+func (s *service) autopayRefundErased(ctx context.Context, ord *paymentOrder, paymentID string) error {
+	if paymentID == "" || s.rzpKeySecret == "" {
+		return nil
+	}
+	res, err := s.repo.payOrders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: ord.OrderID}, {Key: "status", Value: "CREATED"}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "REFUNDING"}, {Key: "payment_id", Value: paymentID}}}})
+	if err != nil {
+		return errInternal("payment order update failed")
+	}
+	if res.ModifiedCount == 0 {
+		return nil // refunded, or being refunded, already
+	}
+	status, rerr := s.rzpCall(ctx, http.MethodPost, "/payments/"+url.PathEscape(paymentID)+"/refund", map[string]any{
+		"amount": ord.AmountPaise, "speed": "normal",
+		"notes": map[string]string{"reason": "account_erased", "order_id": ord.OrderID},
+	}, nil)
+	next := "REFUNDED"
+	switch {
+	case rerr == nil:
+		s.log.InfoContext(ctx, "autopay: a capture on an erased account was refunded", "order", ord.OrderID, "payment", paymentID)
+	case status == 0 || status >= 500:
+		_, _ = s.repo.payOrders.UpdateOne(ctx,
+			bson.D{{Key: "order_id", Value: ord.OrderID}, {Key: "status", Value: "REFUNDING"}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "CREATED"}}}})
+		return errInternal("the refund was not confirmed by the gateway")
+	default:
+		next = "REFUND_FAILED"
+		s.log.ErrorContext(ctx, "autopay: the refund of a capture on an erased account was refused; ops must return it",
+			"order", ord.OrderID, "payment", paymentID, "status", status, "err", rerr)
+	}
+	_, _ = s.repo.payOrders.UpdateOne(ctx,
+		bson.D{{Key: "order_id", Value: ord.OrderID}, {Key: "status", Value: "REFUNDING"}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: next}}}})
+	return nil
+}
+
 // autopayCancelForErasure cancels every live mandate of an account being
 // erased, at the gateway too (best effort): nothing may charge an erased
 // account. The rows themselves are cancelled by the erasure cascade.

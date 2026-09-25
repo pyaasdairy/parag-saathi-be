@@ -246,8 +246,12 @@ type paymentOrder struct {
 	// an order-pay order. Empty is treated as "topup" (backward compat).
 	Purpose   string     `bson:"purpose,omitempty"` // topup | autopay (AutoPay registration + Smart Recharge charges) | order
 	RefID     string     `bson:"ref_id,omitempty"`  // linked consumer order id when purpose=order
-	Status    string     `bson:"status"`            // CREATED | PAID
-	PaymentID string     `bson:"payment_id,omitempty"`
+	Status    string `bson:"status"`            // CREATED | PAID (an erased account's AutoPay order: REFUNDING | REFUNDED | REFUND_FAILED)
+	PaymentID string `bson:"payment_id,omitempty"`
+	// Erased marks an AutoPay order kept, with no owner, when its account was
+	// erased while the bank could still complete it (autopayKeepForErasure):
+	// a capture on it is refunded, never credited.
+	Erased    bool       `bson:"erased,omitempty"`
 	CreatedAt time.Time  `bson:"created_at"`
 	PaidAt    *time.Time `bson:"paid_at,omitempty"`
 }
