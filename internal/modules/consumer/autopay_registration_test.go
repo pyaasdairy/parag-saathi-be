@@ -251,6 +251,97 @@ func TestAutopayRegistrationCapturedWithoutVerifyGoesLive(t *testing.T) {
 	}
 }
 
+// RV-AP-02: a PYAAS mandate PYAAS will never charge is never left live in
+// the member's UPI app. A superseded pending mandate that holds a bank token
+// has it cancelled at the gateway; a registration captured after its
+// mandate was superseded or cancelled by the member records the token and
+// cancels it at once (once, whatever repeats), and its money still lands in
+// the wallet once.
+func TestAutopayRegistrationCancelledMandateTokenIsCancelled(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	f := liveRzp(t, w)
+
+	// Superseded while holding a token.
+	a := w.customer(t, "9000011021", 0)
+	first, err := w.svc.createMandate(ctx, a, "daily", 300, 1000, 0)
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	if _, err := w.db.Collection(collMandates).UpdateOne(ctx, bson.D{{Key: "mandate_id", Value: first.ID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "token", Value: "token_sup_a"}}}}); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if _, err := w.svc.createMandate(ctx, a, "daily", 300, 1000, 0); err != nil {
+		t.Fatalf("second create a: %v", err)
+	}
+	if old, _ := w.svc.repo.findMandate(ctx, first.ID, a); old.Status != "cancelled" || old.CancelReason != "superseded" {
+		t.Fatalf("superseded: %+v", old)
+	}
+	if len(f.cancelled) != 1 || f.cancelled[0] != "token_sup_a" {
+		t.Fatalf("a superseded mandate's bank token must be cancelled: %v", f.cancelled)
+	}
+
+	// Superseded before its token was known; the old registration is
+	// captured later.
+	b := w.customer(t, "9000011022", 0)
+	oldB, err := w.svc.createMandate(ctx, b, "daily", 200, 1000, 0)
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	newB, err := w.svc.createMandate(ctx, b, "daily", 200, 1000, 0)
+	if err != nil {
+		t.Fatalf("second create b: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := w.svc.razorpayWebhookEvent(ctx, rzpPaymentEvent("payment.captured", oldB.OrderID, "pay_late_b", 20000, "token_late_b", "")); err != nil {
+			t.Fatalf("late capture: %v", err)
+		}
+	}
+	gb, _ := w.svc.repo.findMandate(ctx, oldB.ID, b)
+	if gb.Status != "cancelled" || gb.Token != "token_late_b" {
+		t.Fatalf("a superseded mandate captured late: %+v", gb)
+	}
+	if nb, _ := w.svc.repo.findMandate(ctx, newB.ID, b); nb.Status != "pending" {
+		t.Fatalf("the newer registration must be left alone: %+v", nb)
+	}
+	if got := w.cash(t, b); got != 200 {
+		t.Fatalf("late registration credit %v, want 200", got)
+	}
+	if len(f.cancelled) != 2 || f.cancelled[1] != "token_late_b" {
+		t.Fatalf("a late-captured superseded registration must cancel its token once: %v", f.cancelled)
+	}
+
+	// Cancelled by the member before its token was known.
+	c := w.customer(t, "9000011023", 0)
+	vc, err := w.svc.createMandate(ctx, c, "daily", 200, 1000, 0)
+	if err != nil {
+		t.Fatalf("create c: %v", err)
+	}
+	if _, err := w.svc.setMandateStatus(ctx, c, vc.ID, "cancel"); err != nil {
+		t.Fatalf("cancel pending: %v", err)
+	}
+	if len(f.cancelled) != 2 {
+		t.Fatalf("no token yet, nothing to cancel: %v", f.cancelled)
+	}
+	f.captured[vc.OrderID] = "pay_late_c"
+	f.paymentTokens["pay_late_c"] = "token_late_c"
+	for i := 0; i < 2; i++ {
+		w.svc.reconcilePendingPaymentsAt(ctx, time.Now().Add(time.Hour), f.base())
+	}
+	gc, _ := w.svc.repo.findMandate(ctx, vc.ID, c)
+	if gc.Status != "cancelled" || gc.Token != "token_late_c" {
+		t.Fatalf("a member-cancelled mandate captured late: %+v", gc)
+	}
+	if len(f.cancelled) != 3 || f.cancelled[2] != "token_late_c" {
+		t.Fatalf("a late-captured cancelled registration must cancel its token once: %v", f.cancelled)
+	}
+	if got := w.cash(t, c); got != 200 {
+		t.Fatalf("late registration credit %v, want 200", got)
+	}
+}
+
 // The offline dev seam (no key secret, OTP dev mode): the demo approval
 // activates without moving money; only a payment signed with the dev
 // secret is credited, once. Nothing reaches a gateway.

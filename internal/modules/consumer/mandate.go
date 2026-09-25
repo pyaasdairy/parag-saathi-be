@@ -440,10 +440,18 @@ func (s *service) createMandate(ctx context.Context, consumerID primitive.Object
 		return mandateOrderView{}, err
 	}
 	// A pending mandate the member never approved is superseded by this one.
+	// One whose registration already reached the bank (it holds a token) is
+	// cancelled at the gateway too, so no PYAAS mandate stays live in the
+	// member's UPI app that PYAAS will neither charge nor revoke. (A
+	// registration captured after this is cancelled by
+	// autopayRegistrationCaptured.)
 	for i := range existing {
 		if existing[i].Status == "pending" {
-			_, _ = s.repo.transitionMandate(ctx, existing[i].MandateID, consumerID, "pending", "cancelled",
+			old, err := s.repo.transitionMandate(ctx, existing[i].MandateID, consumerID, "pending", "cancelled",
 				bson.D{{Key: "cancel_reason", Value: "superseded"}})
+			if err == nil && old.Token != "" {
+				s.rzpCancelToken(ctx, old)
+			}
 		}
 	}
 	return mandateOrderView{
@@ -514,6 +522,10 @@ const autopayRegRefPrefix = "autopay:reg:"
 //     /payments/{id}), guarded on pending. A member whose app never came back
 //     from the UPI app is no longer left "waiting for approval" with a live
 //     bank mandate and their money taken;
+//   - a mandate CANCELLED here meanwhile (superseded by a newer
+//     registration, or cancelled by the member before its token was known)
+//     records the token and has it cancelled at the gateway at once, by the
+//     one call that records it;
 //   - any other mandate that holds no token yet records it (once).
 //
 // A Smart Recharge charge's order is not a registration and is left alone.
@@ -565,10 +577,17 @@ func (s *service) autopayRegistrationCaptured(ctx context.Context, ord *paymentO
 	if tokenID == "" {
 		return nil
 	}
-	if _, err := s.repo.mandates.UpdateOne(ctx,
+	res, err := s.repo.mandates.UpdateOne(ctx,
 		bson.D{{Key: "mandate_id", Value: m.MandateID}, {Key: "token", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "token", Value: tokenID}, {Key: "updated_at", Value: now}}}}); err != nil {
+		bson.D{{Key: "$set", Value: bson.D{{Key: "token", Value: tokenID}, {Key: "updated_at", Value: now}}}})
+	if err != nil {
 		return errInternal("mandate update failed")
+	}
+	if res.ModifiedCount == 1 && m.Status == "cancelled" {
+		m.Token = tokenID
+		s.log.InfoContext(ctx, "autopay: a cancelled mandate's registration reached the bank; cancelling its token",
+			"mandate", m.MandateID, "cancel_reason", m.CancelReason)
+		s.rzpCancelToken(ctx, m)
 	}
 	return nil
 }
