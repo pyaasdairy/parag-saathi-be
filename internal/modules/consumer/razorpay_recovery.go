@@ -49,6 +49,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 const (
@@ -105,6 +107,9 @@ type rzpWebhookEnvelope struct {
 				// ErrorDescription is Razorpay's customer-facing failure text
 				// on payment.failed (unused by the credit path).
 				ErrorDescription string `json:"error_description"`
+				// TokenID is the recurring token an AutoPay registration
+				// payment created (and a recurring charge used).
+				TokenID string `json:"token_id"`
 			} `json:"entity"`
 		} `json:"payment"`
 	} `json:"payload"`
@@ -142,6 +147,11 @@ func (s *service) razorpayWebhookEvent(ctx context.Context, raw []byte) error {
 	credited, err := s.creditCapturedPayment(ctx, p.OrderID, p.ID, p.Amount, "webhook")
 	if err != nil {
 		return err // transient — let Razorpay retry
+	}
+	if p.TokenID != "" {
+		// An AutoPay registration payment names the bank token it created:
+		// the mandate learns it here when verify could not read it.
+		s.autopayNoteRegistrationToken(ctx, p.OrderID, p.TokenID)
 	}
 	if credited {
 		s.log.Info("razorpay webhook: recovered a payment the app never confirmed",
@@ -203,8 +213,10 @@ func (s *service) crmPaymentFailed(ctx context.Context, orderID, paymentID, reas
 //   - the AMOUNT credited is the amount we bound at order creation, never the
 //     payload's (a disagreement is refused and logged — it should be impossible,
 //     because a Razorpay order is amount-bound, so it means something is wrong);
-//   - only a "topup" order may credit the wallet; an order-pay row is settled by
-//     the order flow and must never mint wallet money here.
+//   - only a "topup" or an "autopay" order (the AutoPay registration payment
+//     and every Smart Recharge charge, mandate.go / autopay.go) may credit the
+//     wallet; an order-pay row is settled by the order flow and must never
+//     mint wallet money here.
 //
 // Reports whether THIS call performed the credit (false = already credited, or
 // deliberately ignored). An error is transient only.
@@ -213,7 +225,7 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 	if err != nil {
 		return false, nil // unknown to us: nothing to credit, never retryable
 	}
-	if ord.Purpose != "" && ord.Purpose != "topup" {
+	if !walletFundingPurpose(ord.Purpose) {
 		return false, nil // an order payment — the order flow owns its settlement
 	}
 	if gatewayAmountPaise > 0 && gatewayAmountPaise != ord.AmountPaise {
@@ -236,7 +248,11 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 	if err != nil {
 		return false, err
 	}
-	after, err := s.creditTopup(ctx, ord.ConsumerID, amount, "razorpay", orderID)
+	method := "razorpay"
+	if ord.Purpose == "autopay" {
+		method = "autopay" // the ledger row and the "money added" reason say AutoPay
+	}
+	after, err := s.creditTopup(ctx, ord.ConsumerID, amount, method, orderID)
 	if err != nil {
 		return false, err // transient — the caller retries
 	}
@@ -245,6 +261,25 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 	// A balance that did not move means the ledger gate saw this order before;
 	// that is a successful no-op, not a new credit.
 	return after.CashBalance > before.CashBalance, nil
+}
+
+// walletFundingPurpose reports a payment order whose capture is WALLET
+// money: a checkout top-up ("topup", or "" on a row from before purposes
+// existed) and an AutoPay payment ("autopay"). An order payment is not.
+func walletFundingPurpose(purpose string) bool {
+	return purpose == "" || purpose == "topup" || purpose == "autopay"
+}
+
+// autopayNoteRegistrationToken records the bank token an AutoPay
+// registration payment created on the mandate that registration belongs to,
+// once (a mandate that already holds a token keeps it).
+func (s *service) autopayNoteRegistrationToken(ctx context.Context, regOrderID, tokenID string) {
+	if regOrderID == "" || tokenID == "" {
+		return
+	}
+	_, _ = s.repo.mandates.UpdateOne(ctx,
+		bson.D{{Key: "reg_order_id", Value: regOrderID}, {Key: "token", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "token", Value: tokenID}, {Key: "updated_at", Value: time.Now().UTC()}}}})
 }
 
 // ── Reconciliation sweep ───────────────────────────────────────────────────

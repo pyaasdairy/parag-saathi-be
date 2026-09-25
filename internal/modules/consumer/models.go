@@ -244,7 +244,7 @@ type paymentOrder struct {
 	// Purpose separates wallet top-ups from direct order payments so the
 	// wallet/verify credit path can NEVER be tricked into crediting the wallet for
 	// an order-pay order. Empty is treated as "topup" (backward compat).
-	Purpose   string     `bson:"purpose,omitempty"` // topup | order
+	Purpose   string     `bson:"purpose,omitempty"` // topup | autopay (AutoPay registration + Smart Recharge charges) | order
 	RefID     string     `bson:"ref_id,omitempty"`  // linked consumer order id when purpose=order
 	Status    string     `bson:"status"`            // CREATED | PAID
 	PaymentID string     `bson:"payment_id,omitempty"`

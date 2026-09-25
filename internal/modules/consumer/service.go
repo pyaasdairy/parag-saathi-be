@@ -610,9 +610,13 @@ func (s *service) creditTopup(ctx context.Context, consumerID primitive.ObjectID
 		"amount": amount, "method": method, "ref": ref,
 	})
 	// wallet.credited (B-06, the top-up receipt): one per ledger ref, the
-	// refundable account, worded as a recharge.
+	// refundable account, worded as a recharge (an AutoPay one says so).
+	reason := "recharge"
+	if method == "autopay" {
+		reason = "AutoPay recharge"
+	}
 	s.emitCRMEvent(ctx, "wallet.credited", consumerID, map[string]any{
-		"amount": amount, "account": "topup", "reason": "recharge", "ref": ref, "scope_key": ref,
+		"amount": amount, "account": "topup", "reason": reason, "ref": ref, "scope_key": ref,
 	})
 	if bonus > 0 {
 		_, _ = s.repo.insertWalletTxnGate(ctx, walletTxn{
