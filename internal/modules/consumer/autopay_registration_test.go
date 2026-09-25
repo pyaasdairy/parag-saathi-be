@@ -126,8 +126,10 @@ func TestAutopayRegistrationWebhookBeforeVerify(t *testing.T) {
 	if got := w.cash(t, cid); got != 300 {
 		t.Fatalf("webhook credit %v, want 300", got)
 	}
+	// The bank mandate exists: the captured registration puts it live with
+	// its token, verify or not (RV-AP-01).
 	m, _ := w.svc.repo.findMandate(ctx, view.ID, cid)
-	if m.Status != "pending" || m.Token != "token_reg_2" || m.Threshold != autopayDefaultThreshold {
+	if m.Status != "active" || m.Token != "token_reg_2" || m.PaymentID != "pay_reg_2" || m.Threshold != autopayDefaultThreshold {
 		t.Fatalf("mandate after the webhook: %+v", m)
 	}
 	m, err = w.svc.verifyMandate(ctx, cid, view.ID, "pay_reg_2", rzpTestSignature("rzp_test_secret", view.OrderID, "pay_reg_2"), "")
@@ -158,6 +160,94 @@ func TestAutopayRegistrationWebhookBeforeVerify(t *testing.T) {
 	}
 	if got := w.cash(t, b); got != 250 {
 		t.Fatalf("swept registration credit %v, want 250", got)
+	}
+}
+
+// RV-AP-01: the member approved in the UPI app but the app never came back
+// (process death, a checkout timeout, a lost network call). The webhook
+// alone, or the reconcile sweep alone, credits the registration once and
+// puts the mandate ACTIVE with its bank token; once the bank confirms the
+// token, Smart Recharge charges it.
+func TestAutopayRegistrationCapturedWithoutVerifyGoesLive(t *testing.T) {
+	t.Setenv("MANDATE_AUTODEBIT", "true")
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	f := liveRzp(t, w)
+	day := istDayAt("2026-10-05", 9, 0)
+
+	// Webhook only.
+	a := w.customer(t, "9000011011", 0)
+	va, err := w.svc.createMandate(ctx, a, "daily", 300, 1000, 500)
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := w.svc.razorpayWebhookEvent(ctx, rzpPaymentEvent("payment.captured", va.OrderID, "pay_wh_a", 30000, "token_wh_a", "")); err != nil {
+			t.Fatalf("webhook: %v", err)
+		}
+	}
+	ma, _ := w.svc.repo.findMandate(ctx, va.ID, a)
+	if ma.Status != "active" || ma.Token != "token_wh_a" || ma.PaymentID != "pay_wh_a" {
+		t.Fatalf("webhook-only registration: %+v", ma)
+	}
+	if got := w.cash(t, a); got != 300 {
+		t.Fatalf("webhook-only registration credit %v, want 300", got)
+	}
+	// Not charged before the bank confirms the token.
+	f.tokenStatus["token_wh_a"] = "initiated"
+	if n := w.svc.sweepAutopay(ctx, day); n != 0 {
+		t.Fatalf("charged an unconfirmed token")
+	}
+	if err := w.svc.razorpayWebhookEvent(ctx, rzpTokenEvent("token.confirmed", "token_wh_a", "confirmed")); err != nil {
+		t.Fatalf("token webhook: %v", err)
+	}
+	// ₹300 is under the ₹500 line: Smart Recharge charges the new mandate.
+	if n := w.svc.sweepAutopay(ctx, day.Add(15*time.Minute)); n != 1 {
+		t.Fatalf("a webhook-only registration was not charged once confirmed")
+	}
+	if calls := f.recurringCalls(); len(calls) != 1 || calls[0]["token"] != "token_wh_a" {
+		t.Fatalf("recurring charge on the webhook-only mandate: %v", calls)
+	}
+
+	// Reconcile sweep only: no webhook, no verify; the token comes from GET
+	// /payments/{id}.
+	b := w.customer(t, "9000011012", 0)
+	vb, err := w.svc.createMandate(ctx, b, "daily", 250, 1000, 400)
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	f.captured[vb.OrderID] = "pay_sw_b"
+	f.paymentTokens["pay_sw_b"] = "token_sw_b"
+	for i := 0; i < 2; i++ {
+		w.svc.reconcilePendingPaymentsAt(ctx, time.Now().Add(time.Hour), f.base())
+	}
+	mb, _ := w.svc.repo.findMandate(ctx, vb.ID, b)
+	if mb.Status != "active" || mb.Token != "token_sw_b" || mb.PaymentID != "pay_sw_b" {
+		t.Fatalf("sweep-only registration: %+v", mb)
+	}
+	if got := w.cash(t, b); got != 250 {
+		t.Fatalf("sweep-only registration credit %v, want 250", got)
+	}
+	n, _ := w.db.Collection(collWalletTxns).CountDocuments(ctx, bson.D{{Key: "consumer_id", Value: b}, {Key: "ref_id", Value: vb.OrderID}})
+	if n != 1 {
+		t.Fatalf("sweep-only registration ledger rows: %d", n)
+	}
+	f.tokenStatus["token_sw_b"] = "confirmed"
+	before := len(f.recurringCalls())
+	if n := w.svc.sweepAutopay(ctx, day.Add(2*time.Hour)); n != 1 {
+		t.Fatalf("a sweep-only registration was not charged once confirmed")
+	}
+	if calls := f.recurringCalls(); len(calls) != before+1 || calls[len(calls)-1]["token"] != "token_sw_b" {
+		t.Fatalf("recurring charge on the sweep-only mandate: %v", calls)
+	}
+	// A verify that arrives late answers the active mandate, credits nothing.
+	got, err := w.svc.verifyMandate(ctx, b, vb.ID, "pay_sw_b", rzpTestSignature("rzp_test_secret", vb.OrderID, "pay_sw_b"), "")
+	if err != nil || got.Status != "active" {
+		t.Fatalf("late verify: %+v %v", got, err)
+	}
+	if got := w.cash(t, b); got != 250 {
+		t.Fatalf("late verify double-credited: %v", got)
 	}
 }
 

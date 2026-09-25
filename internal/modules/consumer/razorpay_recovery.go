@@ -49,8 +49,6 @@ import (
 	"io"
 	"net/http"
 	"time"
-
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 const (
@@ -149,14 +147,12 @@ func (s *service) razorpayWebhookEvent(ctx context.Context, raw []byte) error {
 		s.log.Warn("razorpay webhook: event carries no order/payment id", "event", ev.Event)
 		return nil
 	}
-	credited, err := s.creditCapturedPayment(ctx, p.OrderID, p.ID, p.Amount, "webhook")
+	// An AutoPay registration payment names the bank token it created
+	// (token_id): its mandate goes live with it (autopayRegistrationCaptured)
+	// even when the app never came back to verify.
+	credited, err := s.creditCapturedPaymentToken(ctx, p.OrderID, p.ID, p.TokenID, p.Amount, "webhook")
 	if err != nil {
 		return err // transient — let Razorpay retry
-	}
-	if p.TokenID != "" {
-		// An AutoPay registration payment names the bank token it created:
-		// the mandate learns it here when verify could not read it.
-		s.autopayNoteRegistrationToken(ctx, p.OrderID, p.TokenID)
 	}
 	if credited {
 		s.log.Info("razorpay webhook: recovered a payment the app never confirmed",
@@ -234,6 +230,17 @@ func (s *service) crmPaymentFailed(ctx context.Context, orderID, paymentID, reas
 // Reports whether THIS call performed the credit (false = already credited, or
 // deliberately ignored). An error is transient only.
 func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID string, gatewayAmountPaise int64, via string) (bool, error) {
+	return s.creditCapturedPaymentToken(ctx, orderID, paymentID, "", gatewayAmountPaise, via)
+}
+
+// creditCapturedPaymentToken is creditCapturedPayment with the recurring
+// token the payment named when the caller has it (the webhook's token_id,
+// the app's razorpay_token on verify; "" = look it up). An AutoPay
+// REGISTRATION payment puts its mandate live (autopayRegistrationCaptured)
+// before the order is marked PAID, so a failure there is retried by the
+// webhook's redelivery or the reconcile sweep, and the ledger gate keeps the
+// credit single whatever repeats.
+func (s *service) creditCapturedPaymentToken(ctx context.Context, orderID, paymentID, tokenID string, gatewayAmountPaise int64, via string) (bool, error) {
 	ord, err := s.repo.findPaymentOrderByID(ctx, orderID)
 	if err != nil {
 		return false, nil // unknown to us: nothing to credit, never retryable
@@ -251,6 +258,9 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 		// marked PAID whose credit failed mid-flight is repaired by the sweep
 		// calling us again, because creditTopup is keyed by the order id.
 		if ord.Purpose == "autopay" {
+			if err := s.autopayRegistrationCaptured(ctx, ord, paymentID, tokenID); err != nil {
+				return false, err // transient: the webhook's retry finishes it
+			}
 			s.autopaySettleCaptured(ctx, orderID, paymentID, s.now())
 		}
 		return false, nil
@@ -272,6 +282,13 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 	if err != nil {
 		return false, err // transient — the caller retries
 	}
+	if ord.Purpose == "autopay" {
+		// A registration's money is in: its mandate goes live. Before PAID,
+		// so a failure here leaves the order for the sweep to finish.
+		if err := s.autopayRegistrationCaptured(ctx, ord, paymentID, tokenID); err != nil {
+			return false, err
+		}
+	}
 	_, _ = s.repo.markPaymentOrderPaid(ctx, orderID, paymentID, time.Now().UTC())
 	if ord.Purpose == "autopay" {
 		// The money is in: the Smart Recharge charge behind it is done.
@@ -288,18 +305,6 @@ func (s *service) creditCapturedPayment(ctx context.Context, orderID, paymentID 
 // existed) and an AutoPay payment ("autopay"). An order payment is not.
 func walletFundingPurpose(purpose string) bool {
 	return purpose == "" || purpose == "topup" || purpose == "autopay"
-}
-
-// autopayNoteRegistrationToken records the bank token an AutoPay
-// registration payment created on the mandate that registration belongs to,
-// once (a mandate that already holds a token keeps it).
-func (s *service) autopayNoteRegistrationToken(ctx context.Context, regOrderID, tokenID string) {
-	if regOrderID == "" || tokenID == "" {
-		return
-	}
-	_, _ = s.repo.mandates.UpdateOne(ctx,
-		bson.D{{Key: "reg_order_id", Value: regOrderID}, {Key: "token", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "token", Value: tokenID}, {Key: "updated_at", Value: time.Now().UTC()}}}})
 }
 
 // ── Reconciliation sweep ───────────────────────────────────────────────────

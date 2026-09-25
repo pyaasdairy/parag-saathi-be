@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -430,7 +431,7 @@ func (s *service) createMandate(ctx context.Context, consumerID primitive.Object
 	// order, so every credit path pays exactly this amount to this member.
 	if err := s.repo.insertPaymentOrder(ctx, &paymentOrder{
 		ID: primitive.NewObjectID(), OrderID: regOrderID, ConsumerID: consumerID,
-		AmountPaise: m.RegAmountPaise, Receipt: receipt, Purpose: "autopay", RefID: "autopay:reg:" + m.MandateID,
+		AmountPaise: m.RegAmountPaise, Receipt: receipt, Purpose: "autopay", RefID: autopayRegRefPrefix + m.MandateID,
 		Status: "CREATED", CreatedAt: now,
 	}); err != nil {
 		return mandateOrderView{}, err
@@ -457,10 +458,12 @@ func (s *service) createMandate(ctx context.Context, consumerID primitive.Object
 // registration payment is CREDITED TO THE WALLET first (the money gate,
 // keyed by the registration order id and shared with the webhook and the
 // reconcile sweep, so whichever lands first credits it and the rest are
-// no-ops), then the mandate goes active with its recurring token. A bad
-// signature never activates, never credits and never 500s. The dev seam (no
-// secret, OTP dev mode) activates without a signature, as a stand-in for the
-// recurring checkout, and credits only a payment signed with the dev secret.
+// no-ops), and that credit puts the mandate live with its recurring token
+// (autopayRegistrationCaptured, the same step the webhook and the sweep
+// take). A bad signature never activates, never credits and never 500s. The
+// dev seam (no secret, OTP dev mode) activates without a signature, as a
+// stand-in for the recurring checkout, and credits only a payment signed
+// with the dev secret.
 func (s *service) verifyMandate(ctx context.Context, consumerID primitive.ObjectID, mandateID, paymentID, signature, token string) (*mandate, error) {
 	m, err := s.repo.findMandate(ctx, mandateID, consumerID)
 	if err != nil {
@@ -476,13 +479,17 @@ func (s *service) verifyMandate(ctx context.Context, consumerID primitive.Object
 	if !signed && !s.rzpDevMode() {
 		return nil, errBadRequest("mandate signature verification failed")
 	}
+	token = strings.TrimSpace(token)
 	if signed {
-		// The money gate: the registration payment is wallet money.
-		if _, err := s.creditCapturedPayment(ctx, m.RegOrderID, paymentID, 0, "mandate_verify"); err != nil {
+		// The money gate: the registration payment is wallet money, and its
+		// credit activates the mandate.
+		if _, err := s.creditCapturedPaymentToken(ctx, m.RegOrderID, paymentID, token, 0, "mandate_verify"); err != nil {
 			return nil, err // transient: the app's retry (or the webhook) credits it
 		}
+		if cur, err := s.repo.findMandate(ctx, mandateID, consumerID); err == nil && cur.Status == "active" {
+			return cur, nil
+		}
 	}
-	token = strings.TrimSpace(token)
 	if token == "" {
 		token = s.rzpPaymentToken(ctx, paymentID)
 	}
@@ -491,6 +498,79 @@ func (s *service) verifyMandate(ctx context.Context, consumerID primitive.Object
 		set = append(set, bson.E{Key: "token", Value: token})
 	}
 	return s.repo.transitionMandate(ctx, mandateID, consumerID, m.Status, "active", set)
+}
+
+// autopayRegRefPrefix names an AutoPay REGISTRATION payment order (RefID =
+// prefix + mandate id); a Smart Recharge charge's RefID is its autopayRef.
+const autopayRegRefPrefix = "autopay:reg:"
+
+// autopayRegistrationCaptured runs when an AutoPay registration payment is
+// credited (creditCapturedPaymentToken: verify, the payment.captured /
+// order.paid webhook or the reconcile sweep, whichever lands first, and every
+// repeat). The bank mandate exists now, so:
+//
+//   - a PENDING mandate goes ACTIVE with the payment and its bank token (the
+//     payment's token_id, the app's, one already noted, or GET
+//     /payments/{id}), guarded on pending. A member whose app never came back
+//     from the UPI app is no longer left "waiting for approval" with a live
+//     bank mandate and their money taken;
+//   - any other mandate that holds no token yet records it (once).
+//
+// A Smart Recharge charge's order is not a registration and is left alone.
+// An error is transient only.
+func (s *service) autopayRegistrationCaptured(ctx context.Context, ord *paymentOrder, paymentID, tokenID string) error {
+	mandateID, ok := strings.CutPrefix(ord.RefID, autopayRegRefPrefix)
+	if !ok || mandateID == "" {
+		return nil
+	}
+	m, err := s.repo.findMandate(ctx, mandateID, ord.ConsumerID)
+	if err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) && ae.status == http.StatusNotFound {
+			return nil
+		}
+		return err
+	}
+	tokenID = strings.TrimSpace(tokenID)
+	if tokenID == "" {
+		tokenID = m.Token
+	}
+	if tokenID == "" {
+		tokenID = s.rzpPaymentToken(ctx, paymentID)
+	}
+	now := s.now().UTC()
+	if m.Status == "pending" {
+		set := bson.D{{Key: "status", Value: "active"}, {Key: "updated_at", Value: now}}
+		if paymentID != "" {
+			set = append(set, bson.E{Key: "payment_id", Value: paymentID})
+		}
+		if tokenID != "" {
+			set = append(set, bson.E{Key: "token", Value: tokenID})
+		}
+		res, err := s.repo.mandates.UpdateOne(ctx,
+			bson.D{{Key: "mandate_id", Value: m.MandateID}, {Key: "status", Value: "pending"}},
+			bson.D{{Key: "$set", Value: set}})
+		if err != nil {
+			return errInternal("mandate update failed")
+		}
+		if res.ModifiedCount == 1 {
+			s.log.InfoContext(ctx, "autopay: registration captured, mandate active", "mandate", m.MandateID, "token_known", tokenID != "")
+			return nil
+		}
+		// It moved meanwhile (a verify activated it, or it was cancelled).
+		if m, err = s.repo.findMandate(ctx, mandateID, ord.ConsumerID); err != nil {
+			return err
+		}
+	}
+	if tokenID == "" {
+		return nil
+	}
+	if _, err := s.repo.mandates.UpdateOne(ctx,
+		bson.D{{Key: "mandate_id", Value: m.MandateID}, {Key: "token", Value: bson.D{{Key: "$in", Value: bson.A{nil, ""}}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "token", Value: tokenID}, {Key: "updated_at", Value: now}}}}); err != nil {
+		return errInternal("mandate update failed")
+	}
+	return nil
 }
 
 // setMandateStatus applies a pause/resume/cancel action, enforcing the state
