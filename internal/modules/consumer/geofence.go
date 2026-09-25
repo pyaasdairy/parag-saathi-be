@@ -274,6 +274,10 @@ type serviceabilityResult struct {
 	StoreName  string  `json:"storeName,omitempty"`
 	DistanceKm float64 `json:"distanceKm,omitempty"`
 	Reason     string  `json:"reason,omitempty"`
+	// Delivery (additive, GET /serviceability only) is the One Voice rule a
+	// one-off order is billed by (deliveryRuleView), so the app's cart quotes
+	// the amount charged. Never set on the order path's own verdict.
+	Delivery *deliveryRuleView `json:"delivery,omitempty"`
 }
 
 // ── Repository ──────────────────────────────────────────────────────────────
@@ -920,7 +924,9 @@ func (h *handler) serviceability(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	out := *res // a copy: the verdict itself is never written to
+	out.Delivery = h.svc.deliveryRule(r.Context())
+	writeJSON(w, http.StatusOK, out)
 }
 
 // joinWaitlist — POST /consumer/waitlist. Consumer-app-gated, raw-JSON. Records

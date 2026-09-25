@@ -1,8 +1,16 @@
 package consumer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/pyaas/saathi-backend/internal/platform/dolibarr"
 )
 
 // The One Voice delivery rule (pyaas-one-voice.md 1.2, the founder's call of
@@ -108,5 +116,114 @@ func TestOneVoiceDeliveryFeeOnOrders(t *testing.T) {
 	// saves: subscription mornings never carry the fee, so nothing is added.
 	if sv := w.svc.foundingSavings(ctx); sv == nil || sv.DeliveryFee != 0 {
 		t.Fatalf("savings delivery_fee with the non-member fee on: %+v", sv)
+	}
+}
+
+// RV-PR-02: the server bills DELIVERY-FEE as the ERP carries it (its GST
+// included, like every ERP row), which need not be the Rs 5 the app used to
+// hard-code: Rs 5 entered ex-GST at 18% bills Rs 5.90. So the rule orders are
+// billed by is on the wire, additively, where the app reads it before a cart
+// (GET /serviceability) and on the Founding Family screen (GET
+// /founding-family): delivery {fee, free_from}. What it says is what an order
+// bills.
+func TestOneVoiceRuleIsServedAsBilled(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	seedTestFarms(t, w, 10)
+	nm := w.customer(t, "9000019011", 500)
+	w.svc.appKey = "test-app-key"
+	h := &handler{svc: w.svc}
+	served := func() (fee, freeFrom float64) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/serviceability?lat=26.7700&lng=81.0100", nil)
+		req.Header.Set("X-Parag-App-Key", "test-app-key")
+		rec := httptest.NewRecorder()
+		h.serviceability(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /serviceability: %d %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Serviceable bool `json:"serviceable"`
+			Delivery    *struct {
+				Fee      float64 `json:"fee"`
+				FreeFrom float64 `json:"free_from"`
+			} `json:"delivery"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Delivery == nil {
+			t.Fatalf("serviceability delivery rule: %s (%v)", rec.Body.String(), err)
+		}
+		v, err := w.svc.foundingFamilyView(ctx, nm)
+		if err != nil || v.Delivery == nil {
+			t.Fatalf("founding-family delivery rule: %+v %v", v, err)
+		}
+		if v.Delivery.Fee != body.Delivery.Fee || v.Delivery.FreeFrom != body.Delivery.FreeFrom {
+			t.Fatalf("the two routes disagree: %+v vs %+v", *v.Delivery, *body.Delivery)
+		}
+		return body.Delivery.Fee, body.Delivery.FreeFrom
+	}
+	bill := func() *order {
+		t.Helper()
+		o, err := w.svc.createOrder(ctx, nm.Hex(), orderInput{
+			Items:         []orderItem{{ProductID: "gold-500ml", Qty: 1, Price: 35}},
+			PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow", Lane: "morning",
+		})
+		if err != nil {
+			t.Fatalf("createOrder: %v", err)
+		}
+		return o
+	}
+
+	// No ERP row yet: the published Rs 5 from Rs 199 (FOUNDING_DELIVERY_FEE_PAISE).
+	if fee, from := served(); fee != 5 || from != 199 {
+		t.Fatalf("served rule before the ERP: fee %v free_from %v", fee, from)
+	}
+	if o := bill(); o.DeliveryFee != 5 {
+		t.Fatalf("billed before the ERP: %v", o.DeliveryFee)
+	}
+	// DELIVERY-FEE entered as Rs 5 ex-GST at 18%: Rs 5.90 is billed, and now
+	// quoted too.
+	w.svc.repo.saveFoundingERPPrice(ctx, "delivery_fee", 5.9)
+	if fee, from := served(); fee != 5.9 || from != 199 {
+		t.Fatalf("served rule with the ERP at Rs 5.90: fee %v free_from %v", fee, from)
+	}
+	if o := bill(); o.DeliveryFee != 5.9 || o.Total != 40.9 {
+		t.Fatalf("billed with the ERP at Rs 5.90: fee %v total %v", o.DeliveryFee, o.Total)
+	}
+}
+
+// The Dolibarr sync warns when DELIVERY-FEE with its GST is not the published
+// One Voice fee (the founder should enter it so it comes to exactly Rs 5.00),
+// and stays quiet when it is.
+func TestDolibarrSyncWarnsWhenDeliveryFeeIsNotTheOneVoiceFee(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	var logs bytes.Buffer
+	w.svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+	product := func(raw string) dolibarr.Product {
+		t.Helper()
+		var p dolibarr.Product
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatalf("product: %v", err)
+		}
+		return p
+	}
+	// Rs 5 entered with 18% GST on top: Rs 5.90 is saved and warned about.
+	w.svc.saveFoundingServicePrice(ctx, "delivery_fee", product(`{"ref":"DELIVERY-FEE","label":"Delivery","price_ttc":"5.00000000","tva_tx":"18.000"}`))
+	if got := w.svc.foundingDeliveryFee(ctx); got != 5.9 {
+		t.Fatalf("saved DELIVERY-FEE: %v want 5.9", got)
+	}
+	if !strings.Contains(logs.String(), "DELIVERY-FEE with its GST is not the published One Voice fee") || !strings.Contains(logs.String(), "erp_with_gst=5.9") {
+		t.Fatalf("no drift warning for Rs 5.90: %q", logs.String())
+	}
+	// Entered so it comes to exactly Rs 5.00: saved, no warning.
+	logs.Reset()
+	w.svc.saveFoundingServicePrice(ctx, "delivery_fee", product(`{"ref":"DELIVERY-FEE","label":"Delivery","price_ttc":"5.00000000","tva_tx":"0"}`))
+	if got := w.svc.foundingDeliveryFee(ctx); got != 5 {
+		t.Fatalf("saved DELIVERY-FEE: %v want 5", got)
+	}
+	if strings.Contains(logs.String(), "DELIVERY-FEE") {
+		t.Fatalf("a Rs 5.00 DELIVERY-FEE was warned about: %q", logs.String())
 	}
 }

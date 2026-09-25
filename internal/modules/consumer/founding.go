@@ -163,6 +163,24 @@ type foundingView struct {
 	Member     *foundingMemberView  `json:"member"`
 	Farms      []foundingFarmView   `json:"farms"`
 	Savings    *foundingSavingsView `json:"savings"`
+	// Delivery (additive) is the One Voice rule orders are billed by, so the
+	// app's cart quotes the amount charged (lib/deliveryRule.ts).
+	Delivery *deliveryRuleView `json:"delivery,omitempty"`
+}
+
+// deliveryRuleView is the One Voice delivery rule on the wire: a one-off
+// order whose goods come to less than FreeFrom pays Fee (DELIVERY-FEE: the
+// ERP's price with its GST once the sync has seen it, else
+// FOUNDING_DELIVERY_FEE_PAISE); from FreeFrom it is free, and a Founding
+// Family member whose perks cover the delivery day never pays it.
+type deliveryRuleView struct {
+	Fee      float64 `json:"fee"`
+	FreeFrom float64 `json:"free_from"`
+}
+
+// deliveryRule is the rule orderDeliveryFee bills by, as the app reads it.
+func (s *service) deliveryRule(ctx context.Context) *deliveryRuleView {
+	return &deliveryRuleView{Fee: s.foundingDeliveryFee(ctx), FreeFrom: freeDeliveryOver}
 }
 
 func strOrNil(s string) *string {
@@ -627,6 +645,7 @@ func (s *service) foundingFamilyView(ctx context.Context, consumerID primitive.O
 		v.Member = memberView(m, code, istToday(time.Now()))
 	}
 	v.Savings = s.foundingSavings(ctx)
+	v.Delivery = s.deliveryRule(ctx)
 	return v, nil
 }
 
