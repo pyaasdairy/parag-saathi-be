@@ -33,8 +33,14 @@ kind for the same store (or the same order) replaces the older one in the tray.
   whoever signed in on it last.
 - `DELETE /api/v1/push/register` `{token}` at sign-out: 204, idempotent; only the caller's
   own row is removed.
-- A token FCM reports `UNREGISTERED` is pruned. The consumer app's registry
-  (`/consumer/push/register`, Expo) is separate and unchanged.
+- A token FCM reports `UNREGISTERED` is pruned. A party keeps at most its 10 newest rows
+  (older ones go when a newer one registers) and each alert reaches at most its 5 newest
+  devices, so one operator's old rows never crowd another recipient out. The consumer
+  app's registry (`/consumer/push/register`, Expo) is separate and unchanged.
+- A new instant order rings once per task: a duplicate create of the task (the store
+  console's backfill racing the order) rings nothing.
+- `POST /consumer/stores/{storeId}/low-stock` accepts the manager's own store only (403
+  otherwise), so no manager can raise, clear or ring another store's low-stock alert.
 
 Code: `internal/platform/push/fcm.go` (sender), `internal/platform/push/operator.go`
 (registry, fan-out, quiet hours), `internal/modules/platformops/push_devices.go` (routes),
