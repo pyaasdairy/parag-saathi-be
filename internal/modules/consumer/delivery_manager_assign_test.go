@@ -28,6 +28,10 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 )
 
+// assignTestAt is the fixed moment these tests assign, claim and read the
+// pool at: the duty day and every stamp come from it, never the wall clock.
+var assignTestAt = time.Date(2026, 10, 6, 9, 15, 0, 0, time.UTC)
+
 // chainAddRider rosters another DELIVERY_RIDER at a store.
 func chainAddRider(t *testing.T, w *chainWorld, storeID primitive.ObjectID, name string) auth.Actor {
 	t.Helper()
@@ -125,6 +129,7 @@ func withAuditRecorder(w *chainWorld) {
 func TestManagerHandAssignsAnUnclaimedInstantOrder(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
+	w.svc.clock = func() time.Time { return assignTestAt } // pool, claim and duty day read the service clock
 	withAuditRecorder(w)
 	ctx := context.Background()
 	other := chainAddRider(t, w, w.storeID, "Suresh Second")
@@ -217,6 +222,7 @@ func TestManagerHandAssignsAnUnclaimedInstantOrder(t *testing.T) {
 func TestManagerAssignOfAClaimedInstantOrderIsRefused(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
+	w.svc.clock = func() time.Time { return assignTestAt } // pool, claim and duty day read the service clock
 	withAuditRecorder(w)
 	ctx := context.Background()
 	other := chainAddRider(t, w, w.storeID, "Suresh Second")
@@ -225,7 +231,7 @@ func TestManagerAssignOfAClaimedInstantOrderIsRefused(t *testing.T) {
 	if _, err := w.svc.claimOfferedDelivery(ctx, other, task.ID); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	_, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "", time.Now())
+	_, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "", assignTestAt)
 	if geofenceCode(err) != "CLAIMED_BY_OTHER" {
 		t.Fatalf("assign of a claimed order: %v, want CLAIMED_BY_OTHER", err)
 	}
@@ -243,18 +249,19 @@ func TestManagerAssignOfAClaimedInstantOrderIsRefused(t *testing.T) {
 func TestManagerAssignKeepsStoreScoping(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
+	w.svc.clock = func() time.Time { return assignTestAt } // pool, claim and duty day read the service clock
 	ctx := context.Background()
 	otherStore, otherMgr := chainOtherStore(t, w)
 	stranger := chainAddRider(t, w, otherStore, "Other Store Rider")
 
 	_, task := chainInstantOffer(t, w, "9000006103")
-	if _, err := w.svc.assignRiderAt(ctx, otherMgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "", time.Now()); geofenceCode(err) != "FORBIDDEN" {
+	if _, err := w.svc.assignRiderAt(ctx, otherMgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "", assignTestAt); geofenceCode(err) != "FORBIDDEN" {
 		t.Fatalf("another store's manager: %v, want FORBIDDEN", err)
 	}
-	if _, err := w.svc.assignRiderAt(ctx, otherMgr, otherStore.Hex(), task.ID, stranger.PartyID, "", time.Now()); geofenceCode(err) != "FORBIDDEN" {
+	if _, err := w.svc.assignRiderAt(ctx, otherMgr, otherStore.Hex(), task.ID, stranger.PartyID, "", assignTestAt); geofenceCode(err) != "FORBIDDEN" {
 		t.Fatalf("assign through another store's path: %v, want FORBIDDEN", err)
 	}
-	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, stranger.PartyID, "", time.Now()); geofenceCode(err) != "BAD_REQUEST" {
+	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, stranger.PartyID, "", assignTestAt); geofenceCode(err) != "BAD_REQUEST" {
 		t.Fatalf("a rider from another store: %v, want BAD_REQUEST", err)
 	}
 	if d := chainTaskFor(t, w, task.OrderID); d.Status != "OFFERED" || d.RiderPartyID != "" || d.AssignedBy != nil {
@@ -267,11 +274,12 @@ func TestManagerAssignKeepsStoreScoping(t *testing.T) {
 func TestRiderDeclineClearsTheManagerAssignment(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
+	w.svc.clock = func() time.Time { return assignTestAt } // pool, claim and duty day read the service clock
 	ctx := context.Background()
 	other := chainAddRider(t, w, w.storeID, "Suresh Second")
 
 	ord, task := chainInstantOffer(t, w, "9000006104")
-	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "nearest", time.Now()); err != nil {
+	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "nearest", assignTestAt); err != nil {
 		t.Fatalf("assign: %v", err)
 	}
 	back, err := w.svc.rejectOfferedDelivery(ctx, w.rider, task.ID)
@@ -298,15 +306,16 @@ func TestRiderDeclineClearsTheManagerAssignment(t *testing.T) {
 func TestManagerAssignStampsMorningTasksToo(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
+	w.svc.clock = func() time.Time { return assignTestAt } // pool, claim and duty day read the service clock
 	ctx := context.Background()
 	other := chainAddRider(t, w, w.storeID, "Suresh Second")
 
 	ord := chainMorningOrder(t, w, "9000006105", nil)
 	task := chainTaskFor(t, w, ord.OrderID)
-	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "first round", time.Now()); err != nil {
+	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "first round", assignTestAt); err != nil {
 		t.Fatalf("assign: %v", err)
 	}
-	d, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, other.PartyID, "", time.Now())
+	d, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, other.PartyID, "", assignTestAt)
 	if err != nil {
 		t.Fatalf("reassign: %v", err)
 	}
@@ -321,11 +330,12 @@ func TestManagerAssignStampsMorningTasksToo(t *testing.T) {
 func TestAdminAssignStampsTheAdmin(t *testing.T) {
 	w, done := newChainWorld(t)
 	defer done()
+	w.svc.clock = func() time.Time { return assignTestAt } // pool, claim and duty day read the service clock
 	ctx := context.Background()
 	other := chainAddRider(t, w, w.storeID, "Suresh Second")
 
 	_, task := chainInstantOffer(t, w, "9000006106")
-	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "nearest", time.Now()); err != nil {
+	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "nearest", assignTestAt); err != nil {
 		t.Fatalf("manager assign: %v", err)
 	}
 	h := &handler{svc: w.svc}
