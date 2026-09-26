@@ -68,7 +68,9 @@ morning round uses:
 - **What happens:** the task becomes `ASSIGNED` to the chosen rider, leaves
   every other rider's offer pool at once and appears in the rider's queue
   (they swipe to accept, as for any assigned task). The member's order moves
-  to `assigned` with the rider, exactly as on a claim.
+  to `assigned` with the rider, exactly as on a claim. Reassigning an instant
+  order the first rider never accepted moves the member's order to the new
+  rider too.
 - **The record:** every manager assign stamps the task with `assigned_by`
   (`party_id`, `role`, `name`), `assigned_at`, `assign_source:
   "manager_assign"` and `assign_reason`, and writes a row to the platform

@@ -558,11 +558,17 @@ func (s *service) assignRiderAt(ctx context.Context, actor auth.Actor, storeID, 
 		}
 		return nil, err
 	}
-	switch d.Status {
-	case "FAILED":
+	switch {
+	case d.Status == "FAILED":
 		s.syncOrderReassigned(ctx, upd) // the member sees the order live again
-	case "OFFERED":
-		s.syncOrderAssigned(ctx, upd) // placed -> assigned, exactly as on a claim
+	case upd.Lane == "instant" || d.Status == "OFFERED":
+		// An instant order's member sees the rider the manager chose:
+		// placed -> assigned on a hand-assign, exactly as on a claim, and the
+		// new rider on a reassign of one the first rider never accepted.
+		// Keyed on the task's lane, not only the status read before the
+		// write, so an offer declined back to the pool in between still
+		// moves the order.
+		s.syncOrderAssigned(ctx, upd)
 	}
 	// Duty never gates the manager's assign (the override): the audit row
 	// records whether the chosen rider was on duty, so an assign to an

@@ -379,3 +379,46 @@ func TestCleanAssignReason(t *testing.T) {
 		t.Fatalf("clip: %d", len([]rune(got)))
 	}
 }
+
+// A hand-assigned instant order the rider has not accepted can be moved to
+// another rider ("Ravi is not picking up, give it to Suresh"). The member's
+// order must then name the new rider, as it does after a claim, not the one
+// who never came.
+func TestManagerReassignOfAnInstantOrderNamesTheNewRider(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	at := time.Date(2026, 10, 6, 9, 15, 0, 0, time.UTC)
+	w.svc.clock = func() time.Time { return at }
+	suresh := chainAddRider(t, w, w.storeID, "Suresh Second")
+
+	ord, task := chainInstantOffer(t, w, "9000006107")
+	if _, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, w.riderID.Hex(), "", at); err != nil {
+		t.Fatalf("hand-assign to Ravi: %v", err)
+	}
+	got, err := w.svc.assignRiderAt(ctx, w.mgr, w.storeID.Hex(), task.ID, suresh.PartyID, "Ravi not answering", at.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("reassign to Suresh: %v", err)
+	}
+	if got.Status != "ASSIGNED" || got.RiderPartyID != suresh.PartyID || got.AssignReason != "Ravi not answering" {
+		t.Fatalf("task after the reassign: %+v", got)
+	}
+	o := w.orderByID(t, ord.OrderID)
+	if o.Status != "assigned" || o.RiderID == nil || *o.RiderID != suresh.PartyID {
+		rid := ""
+		if o.RiderID != nil {
+			rid = *o.RiderID
+		}
+		t.Fatalf("order after the reassign: %q rider %q, want assigned to Suresh %q", o.Status, rid, suresh.PartyID)
+	}
+	if o.Rider == nil || o.Rider.FullName != "Suresh Second" {
+		t.Fatalf("order rider card after the reassign: %+v, want Suresh Second", o.Rider)
+	}
+	// Ravi no longer has it; Suresh does and can accept it.
+	if mine, _ := w.svc.riderDeliveries(ctx, w.rider); offerIDs(mine)[task.ID] {
+		t.Fatal("the first rider still holds the reassigned order")
+	}
+	if _, err := w.svc.acceptDelivery(ctx, suresh, task.ID); err != nil {
+		t.Fatalf("accept by Suresh: %v", err)
+	}
+}
