@@ -634,7 +634,10 @@ func (s *service) autopayTokenEvent(ctx context.Context, raw []byte, now time.Ti
 // at today's price; and the Rs 99 Founding Family month when its bill day
 // falls within the horizon. A day the lock already decided (locked: counted
 // among the orders; skipped: nothing) and a plan changed after a passed
-// cut-off (the change belongs to a later day) add nothing.
+// cut-off (the change belongs to a later day) add nothing, and so does a
+// PYAAS milk morning FOUNDING_PYAAS_MEMBERS_ONLY refuses (pyaasPlanGate: the
+// lock pauses the plan and funds nothing, so the bank is not charged for it;
+// the CRM wallet sums leave it out the same way).
 func (s *service) autopayNeed(ctx context.Context, consumerID primitive.ObjectID, now time.Time) (float64, error) {
 	today := istToday(now)
 	horizonEnd := now.Add(autopayFundingHorizon)
@@ -662,7 +665,7 @@ func (s *service) autopayNeed(ctx context.Context, consumerID primitive.ObjectID
 				if oerr != nil {
 					return 0, oerr
 				}
-				if o != nil && o.SubLockedAt == "" && o.Status == "placed" {
+				if o != nil && o.SubLockedAt == "" && o.Status == "placed" && s.pyaasPlanGate(ctx, sub, day) == nil {
 					need += lockCharge(o, o.TrialFree)
 				}
 				continue
@@ -671,6 +674,9 @@ func (s *service) autopayNeed(ctx context.Context, consumerID primitive.ObjectID
 				continue
 			}
 			if !now.Before(lockAt) && !sub.subChangedBefore(lockAt) {
+				continue
+			}
+			if s.pyaasPlanGate(ctx, sub, day) != nil {
 				continue
 			}
 			need += round2(s.subscriptionLinePrice(ctx, sub)*float64(sub.Qty) + subscriptionDeliveryFee)
