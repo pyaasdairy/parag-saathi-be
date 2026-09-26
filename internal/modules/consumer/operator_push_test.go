@@ -111,8 +111,8 @@ func opPushTokens(msgs []push.FCMMessage) map[string]push.FCMMessage {
 func opPushOrder(cid primitive.ObjectID, id, lane string, at time.Time) *order {
 	return &order{
 		OrderID: id, UserID: cid.Hex(), Status: "PLACED", Lane: lane, PlacedAt: at,
-		Items:         []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Variant: "500ml", Qty: 2, Price: 35}},
-		Subtotal:      70, Total: 70, PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
+		Items:    []orderItem{{ProductID: "gold-500ml", Name: "Milk gold-500ml", Variant: "500ml", Qty: 2, Price: 35}},
+		Subtotal: 70, Total: 70, PaymentMethod: "wallet", AddressLabel: "Home", AddressText: "Shop St 1, Lucknow",
 		Geo: &geoPoint{Lat: 26.7712, Lng: 81.0123}, ConsumerName: "Push Tester", Phone: "9000007301",
 	}
 }
@@ -316,5 +316,43 @@ func TestOperatorPushLowStockRingsTheAdminsOnlyWhenTheSetChanges(t *testing.T) {
 	}
 	if n := len(rec.take()); n != 0 {
 		t.Fatalf("a cleared alert rang %d phones", n)
+	}
+}
+
+// A second create for an order whose task already exists (the store console's
+// backfill racing the order's own create, or any retry) must not ring again:
+// the duplicate insert is dropped by the order_id index, and a push for it
+// would name a delivery id that was never stored.
+func TestOperatorPushNewInstantOrderRingsOnceWhenTheTaskAlreadyExists(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	rec := opPushWire(t, w, map[string]string{w.mgr.PartyID: "tok-mgr", w.rider.PartyID: "tok-rider"})
+	cid := w.customer(t, "9000007302", 0)
+
+	at := ihAt(11, 0)
+	o := opPushOrder(cid, "ord_push_dup", "instant", at)
+	w.svc.createDeliveryForOrderAt(ctx, o, at)
+	first := rec.take()
+	if len(first) != 2 {
+		t.Fatalf("the first create rang %d devices, want 2", len(first))
+	}
+	var task delivery
+	if err := w.db.Collection(collDeliveries).FindOne(ctx, bson.D{{Key: "order_id", Value: "ord_push_dup"}}).Decode(&task); err != nil {
+		t.Fatalf("task: %v", err)
+	}
+	for _, m := range first {
+		if m.Data["delivery_id"] != task.ID {
+			t.Fatalf("first ring names %q, stored task is %q", m.Data["delivery_id"], task.ID)
+		}
+	}
+
+	// The same order again, a moment later: the task exists, nothing rings.
+	w.svc.createDeliveryForOrderAt(ctx, o, at.Add(2*time.Second))
+	if again := rec.take(); len(again) != 0 {
+		t.Fatalf("a duplicate create rang %d devices again (delivery_id %q, stored %q)", len(again), again[0].Data["delivery_id"], task.ID)
+	}
+	if n, _ := w.db.Collection(collDeliveries).CountDocuments(ctx, bson.D{{Key: "order_id", Value: "ord_push_dup"}}); n != 1 {
+		t.Fatalf("tasks for the order: %d, want 1", n)
 	}
 }
