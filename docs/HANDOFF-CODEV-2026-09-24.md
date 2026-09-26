@@ -1510,7 +1510,7 @@ Decisions 1 to 7 of the founder's 25 Sep list, built in three lanes and merged i
 merge `65ddcfc`). Consumer `feature/consumer-revamp-phase2`: the same three lane branches
 (tips `e4e9b88`, `de0eb87`, `b343afa`), lib seams only. Saathi is not touched by part 1.
 Part 2 (decision 8 Saathi push, 9 hand-assign, 10 attendance) is `decisions/push` and
-`decisions/ops`, merged separately. Decision 11 is data the founder supplies, no code.
+`decisions/ops`, merged separately (section 13). Decision 11 is data the founder supplies, no code.
 
 **What the server does now, per decision**
 
@@ -1659,3 +1659,136 @@ Verify: `go test ./internal/modules/consumer/ -run
 'TestCRMQuietHours|TestCRMA02|TestConsent|TestOneVoice|TestReferral|TestFounding|TestMembersOnly|TestAutopay|TestMandate|TestCRMB03'
 -count=1 -v` (Mongo on 27017, injected clocks), then the full gate in section 7. Consumer:
 `npx tsc --noEmit`.
+
+## 13. Founder decisions of 25 Sep (part 2)
+
+Decisions 8 to 10 of the founder's 25 Sep list, built in two lanes from `13533c7` and merged
+into backend `integration/delivery` on 26 Sep on top of part 1 (section 12):
+`decisions/ops` (tip `01e65e4`, merge `3d6be50`) and `decisions/push` (tip `0517875`, merge
+`f548415`), then `83cd42c` (the new-order push follows the duty gate). Saathi
+`integration/delivery`: `decisions/ops` (tip `c412311`, merge `c0a8064`) and
+`decisions/push` (tip `83ca559`, merge `e40cbb4`): lib seams, the push service and the
+Android build only. The consumer app is not touched: the hand-assign moves the member's order
+through the same `assigned` transition a claim does, and the order JSON is unchanged.
+
+**What the server does now, per decision**
+
+8. **Saathi push** (`internal/platform/push/fcm.go`, `operator.go`,
+   `consumer/operator_push.go`, `platformops/push_devices.go`; `docs/OPERATOR-PUSH.md`). An
+   FCM HTTP v1 sender and an operator device registry (`operator_push_devices`). Saathi
+   registers at `POST /api/v1/push/register` after sign-in and takes it back with `DELETE`
+   at sign-out; a party keeps at most ten rows, and at most five of its devices get a copy.
+   The store alerts that matter ring the phones they concern:
+   - a new instant order (broadcast as `OFFERED`): the store's managers, and the riders whose
+     offer pool shows it (decision 10: the on-duty riders, or every store rider when nobody
+     is on duty or the lookup fails). An order alert: rings in quiet hours. It rings once per
+     stored task (a duplicate create never rings again);
+   - instant closing, 15 minutes before the close: the store's managers, rings in quiet
+     hours; instant closed: the managers, held in quiet hours (its inbox row still lands);
+   - low stock, when the store's low set changes: the platform admins, held in quiet hours;
+     a manager can post low stock for their own store only.
+
+   Inert until `FCM_SERVICE_ACCOUNT_JSON` is set (no recipient query, no goroutine); the boot
+   log says whether FCM is live. Saathi (`lib/services/push_service.dart`, no UI) initialises
+   Firebase only when the build carries `android/app/google-services.json`; without it the
+   build is the build it was and every push call is a no-op.
+9. **Hand-assign an unclaimed instant order** (`assignment.go`, `delivery_svc.go`;
+   `docs/DELIVERY_FLOW.md`). `POST /consumer/stores/{storeId}/orders/{deliveryId}/assign`
+   `{"rider_party_id", "reason"?}` also takes an unclaimed `OFFERED` task (no rider yet), for
+   the manager's own store and own riders only. The manager's write and a rider's claim race
+   on one atomic update, so exactly one wins. The task becomes `ASSIGNED`, leaves every
+   other rider's pool, and the member's order moves to `assigned` with that rider, as on a
+   claim (a reassign of an instant order nobody accepted moves the member's order to the
+   new rider too). Every assignment records who made it: `assignedBy {partyId, role, name}`,
+   `assignSource` (`manager_assign` | `admin_assign` | `rider_claim`) and `assignReason`,
+   plus the audit row `consumer.delivery.manager_assign`.
+10. **Attendance gates the rider offer pool** (`duty_gate.go`). `GET
+    /delivery/tasks/available` and the claim show and allow the unclaimed pool only to
+    riders on duty today (IST) at that store: that store's manager's mark for the day, else
+    the rider's own check-in. An off-duty claim is `403 NOT_ON_DUTY` ("Mark attendance at the
+    centre to take new orders"); a claim of another store's offer is `403 FORBIDDEN`. It never
+    blocks a delivery: assigned work always shows and can be worked; the manager may assign
+    any store rider, on duty or not, and may mark a rider on or off duty for the day
+    (`POST /consumer/stores/{storeId}/riders/{riderPartyId}/duty {on_duty, reason?}`,
+    stored in `rider_duty_overrides`, audited as `consumer.rider.duty_override`; it never
+    writes attendance). When no rider of the store is on duty the pool falls back to every
+    store rider (logged at most once per store per 10 minutes); a failed lookup leaves it
+    open.
+
+**Resolved at the merge**
+
+- `internal/config/config.go`: part 1 had rewritten the comments of
+  `FoundingPyaasMembersOnly` / `FoundingPyaasNonMemberFee`, and the push lane appended the
+  `FCM_*` fields after those two lines. Part 1's comments are kept and the operator-push
+  block follows them. Every other file merged without overlapping hunks (`module.go`,
+  `service.go`, `delivery.go`, `delivery_svc.go`, `render.yaml`, `.env.example`). No CRM
+  trigger or template changed, so `crm_triggers.json` keeps 59 triggers and 55 templates.
+- The push lane chose recipients without attendance (its base had no duty gate). `83cd42c`
+  makes the new-order push follow the pool's own rule, so a rider who can neither see nor
+  claim an offer is not woken for it
+  (`TestOperatorPushNewInstantOrderRingsOnlyTheRidersOnDuty`).
+
+**Wire changes (all additive; no key removed or renamed)**
+
+- Store order: `assignedBy`, `assignSource`, `assignReason`. Store rider roster and ranked
+  riders: `onDuty`, `dutySource` (`attendance` | `manager` | `none`). New routes: the duty
+  mark above, `POST` / `DELETE /api/v1/push/register`. New answers on the rider claim:
+  `403 NOT_ON_DUTY`, and `403 FORBIDDEN` for another store's offer.
+- Saathi lib: `StoreApi.assignRider(..., reason)` (sent only when given, so every existing
+  call's body is unchanged), `StoreApi.setRiderDuty(...)` returning `RiderDuty`,
+  `StoreOrder.unclaimedOffer`, and the `PushService.instance.foreground` / `.opened` streams
+  of `PushAlert`.
+
+**Deploy checklist (founder / ops)**
+
+- Firebase: create the project and an Android app for `in.pyaas.pyaas_saathi`, put
+  `google-services.json` in `android/app` on the build machine (gitignored) and build the
+  Saathi APK; set `FCM_SERVICE_ACCOUNT_JSON` (the service-account key, raw JSON or base64)
+  and optionally `FCM_PROJECT_ID` in Render. Never set `FCM_BASE_URL` in production. Steps:
+  `docs/OPERATOR-PUSH.md` and Saathi `docs/PUSH_SETUP.md`. Until then, devices register and
+  nothing is sent. There is no iOS app yet (an APNs key is needed once there is).
+- `rider_duty_overrides` gets its unique index `(rider_party_id, day, store_id)` at boot; the
+  collection is new, so there is nothing to migrate.
+
+**The shipped apps after this deploy**
+
+- The deployed Saathi (UI-REVAMP) never calls the duty mark or `/push/register`. Its riders
+  see the pool only when on duty, or all of them do when nobody at the store checked in, so
+  a store whose riders never check in behaves exactly as before. A rider who has not checked
+  in while a colleague has sees an empty pool, and a stale claim gets `NOT_ON_DUTY`, whose
+  message the app shows. Assigned work is never gated.
+- The shipped consumer build is unaffected (no key it reads changed).
+
+**Open for the founder (decisions, not code)**
+
+- The new-order push goes to the store's on-duty riders without the 15 km offer fence the
+  rider feed applies, so a rider further away can be rung for an order their list will not
+  show. Fence the push too, or leave it?
+- Real delivery to a phone is untested until the Firebase project exists (the backend is
+  tested with a stub sender, Saathi with a fake platform).
+
+**Kushagra UI follow-up (Saathi; nothing on screen changed)**
+
+1. Assign button on an unclaimed instant order: `lib/screens/store/widgets/store_order_cards.dart:51`,
+   make `canAssign` also true for `o.unclaimedOffer` (the comment at :46-50 and the "Broadcast
+   to nearby riders" line at :131-132 then sit next to an Assign button).
+2. Optional reason on the assign sheet: `lib/screens/store/store_home.dart:563`, pass
+   `reason:` to `StoreApi.instance.assignRider`.
+3. Duty on the rider list: `store_home.dart:787` `_riderCard`, a chip from `r.onDuty` /
+   `r.dutySource` and a toggle calling `StoreApi.instance.setRiderDuty(...)` (reason
+   optional); `store_home.dart:650` `_riderRow` may show the same chip in the assign sheet.
+4. Rider copy that says attendance is not a gate: `lib/screens/rider/home/orders_tab.dart:104-106`
+   and `lib/screens/rider/widgets/duty_strip.dart:155-157`. New orders now show only after
+   check-in (unless nobody at the store checked in).
+5. Push: Android notification channels `store_orders` / `store_alerts` and a monochrome
+   notification icon (`android/app/src/main/AndroidManifest.xml`, `<application>` meta-data),
+   tap routing from `PushService.instance.opened` (`data.type`, `store_id`, `delivery_id`),
+   and a bell refresh on `PushService.instance.foreground` next to the poll in
+   `lib/widgets/module_shell.dart:219`. Without the channels FCM uses its default one, so
+   alerts still show.
+
+Verify: `go test ./internal/modules/consumer/ -run
+'OperatorPush|OfferPool|Duty|Assign|ThrottledLog|LowStock' -count=1 -v`
+and `go test ./internal/platform/push/ ./internal/modules/platformops/ -count=1` (Mongo on
+27017, injected clocks), then the full gate in section 7. Saathi: `flutter analyze`, then
+`flutter test` (`test/store_assign_duty_test.dart`, `test/push_service_test.dart`).
