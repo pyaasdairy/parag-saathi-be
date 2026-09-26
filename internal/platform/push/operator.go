@@ -43,6 +43,12 @@ const CollOperatorPushDevices = "operator_push_devices"
 // newest registrations, so a handset lost months ago stops mattering.
 const maxDevicesPerParty = 5
 
+// maxRowsPerParty bounds how many rows one party keeps: a register beyond it
+// drops that party's oldest rows (a reinstall or token rotation leaves the old
+// row behind until FCM reports it dead, and only the newest five are ever sent
+// to, so the rest would never be pruned).
+const maxRowsPerParty = 10
+
 var istZone = time.FixedZone("IST", 5*3600+30*60)
 
 // InQuietHours reports whether t falls in 22:00-07:00 IST.
@@ -154,6 +160,37 @@ func (r *OperatorRegistry) Register(ctx context.Context, partyID primitive.Objec
 	if err != nil {
 		return fmt.Errorf("register operator device: %w", err)
 	}
+	// Housekeeping only: the device is registered either way, and the next
+	// register retries a trim that failed.
+	_ = r.trimParty(ctx, partyID)
+	return nil
+}
+
+// trimParty keeps a party's newest maxRowsPerParty rows and drops the rest,
+// so no party's pile of stale registrations grows without bound.
+func (r *OperatorRegistry) trimParty(ctx context.Context, partyID primitive.ObjectID) error {
+	cur, err := r.coll.Find(ctx, bson.D{{Key: "party_id", Value: partyID}},
+		options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}, {Key: "_id", Value: -1}}).
+			SetSkip(maxRowsPerParty).SetProjection(bson.D{{Key: "_id", Value: 1}}))
+	if err != nil {
+		return fmt.Errorf("find stale operator devices: %w", err)
+	}
+	var stale []struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	if err := cur.All(ctx, &stale); err != nil {
+		return fmt.Errorf("decode stale operator devices: %w", err)
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	ids := bson.A{}
+	for _, row := range stale {
+		ids = append(ids, row.ID)
+	}
+	if _, err := r.coll.DeleteMany(ctx, bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}}, {Key: "party_id", Value: partyID}}); err != nil {
+		return fmt.Errorf("trim operator devices: %w", err)
+	}
 	return nil
 }
 
@@ -171,7 +208,10 @@ func (r *OperatorRegistry) Unregister(ctx context.Context, partyID primitive.Obj
 }
 
 // TokensFor lists the live tokens of the given parties, distinct, newest
-// registrations first, at most maxDevicesPerParty each.
+// registrations first, at most maxDevicesPerParty each. No overall limit: a
+// shared one would let one party's many newer rows crowd another recipient
+// out entirely; Register's trim keeps each party at maxRowsPerParty rows, so
+// the read stays bounded by the recipients.
 func (r *OperatorRegistry) TokensFor(ctx context.Context, parties []primitive.ObjectID) ([]string, error) {
 	if len(parties) == 0 {
 		return nil, nil
@@ -181,7 +221,7 @@ func (r *OperatorRegistry) TokensFor(ctx context.Context, parties []primitive.Ob
 		ids = append(ids, p)
 	}
 	cur, err := r.coll.Find(ctx, bson.D{{Key: "party_id", Value: bson.D{{Key: "$in", Value: ids}}}},
-		options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetLimit(int64(len(parties)*maxDevicesPerParty*2)))
+		options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}, {Key: "_id", Value: -1}}))
 	if err != nil {
 		return nil, fmt.Errorf("find operator devices: %w", err)
 	}

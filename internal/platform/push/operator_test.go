@@ -272,3 +272,48 @@ func TestOperatorRegistryOneRowPerDeviceFollowsTheSignerIn(t *testing.T) {
 		t.Fatalf("a second unregister is a no-op, got %v", err)
 	}
 }
+
+// One party's pile of registrations (every reinstall or token rotation leaves
+// a row) must never crowd another recipient out of the fan-out, and a party
+// never holds more than maxRowsPerParty rows: the oldest go when a newer one
+// registers.
+func TestOperatorRegistryOnePartysManyDevicesNeverStarveAnother(t *testing.T) {
+	db := operatorRegistryDB(t)
+	reg := NewOperatorRegistry(db)
+	ctx := context.Background()
+	if err := reg.EnsureIndexes(ctx); err != nil {
+		t.Fatalf("indexes: %v", err)
+	}
+	mgr, rider := primitive.NewObjectID(), primitive.NewObjectID()
+	t0 := ist(9, 0)
+	if err := reg.Register(ctx, rider, "DELIVERY_RIDER", RegisterInput{Token: "rider-phone", Platform: "android"}, t0); err != nil {
+		t.Fatalf("rider register: %v", err)
+	}
+	// The manager's rows are all newer than the rider's one phone.
+	for i := 0; i < 25; i++ {
+		tok := "mgr-row-" + string(rune('a'+i))
+		if err := reg.Register(ctx, mgr, "STORE_MANAGER", RegisterInput{Token: tok, Platform: "android"}, t0.Add(time.Duration(i+1)*time.Minute)); err != nil {
+			t.Fatalf("register %s: %v", tok, err)
+		}
+	}
+	got, err := reg.TokensFor(ctx, []primitive.ObjectID{mgr, rider})
+	if err != nil {
+		t.Fatalf("tokens: %v", err)
+	}
+	hasRider := false
+	for _, g := range got {
+		hasRider = hasRider || g == "rider-phone"
+	}
+	if !hasRider || len(got) != maxDevicesPerParty+1 {
+		t.Fatalf("tokens %v: want the manager's newest %d and the rider's phone", got, maxDevicesPerParty)
+	}
+	if n, _ := db.Collection(CollOperatorPushDevices).CountDocuments(ctx, bson.D{{Key: "party_id", Value: mgr}}); n != maxRowsPerParty {
+		t.Fatalf("the manager holds %d rows, want the newest %d", n, maxRowsPerParty)
+	}
+	if n, _ := db.Collection(CollOperatorPushDevices).CountDocuments(ctx, bson.D{{Key: "token", Value: "mgr-row-a"}}); n != 0 {
+		t.Fatal("the manager's oldest row must have been trimmed")
+	}
+	if n, _ := db.Collection(CollOperatorPushDevices).CountDocuments(ctx, bson.D{{Key: "token", Value: "rider-phone"}}); n != 1 {
+		t.Fatal("another party's row is never trimmed")
+	}
+}
