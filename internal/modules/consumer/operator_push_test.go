@@ -17,15 +17,21 @@ package consumer
 //	  go test ./internal/modules/consumer/ -run OperatorPush -v
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
+	"github.com/pyaas/saathi-backend/internal/platform/auth"
 	"github.com/pyaas/saathi-backend/internal/platform/push"
 )
 
@@ -354,5 +360,53 @@ func TestOperatorPushNewInstantOrderRingsOnceWhenTheTaskAlreadyExists(t *testing
 	}
 	if n, _ := w.db.Collection(collDeliveries).CountDocuments(ctx, bson.D{{Key: "order_id", Value: "ord_push_dup"}}); n != 1 {
 		t.Fatalf("tasks for the order: %d, want 1", n)
+	}
+}
+
+// POST /stores/{storeId}/low-stock is the manager's OWN store only: a manager
+// of store A posting for store B is refused, so it can neither write the
+// admins' inbox rows for B nor ring their phones with text it chose.
+func TestOperatorPushLowStockPostIsScopedToTheManagersOwnStore(t *testing.T) {
+	w, done := newChainWorld(t)
+	defer done()
+	ctx := context.Background()
+	admin := opPushParty(t, w, "SUPER_ADMIN", "ACTIVE", primitive.NewObjectID())
+	storeB, mgrB := ihSecondStore(t, w)
+	rec := opPushWire(t, w, map[string]string{admin.Hex(): "tok-admin"})
+	ihClock(w, ihAt(10, 0))
+
+	post := func(actor auth.Actor, storeID string, body lowStockRequest) int {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/stores/"+storeID+"/low-stock", bytes.NewReader(b))
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("storeId", storeID)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		req = req.WithContext(auth.WithActor(req.Context(), actor))
+		rw := httptest.NewRecorder()
+		(&handler{svc: w.svc}).lowStock(rw, req)
+		return rw.Code
+	}
+
+	// Store A's manager posts for store B: refused, nothing written or rung.
+	if code := post(w.mgr, storeB.Hex(), lowStockRequest{StoreName: "Anything I like", Summary: "Toned Milk 500ml (1)", ItemCount: 1}); code != http.StatusForbidden {
+		t.Fatalf("a manager posting another store's low stock: %d, want 403", code)
+	}
+	if n := len(rec.take()); n != 0 {
+		t.Fatalf("a refused post rang %d phones", n)
+	}
+	if n, _ := w.db.Collection("notifications").CountDocuments(ctx, bson.D{{Key: "template_key", Value: templateStoreLowStock}}); n != 0 {
+		t.Fatalf("a refused post wrote %d inbox rows", n)
+	}
+
+	// Each manager for their own store: the row lands and the admin's phone rings.
+	if code := post(mgrB, storeB.Hex(), lowStockRequest{StoreName: "PYAAS Second Store", Summary: "Toned Milk 500ml (1)", ItemCount: 1}); code != http.StatusOK {
+		t.Fatalf("store B's manager: %d", code)
+	}
+	if code := post(w.mgr, w.storeID.Hex(), lowStockRequest{StoreName: "PYAAS Full-Chain Store", Summary: "Chai Special (2)", ItemCount: 1}); code != http.StatusOK {
+		t.Fatalf("store A's manager: %d", code)
+	}
+	if got := rec.take(); len(got) != 2 || got[0].Data["store_id"] != storeB.Hex() || got[1].Data["store_id"] != w.storeID.Hex() {
+		t.Fatalf("own-store posts: %+v", got)
 	}
 }

@@ -30,12 +30,20 @@ type lowStockRequest struct {
 	ItemCount int    `json:"item_count"`
 }
 
-// lowStock handles POST /consumer/stores/{storeId}/low-stock (STORE_MANAGER):
-// upsert (summary present) or clear (summary empty) the store's low-stock
-// alert for every platform admin. Idempotent per (admin, store) so the 12s
-// store poll can call it freely without spamming the inbox.
+// lowStock handles POST /consumer/stores/{storeId}/low-stock (STORE_MANAGER,
+// own store, like every other /stores/{storeId} route): upsert (summary
+// present) or clear (summary empty) the store's low-stock alert for every
+// platform admin. Idempotent per (admin, store) so the 12s store poll can call
+// it freely without spamming the inbox. The store check matters twice over
+// now that the alert also rings the admins' phones: a manager of store A can
+// neither raise nor clear store B's alert.
 func (h *handler) lowStock(w http.ResponseWriter, r *http.Request) {
 	storeID := chi.URLParam(r, "storeId")
+	actor, _ := operatorActor(r)
+	if err := h.svc.assertStore(r.Context(), actor, storeID); err != nil {
+		httpx.Error(w, r, toHTTPErr(err))
+		return
+	}
 	var body lowStockRequest
 	_ = decode(r, &body)
 	if body.StoreName == "" {
