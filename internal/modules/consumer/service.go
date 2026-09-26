@@ -116,6 +116,9 @@ type service struct {
 	// serviceability answer, the store's extend / close-now): nil is the wall
 	// clock; tests pin a fixed moment. Read it through now().
 	clock func() time.Time
+	// dutyFallbackLog throttles the "no rider of this store is on duty" line
+	// the offer-pool gate writes (duty_gate.go). Zero value ready.
+	dutyFallbackLog throttledLog
 }
 
 // now is the service clock: the wall clock unless a test pinned one.

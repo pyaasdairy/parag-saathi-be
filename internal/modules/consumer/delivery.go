@@ -165,12 +165,21 @@ type delivery struct {
 	// PickupAddress/PickupGeo snapshot the pickup point at pickup, so a task
 	// always records where the stock actually came from; ProofDistanceM is how
 	// far from the customer's pin the rider stood when the photo was taken.
-	DeliveryDate   string    `bson:"delivery_date,omitempty"    json:"deliveryDate,omitempty"`
-	PickupAddress  string    `bson:"pickup_address,omitempty"   json:"pickupAddress,omitempty"`
-	PickupGeo      *geoPt    `bson:"pickup_geo,omitempty"       json:"pickupGeo,omitempty"`
-	ProofDistanceM *float64  `bson:"proof_distance_m,omitempty" json:"proofDistanceM,omitempty"`
-	CreatedAt      time.Time `bson:"created_at"           json:"-"`
-	UpdatedAt      time.Time `bson:"updated_at"           json:"-"`
+	DeliveryDate   string   `bson:"delivery_date,omitempty"    json:"deliveryDate,omitempty"`
+	PickupAddress  string   `bson:"pickup_address,omitempty"   json:"pickupAddress,omitempty"`
+	PickupGeo      *geoPt   `bson:"pickup_geo,omitempty"       json:"pickupGeo,omitempty"`
+	ProofDistanceM *float64 `bson:"proof_distance_m,omitempty" json:"proofDistanceM,omitempty"`
+	// Who put the current rider on this task, and how (assignment.go):
+	// assign_source is manager_assign (the store manager's hand-assign,
+	// including an unclaimed instant offer), admin_assign (the website's
+	// delivery CRM) or rider_claim (first-accept-wins). assigned_by names the
+	// person for the first two; a rider's decline clears all three, because
+	// the task then has no rider. Additive on the wire.
+	AssignedBy   *assignedByDoc `bson:"assigned_by,omitempty"   json:"assignedBy,omitempty"`
+	AssignSource string         `bson:"assign_source,omitempty" json:"assignSource,omitempty"`
+	AssignReason string         `bson:"assign_reason,omitempty" json:"assignReason,omitempty"`
+	CreatedAt    time.Time      `bson:"created_at"           json:"-"`
+	UpdatedAt    time.Time      `bson:"updated_at"           json:"-"`
 }
 
 // riderSummary mirrors the FE RiderSummary (store roster).
@@ -183,6 +192,11 @@ type riderSummary struct {
 	CompletedToday   int     `json:"completedToday"`
 	DistanceKm       float64 `json:"distanceKm"`
 	WithinTierKm     float64 `json:"withinTierKm"`
+	// Today's duty (duty_gate.go): whether the rider sees the instant offer
+	// pool, and what decided it (attendance | manager | none). Additive; the
+	// manager may assign any rider whatever this says.
+	OnDuty     bool   `json:"onDuty"`
+	DutySource string `json:"dutySource"`
 }
 
 func newDeliveryID() string {
@@ -423,13 +437,18 @@ func (r *repository) claimDelivery(ctx context.Context, id, riderPartyID string,
 			{Key: "rider_party_id", Value: ""},
 			{Key: "rejected_by", Value: bson.D{{Key: "$ne", Value: riderPartyID}}},
 		},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "rider_party_id", Value: riderPartyID},
-			{Key: "status", Value: "ACCEPTED"},
-			{Key: "assigned_at", Value: now.Format(time.RFC3339)},
-			{Key: "accepted_at", Value: now.Format(time.RFC3339)},
-			{Key: "updated_at", Value: now},
-		}}},
+		bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "rider_party_id", Value: riderPartyID},
+				{Key: "status", Value: "ACCEPTED"},
+				{Key: "assigned_at", Value: now.Format(time.RFC3339)},
+				{Key: "accepted_at", Value: now.Format(time.RFC3339)},
+				{Key: "assign_source", Value: assignSourceClaim},
+				{Key: "updated_at", Value: now},
+			}},
+			// A claim is the rider's own doing: no manager or admin put them here.
+			{Key: "$unset", Value: bson.D{{Key: "assigned_by", Value: ""}, {Key: "assign_reason", Value: ""}}},
+		},
 		&options.FindOneAndUpdateOptions{ReturnDocument: &after},
 	).Decode(&d)
 	if isNoDocs(err) {
@@ -463,6 +482,9 @@ func (r *repository) rejectOffer(ctx context.Context, id, riderPartyID string, n
 			}},
 			{Key: "$addToSet", Value: bson.D{{Key: "rejected_by", Value: riderPartyID}}},
 			{Key: "$inc", Value: bson.D{{Key: "reoffer_count", Value: 1}}},
+			// Back in the pool nobody is assigned, so nobody assigned it: a
+			// stale manager_assign would credit the next claim to the manager.
+			{Key: "$unset", Value: bson.D{{Key: "assigned_by", Value: ""}, {Key: "assign_source", Value: ""}, {Key: "assign_reason", Value: ""}}},
 		},
 		&options.FindOneAndUpdateOptions{ReturnDocument: &after},
 	).Decode(&d)
