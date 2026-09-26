@@ -391,9 +391,10 @@ func (s *service) storeRidersAt(ctx context.Context, actor auth.Actor, storeID, 
 	}
 	all, _ := s.repo.listDeliveriesByStore(ctx, storeID)
 	today := istToday(now) // the store's day is the IST day the route runs on
-	// Today's duty per rider, for the manager's roster. Best-effort: a failed
-	// lookup shows everyone off duty and blocks nothing (assign ignores it).
-	duty, derr := s.repo.dutyForRiders(ctx, riderIDs, today)
+	// Today's duty per rider AT THIS STORE, for the manager's roster.
+	// Best-effort: a failed lookup shows everyone off duty and blocks nothing
+	// (assign ignores it).
+	duty, derr := s.repo.dutyForRiders(ctx, riderIDs, storeID, today)
 	if derr != nil {
 		duty = map[string]riderDuty{}
 	}
@@ -565,9 +566,9 @@ func (s *service) assignRiderAt(ctx context.Context, actor auth.Actor, storeID, 
 	}
 	// Duty never gates the manager's assign (the override): the audit row
 	// records whether the chosen rider was on duty, so an assign to an
-	// off-duty rider is visibly the manager's call.
+	// off-duty rider is visibly the manager's call. Duty at this store.
 	extra := map[string]any{}
-	if duty, derr := s.repo.dutyForRiders(ctx, []string{riderPartyID}, istDay(now)); derr == nil {
+	if duty, derr := s.repo.dutyForRiders(ctx, []string{riderPartyID}, storeID, istDay(now)); derr == nil {
 		extra["rider_on_duty"] = duty[riderPartyID].OnDuty
 		extra["rider_duty_source"] = duty[riderPartyID].Source
 	}

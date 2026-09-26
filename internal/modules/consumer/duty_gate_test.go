@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/pyaas/saathi-backend/internal/platform/auth"
 )
@@ -373,5 +374,140 @@ func TestThrottledLog(t *testing.T) {
 	// A clock that steps backwards never silences a key for good.
 	if !tl.allow("s1", t0.Add(-time.Hour), time.Minute) {
 		t.Fatal("a backwards clock must not suppress the line")
+	}
+}
+
+// chainShareRider rosters an existing rider at a second store too.
+func chainShareRider(t *testing.T, w *chainWorld, riderID, storeID primitive.ObjectID) {
+	t.Helper()
+	if _, err := w.db.Collection("role_assignments").InsertOne(context.Background(), bson.D{
+		{Key: "party_id", Value: riderID}, {Key: "role_code", Value: "DELIVERY_RIDER"},
+		{Key: "status", Value: "ACTIVE"}, {Key: "org_unit_id", Value: storeID},
+	}); err != nil {
+		t.Fatalf("share rider with store %s: %v", storeID.Hex(), err)
+	}
+}
+
+// chainOfferAt moves an instant offer to another store, with a drop near that
+// store, so it sits in that store's pool.
+func chainOfferAt(t *testing.T, w *chainWorld, taskID string, storeID primitive.ObjectID) {
+	t.Helper()
+	if _, err := w.db.Collection(collDeliveries).UpdateOne(context.Background(),
+		bson.D{{Key: "delivery_id", Value: taskID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "store_id", Value: storeID.Hex()}, {Key: "geo", Value: geoPt{Lat: 28.611, Lng: 77.201}}}}}); err != nil {
+		t.Fatalf("move offer to store %s: %v", storeID.Hex(), err)
+	}
+}
+
+// A manager's duty mark counts at that manager's own store only. A rider who
+// rides for two stores is on or off duty at the other store by their own
+// check-in (or that store's manager's mark), so the manager of store A can
+// neither pull a shared rider out of store B's pool nor push one into it.
+func TestManagerDutyMarkCountsOnlyAtTheirOwnStore(t *testing.T) {
+	w, _, done := chainDutyWorld(t)
+	defer done()
+	ctx := context.Background()
+	now := dutyAt(dutyDay, 10, 0)
+	storeB, mgrB := chainOtherStore(t, w)
+	bRider := chainAddRider(t, w, storeB, "Store B Rider")
+	chainShareRider(t, w, w.riderID, storeB) // Ravi rides for both stores
+	chainCheckIn(t, w, bRider.PartyID, dutyDay)
+
+	_, atA := chainInstantOffer(t, w, "9000006211")
+	_, atB := chainInstantOffer(t, w, "9000006212")
+	chainOfferAt(t, w, atB.ID, storeB)
+
+	// Ravi has not checked in; store B has an on-duty rider, store A has none.
+	if poolHas(t, w, w.rider, atB.ID, now) {
+		t.Fatal("setup: Ravi is off duty and store B has a rider on duty")
+	}
+	// Store A's manager marks Ravi on duty: at store A, not at store B.
+	if _, err := w.svc.setRiderDutyAt(ctx, w.mgr, w.storeID.Hex(), w.riderID.Hex(), true, "", now); err != nil {
+		t.Fatalf("mark on at A: %v", err)
+	}
+	if !poolHas(t, w, w.rider, atA.ID, now) {
+		t.Fatal("marked on duty at A, Ravi must see A's offer")
+	}
+	if poolHas(t, w, w.rider, atB.ID, now) {
+		t.Fatal("store A's manager put Ravi into store B's pool")
+	}
+	if _, err := w.svc.claimOfferedDeliveryAt(ctx, w.rider, atB.ID, now); geofenceCode(err) != "NOT_ON_DUTY" {
+		t.Fatalf("Ravi's claim at store B: %v, want NOT_ON_DUTY", err)
+	}
+	if r := rosterOf(t, w, mgrB, storeB, now)[w.riderID.Hex()]; r.OnDuty || r.DutySource != dutySourceNone {
+		t.Fatalf("store B's roster shows store A's mark: %+v", r)
+	}
+
+	// Ravi checks in; store A's manager marks him off: off at A, on at B.
+	chainCheckIn(t, w, w.riderID.Hex(), dutyDay)
+	if _, err := w.svc.setRiderDutyAt(ctx, w.mgr, w.storeID.Hex(), w.riderID.Hex(), false, "", now); err != nil {
+		t.Fatalf("mark off at A: %v", err)
+	}
+	if !poolHas(t, w, w.rider, atB.ID, now) {
+		t.Fatal("store A's manager pulled a checked-in Ravi out of store B's pool")
+	}
+	if r := rosterOf(t, w, mgrB, storeB, now)[w.riderID.Hex()]; !r.OnDuty || r.DutySource != dutySourceAttendance {
+		t.Fatalf("store B's roster for Ravi: %+v", r)
+	}
+	if r := rosterOf(t, w, w.mgr, w.storeID, now)[w.riderID.Hex()]; r.OnDuty || r.DutySource != dutySourceManager {
+		t.Fatalf("store A's roster for Ravi: %+v", r)
+	}
+	// Both stores' managers may mark the same rider the same day, each for
+	// their own store.
+	if _, err := w.svc.setRiderDutyAt(ctx, mgrB, storeB.Hex(), w.riderID.Hex(), true, "", now); err != nil {
+		t.Fatalf("store B's own mark on the shared rider: %v", err)
+	}
+	if n, _ := w.db.Collection(collRiderDutyOverrides).CountDocuments(ctx, bson.D{{Key: "rider_party_id", Value: w.riderID.Hex()}}); n != 2 {
+		t.Fatalf("override rows for one shared rider-day: %d want 2 (one per store)", n)
+	}
+}
+
+func rosterOf(t *testing.T, w *chainWorld, mgr auth.Actor, storeID primitive.ObjectID, at time.Time) map[string]riderSummary {
+	t.Helper()
+	rs, err := w.svc.storeRidersAt(context.Background(), mgr, storeID.Hex(), "", at)
+	if err != nil {
+		t.Fatalf("roster of %s: %v", storeID.Hex(), err)
+	}
+	out := map[string]riderSummary{}
+	for _, r := range rs {
+		out[r.PartyID] = r
+	}
+	return out
+}
+
+// A rider may claim an offer only from a store they ride for: the pool never
+// shows another store's offers, and the claim by id is refused the same way,
+// on duty or not, fallback or not.
+func TestRiderCannotClaimAnotherStoresOffer(t *testing.T) {
+	w, _, done := chainDutyWorld(t)
+	defer done()
+	ctx := context.Background()
+	now := dutyAt(dutyDay, 10, 0)
+	storeB, _ := chainOtherStore(t, w)
+	stranger := chainAddRider(t, w, storeB, "Store B Rider")
+
+	ord, task := chainInstantOffer(t, w, "9000006213")
+	// Nobody at store A is on duty (its pool is in fallback) and the stranger
+	// is off duty: refused.
+	if _, err := w.svc.claimOfferedDeliveryAt(ctx, stranger, task.ID, now); geofenceCode(err) != "FORBIDDEN" {
+		t.Fatalf("another store's rider (off duty, fallback): %v, want FORBIDDEN", err)
+	}
+	// On duty at their own store: still refused.
+	chainCheckIn(t, w, stranger.PartyID, dutyDay)
+	if poolHas(t, w, stranger, task.ID, now) {
+		t.Fatal("another store's offer in the stranger's pool")
+	}
+	if _, err := w.svc.claimOfferedDeliveryAt(ctx, stranger, task.ID, now); geofenceCode(err) != "FORBIDDEN" {
+		t.Fatalf("another store's rider (on duty): %v, want FORBIDDEN", err)
+	}
+	if d := chainTaskFor(t, w, ord.OrderID); d.Status != "OFFERED" || d.RiderPartyID != "" {
+		t.Fatalf("a refused claim changed the offer: %+v", d)
+	}
+	if o := w.orderByID(t, ord.OrderID); o.Status != "placed" {
+		t.Fatalf("a refused claim moved the order: %q", o.Status)
+	}
+	// The store's own rider still claims it.
+	if d, err := w.svc.claimOfferedDeliveryAt(ctx, w.rider, task.ID, now); err != nil || d.RiderPartyID != w.riderID.Hex() {
+		t.Fatalf("the store's own rider: %v %v", d, err)
 	}
 }

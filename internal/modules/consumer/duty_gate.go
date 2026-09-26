@@ -35,13 +35,19 @@ import (
 //  4. A duty lookup that fails opens the pool (fail open), for the same
 //     reason.
 //
-// ON DUTY for an IST day = the manager's override for that day when there is
-// one (on or off), else the rider's own attendance being ON_DUTY (checked in,
-// not yet checked out). Attendance itself is untouched: an override is never
-// written into rider_attendance, which is a payroll record backed by the
-// rider's own selfie.
+// ON DUTY at a store for an IST day = THAT store's manager's override for
+// that day when there is one (on or off), else the rider's own attendance
+// being ON_DUTY (checked in, not yet checked out). The override is per store:
+// a rider who rides for two stores is marked by each store's manager for
+// that store only, so the manager of store A can neither pull a shared rider
+// out of store B's pool nor push one into it. Attendance itself is
+// untouched: an override is never written into rider_attendance, which is a
+// payroll record backed by the rider's own selfie.
+//
+// A rider may claim only an offer of a store they ride for (the pool never
+// lists another store's offers, and a claim by id must not reach past it).
 
-// collRiderDutyOverrides — one row per (rider, IST day) a manager set.
+// collRiderDutyOverrides — one row per (rider, IST day, store) a manager set.
 const collRiderDutyOverrides = "rider_duty_overrides"
 
 // Duty sources on the wire (riderSummary.dutySource, the duty endpoint).
@@ -84,10 +90,10 @@ type riderDutyView struct {
 	DutySource string `json:"dutySource"`
 }
 
-// dutyForRiders reads the duty of each rider on an IST day: the manager's
-// override when present, else the rider's attendance. Every rider asked about
-// is in the answer (dutySourceNone when neither exists).
-func (r *repository) dutyForRiders(ctx context.Context, riderIDs []string, day string) (map[string]riderDuty, error) {
+// dutyForRiders reads the duty of each rider at one store on an IST day: that
+// store's manager override when present, else the rider's attendance. Every
+// rider asked about is in the answer (dutySourceNone when neither exists).
+func (r *repository) dutyForRiders(ctx context.Context, riderIDs []string, storeID, day string) (map[string]riderDuty, error) {
 	out := make(map[string]riderDuty, len(riderIDs))
 	if len(riderIDs) == 0 {
 		return out, nil
@@ -117,7 +123,9 @@ func (r *repository) dutyForRiders(ctx context.Context, riderIDs []string, day s
 		}
 	}
 
-	ocur, err := r.riderColl(collRiderDutyOverrides).Find(ctx, filter,
+	// Only this store's marks: another store's manager never decides here.
+	ofilter := bson.D{filter[0], filter[1], {Key: "store_id", Value: storeID}}
+	ocur, err := r.riderColl(collRiderDutyOverrides).Find(ctx, ofilter,
 		options.Find().SetProjection(bson.D{{Key: "rider_party_id", Value: 1}, {Key: "on_duty", Value: 1}}))
 	if err != nil {
 		return nil, errInternal("rider duty override lookup failed")
@@ -135,13 +143,12 @@ func (r *repository) dutyForRiders(ctx context.Context, riderIDs []string, day s
 	return out, nil
 }
 
-// upsertDutyOverride writes the manager's mark for (rider, day).
+// upsertDutyOverride writes the manager's mark for (rider, day, store).
 func (r *repository) upsertDutyOverride(ctx context.Context, doc riderDutyOverrideDoc) error {
 	_, err := r.riderColl(collRiderDutyOverrides).UpdateOne(ctx,
-		bson.D{{Key: "rider_party_id", Value: doc.RiderPartyID}, {Key: "day", Value: doc.Day}},
+		bson.D{{Key: "rider_party_id", Value: doc.RiderPartyID}, {Key: "day", Value: doc.Day}, {Key: "store_id", Value: doc.StoreID}},
 		bson.D{
 			{Key: "$set", Value: bson.D{
-				{Key: "store_id", Value: doc.StoreID},
 				{Key: "on_duty", Value: doc.OnDuty},
 				{Key: "by", Value: doc.By},
 				{Key: "reason", Value: doc.Reason},
@@ -157,32 +164,33 @@ func (r *repository) upsertDutyOverride(ctx context.Context, doc riderDutyOverri
 }
 
 // offerPoolStores returns the stores, of those given, whose unclaimed offers
-// the rider may see and claim now: all of them when the rider is on duty;
-// otherwise only the stores where no rider at all is on duty (the fallback).
-// Any lookup failure opens the store (never strand an order).
+// the rider may see and claim now: each store where the rider is on duty
+// (that store's mark, else their attendance), plus each store where no rider
+// at all is on duty (the fallback). Any lookup failure opens the store (never
+// strand an order).
 func (s *service) offerPoolStores(ctx context.Context, riderPartyID string, stores []string, now time.Time) []string {
 	if len(stores) == 0 {
 		return stores
 	}
 	day := istDay(now)
-	self, err := s.repo.dutyForRiders(ctx, []string{riderPartyID}, day)
-	if err != nil {
-		s.log.WarnContext(ctx, "rider duty lookup failed - offer pool left open", "rider", riderPartyID, "err", err)
-		return stores
-	}
-	if self[riderPartyID].OnDuty {
-		return stores
-	}
 	out := make([]string, 0, len(stores))
 	for _, st := range stores {
 		roster, rerr := s.repo.ridersForStore(ctx, st)
 		if rerr != nil {
+			s.log.WarnContext(ctx, "store roster lookup failed - offer pool left open", "store", st, "err", rerr)
 			out = append(out, st)
 			continue
 		}
-		duty, derr := s.repo.dutyForRiders(ctx, roster, day)
+		if !contains(roster, riderPartyID) {
+			roster = append(roster, riderPartyID)
+		}
+		duty, derr := s.repo.dutyForRiders(ctx, roster, st, day)
 		if derr != nil {
 			s.log.WarnContext(ctx, "store duty lookup failed - offer pool left open", "store", st, "err", derr)
+			out = append(out, st)
+			continue
+		}
+		if duty[riderPartyID].OnDuty {
 			out = append(out, st)
 			continue
 		}
@@ -211,12 +219,26 @@ func errNotOnDuty() *apiError {
 	return &apiError{status: http.StatusForbidden, Code: "NOT_ON_DUTY", Message: "Mark attendance at the centre to take new orders"}
 }
 
+// errNotYourStore refuses a claim of another store's offer.
+func errNotYourStore() *apiError {
+	return errForbidden("This order is from another store")
+}
+
 // claimAllowed applies the pool gate to one claim: the rider may claim an
-// OFFERED task only from a store whose pool they can see now.
+// OFFERED task only from a store whose pool they can see now, which is only
+// ever a store they ride for.
 func (s *service) claimAllowed(ctx context.Context, riderPartyID, taskID string, now time.Time) error {
 	t, err := s.repo.findDeliveryByID(ctx, taskID)
 	if err != nil || t.Status != "OFFERED" {
 		return nil // the claim itself answers not-found / already taken
+	}
+	// The pool lists only the rider's own stores' offers; a claim by id must
+	// not reach past it. A failed lookup leaves the claim open, as every
+	// other lookup in this gate does.
+	if mine, serr := s.repo.storesForRider(ctx, riderPartyID); serr != nil {
+		s.log.WarnContext(ctx, "rider store lookup failed - claim left open", "rider", riderPartyID, "err", serr)
+	} else if !contains(mine, t.StoreID) {
+		return errNotYourStore()
 	}
 	if len(s.offerPoolStores(ctx, riderPartyID, []string{t.StoreID}, now)) == 0 {
 		return errNotOnDuty()
@@ -241,7 +263,7 @@ func (s *service) setRiderDutyAt(ctx context.Context, actor auth.Actor, storeID,
 	}
 	day := istDay(now)
 	before := riderDuty{Source: dutySourceNone}
-	if prev, perr := s.repo.dutyForRiders(ctx, []string{riderPartyID}, day); perr == nil {
+	if prev, perr := s.repo.dutyForRiders(ctx, []string{riderPartyID}, storeID, day); perr == nil {
 		before = prev[riderPartyID]
 	}
 	by := s.assignerOf(ctx, actor)

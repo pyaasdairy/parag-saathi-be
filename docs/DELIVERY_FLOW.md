@@ -88,12 +88,19 @@ today** (IST), and only they may claim from it (`403 NOT_ON_DUTY`, message
 "Mark attendance at the centre to take new orders", otherwise). Code:
 `duty_gate.go`.
 
-**On duty** for an IST day = the store manager's mark for that day when there
-is one (on or off), otherwise the rider's own attendance being `ON_DUTY`
-(checked in, not yet checked out). Yesterday's check-in and a check-out both
-mean off duty. The manager's mark never writes `rider_attendance` (that is a
-payroll record backed by the rider's selfie); it lives in
-`rider_duty_overrides`, one row per rider per day.
+**On duty** at a store for an IST day = **that store's** manager's mark for
+that day when there is one (on or off), otherwise the rider's own attendance
+being `ON_DUTY` (checked in, not yet checked out). Yesterday's check-in and a
+check-out both mean off duty. The manager's mark never writes
+`rider_attendance` (that is a payroll record backed by the rider's selfie); it
+lives in `rider_duty_overrides`, one row per rider per day per store. A rider
+who rides for two stores is marked by each store's manager for that store
+only: the manager of store A can neither pull a shared rider out of store B's
+pool nor push one into it, and store B's roster never shows store A's mark.
+
+A rider may claim only an offer of a store they ride for. The pool never lists
+another store's offers, and a claim by id of one is refused with `403
+FORBIDDEN` ("This order is from another store"), on duty or not.
 
 What the gate never does:
 
@@ -105,8 +112,9 @@ What the gate never does:
    choice is visible), and may mark a rider on or off duty for today:
    `POST /consumer/stores/{storeId}/riders/{riderPartyId}/duty`
    `{"on_duty": true|false, "reason": "optional"}` →
-   `{partyId, day, onDuty, dutySource}`. Own store and own riders only;
-   audited as `consumer.rider.duty_override`.
+   `{partyId, day, onDuty, dutySource}`. Own store and own riders only, and
+   the mark counts at that store only; audited as
+   `consumer.rider.duty_override`.
 3. **Nobody on duty → everybody.** If no rider of a store is on duty, that
    store's pool falls back to every rider on its roster, exactly as before the
    gate, and the backend logs "no rider of the store is on duty - the instant
