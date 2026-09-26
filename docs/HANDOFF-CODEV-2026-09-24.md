@@ -1578,6 +1578,10 @@ Part 2 (decision 8 Saathi push, 9 hand-assign, 10 attendance) is `decisions/push
   `payment.source`) and both token cases (FF-04's `founding.line_moved`, B-03's `[X]`).
   Config: 59 triggers (`meta.trigger_count` 59), 55 templates (T-FF04, T-FF04-UNLOCKED and
   T-B03-AUTOPAY added to the 52).
+- AutoPay and members-only (`4ded1a8`): Smart Recharge's funding horizon (`autopayNeed`)
+  leaves out a PYAAS milk morning `FOUNDING_PYAAS_MEMBERS_ONLY` will refuse, as the CRM
+  wallet sums do, so the bank is never charged for milk the lock will not send
+  (`TestAutopayNeedLeavesOutAPyaasMorningMembersOnlyRefuses`).
 
 **Wire changes (all additive; no key removed or renamed)**
 
