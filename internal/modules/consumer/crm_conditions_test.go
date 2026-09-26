@@ -28,8 +28,8 @@ var crmKnownFactKeys = map[string]bool{
 	"member.started": true, "complaint.refundable_amount": true, "complaint.has_order": true,
 	"tomorrow.delivery_blocked": true, "offer.pack1_tomorrow": true,
 	"serviceability.has_orders": true, "serviceability.has_serviceable_address": true,
-	"founding.friend_farm_unlocked": true,
-	"payment.source": true,
+	"founding.friend_farm_unlocked": true,
+	"payment.source":                true,
 }
 
 func TestCRMCondConfigLinesParseOnKnownFacts(t *testing.T) {
