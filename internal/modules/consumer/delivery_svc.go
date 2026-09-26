@@ -104,8 +104,17 @@ func (s *service) createDeliveryForOrderAt(ctx context.Context, o *order, when t
 		DeliveryPrefs: prefs, DeliveryDate: orderDeliveryDate(o),
 		Status: status, OfferedAt: offeredAt, AssignedAt: now.Format(time.RFC3339), CreatedAt: now, UpdatedAt: now,
 	}
-	if err := s.repo.insertDelivery(ctx, del); err != nil {
+	inserted, err := s.repo.insertDeliveryOnce(ctx, del)
+	if err != nil {
 		return
+	}
+	// A new instant order rings the store's managers and riders
+	// (operator_push.go): the broadcast they race to accept. Only when THIS
+	// call stored the task: a duplicate create (the store console's backfill
+	// racing the order's own create) is dropped by the order_id index, and a
+	// ring for it would repeat the alert under a delivery id never stored.
+	if inserted && del.Status == "OFFERED" {
+		s.pushNewInstantOrder(ctx, when, del)
 	}
 	// CRM (contract C6, inert unless CRM_ENABLED): order.confirmed once the
 	// task exists. Instant and subscription orders both pass through here, so

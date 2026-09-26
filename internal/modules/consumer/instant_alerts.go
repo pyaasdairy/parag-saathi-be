@@ -228,6 +228,9 @@ func (s *service) raiseInstantAlert(ctx context.Context, z *zone, kind string, c
 	}
 	s.log.Info("instant closing alert raised", slog.String("store_id", z.StoreID), slog.String("kind", kind),
 		slog.String("close_at", closeUTC.Format(time.RFC3339)), slog.Int("recipients", len(managers)))
+	// Ring the managers' phones too (operator_push.go): once, because only
+	// the caller that won the claim gets here.
+	s.pushInstantAlert(ctx, now, kind, z.StoreID, params, managers)
 	return nil
 }
 

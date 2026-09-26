@@ -277,13 +277,21 @@ func (r *repository) findRiderPresence(ctx context.Context, partyID string) (geo
 }
 
 func (r *repository) insertDelivery(ctx context.Context, d *delivery) error {
+	_, err := r.insertDeliveryOnce(ctx, d)
+	return err
+}
+
+// insertDeliveryOnce is insertDelivery that also says whether THIS call
+// stored the task: false (and no error) when the order already had one, so a
+// caller can act once per task and never on a duplicate that was dropped.
+func (r *repository) insertDeliveryOnce(ctx context.Context, d *delivery) (bool, error) {
 	if _, err := r.deliveries.InsertOne(ctx, d); err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return nil // one delivery per order — already created
+			return false, nil // one delivery per order — already created
 		}
-		return errInternal("delivery create failed")
+		return false, errInternal("delivery create failed")
 	}
-	return nil
+	return true, nil
 }
 
 func (r *repository) findDeliveryByID(ctx context.Context, id string) (*delivery, error) {

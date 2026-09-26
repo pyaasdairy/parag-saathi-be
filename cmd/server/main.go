@@ -26,6 +26,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/mongodb"
 	"github.com/pyaas/saathi-backend/internal/platform/orgscope"
 	"github.com/pyaas/saathi-backend/internal/platform/provenance"
+	"github.com/pyaas/saathi-backend/internal/platform/push"
 	"github.com/pyaas/saathi-backend/internal/platform/ratelimit"
 	"github.com/pyaas/saathi-backend/internal/platform/sse"
 
@@ -136,6 +137,16 @@ func run() error {
 	bridgeSSE(eventbus.TopicPayoutCredited, "settlement.changed",
 		[]string{domain.RoleSamitiSacheev, domain.RoleSamitiAdhyaksh, domain.RoleUnionPresident, domain.RoleFarmer})
 
+	// Operator push (Saathi store managers and riders, FCM HTTP v1). Inert
+	// until FCM_SERVICE_ACCOUNT_JSON is set; the boot line says which door is
+	// open, so "the manager's phone never rang" is never a mystery.
+	operatorPush := push.NewOperator(push.NewOperatorRegistry(db), push.NewFCM(push.FCMConfig{
+		ServiceAccountJSON: cfg.FCMServiceAccountJSON,
+		ProjectID:          cfg.FCMProjectID,
+		BaseURL:            cfg.FCMBaseURL,
+	}))
+	operatorPush.LogStatus(log)
+
 	d := &deps.Deps{
 		Cfg:         cfg,
 		Log:         log,
@@ -148,6 +159,8 @@ func run() error {
 		Bus:         bus,
 		SSE:         sseHub,
 		RateLimiter: limiter,
+
+		OperatorPush: operatorPush,
 	}
 
 	srv := &http.Server{

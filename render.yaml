@@ -155,6 +155,15 @@ services:
         sync: false
       - key: EXPO_ACCESS_TOKEN
         sync: false
+      # Operator push (Saathi store managers and riders) over Firebase Cloud
+      # Messaging HTTP v1. FCM_SERVICE_ACCOUNT_JSON is the Firebase service-
+      # account key file (raw JSON or base64); FCM_PROJECT_ID is optional (the
+      # file's project_id). Unset: inert, devices still register at
+      # POST /api/v1/push/register and the boot log says nothing is sent.
+      - key: FCM_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: FCM_PROJECT_ID
+        sync: false
       # -- Referrals + Founding Family (referrals.go, founding.go) --
       # Money in PAISE; the ERP's FOUNDING-99 / DELIVERY-FEE prices win over
       # the fallbacks once the Dolibarr sync sees them. See .env.example.

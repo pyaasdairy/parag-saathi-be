@@ -15,6 +15,7 @@ import (
 	"github.com/pyaas/saathi-backend/internal/platform/flags"
 	"github.com/pyaas/saathi-backend/internal/platform/orgscope"
 	"github.com/pyaas/saathi-backend/internal/platform/provenance"
+	"github.com/pyaas/saathi-backend/internal/platform/push"
 	"github.com/pyaas/saathi-backend/internal/platform/ratelimit"
 	"github.com/pyaas/saathi-backend/internal/platform/sse"
 )
@@ -32,4 +33,8 @@ type Deps struct {
 	Bus         *eventbus.Bus
 	SSE         *sse.Hub
 	RateLimiter ratelimit.Limiter
+	// OperatorPush rings store managers' and riders' Saathi phones over FCM
+	// (internal/platform/push). Nil-safe and inert until
+	// FCM_SERVICE_ACCOUNT_JSON is set; tests leave it nil.
+	OperatorPush *push.Operator
 }
