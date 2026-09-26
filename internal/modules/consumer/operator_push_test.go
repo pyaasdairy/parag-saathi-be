@@ -8,6 +8,8 @@ package consumer
 //   - a new instant order (OFFERED) rings the store's managers and its riders,
 //     never another store's, a revoked rider or a party with no store role;
 //     it rings in quiet hours (an order alert) and a dead token is pruned;
+//   - of the riders, only those whose offer pool shows the order ring: the
+//     on-duty ones, or all of them when nobody is on duty (duty_gate.go);
 //   - the closing alert rings the managers once, in quiet hours too (a
 //     delivery alert); the "now closed" notice waits out quiet hours (its
 //     inbox row still lands) and rings when the close is in the day;
@@ -409,4 +411,71 @@ func TestOperatorPushLowStockPostIsScopedToTheManagersOwnStore(t *testing.T) {
 	if got := rec.take(); len(got) != 2 || got[0].Data["store_id"] != storeB.Hex() || got[1].Data["store_id"] != w.storeID.Hex() {
 		t.Fatalf("own-store posts: %+v", got)
 	}
+}
+
+// Founder decision 10 meets decision 8: the new-order ring follows the
+// duty-gated offer pool (duty_gate.go). With a rider on duty, only the on-duty
+// riders ring, and the managers always do; the manager's duty marks move the
+// ring with the pool; nobody on duty rings every store rider, as the pool falls
+// back; and a manager who also rides for the store rings once, on duty or not.
+func TestOperatorPushNewInstantOrderRingsOnlyTheRidersOnDuty(t *testing.T) {
+	w, suresh, done := chainDutyWorld(t)
+	defer done()
+	ctx := context.Background()
+	rec := opPushWire(t, w, map[string]string{
+		w.mgr.PartyID: "tok-mgr", w.rider.PartyID: "tok-ravi", suresh.PartyID: "tok-suresh",
+	})
+	cid := w.customer(t, "9000007311", 0)
+	orders := 0
+	ring := func(at time.Time, want ...string) {
+		t.Helper()
+		orders++
+		w.svc.createDeliveryForOrderAt(ctx, opPushOrder(cid, "ord_push_duty_"+strconv.Itoa(orders), "instant", at), at)
+		msgs := rec.take()
+		got := opPushTokens(msgs)
+		if len(msgs) != len(want) || len(got) != len(want) {
+			t.Fatalf("order %d rang %d messages to %v, want exactly %v", orders, len(msgs), got, want)
+		}
+		for _, tok := range want {
+			if _, ok := got[tok]; !ok {
+				t.Fatalf("order %d: %s did not ring (rang %v)", orders, tok, got)
+			}
+		}
+	}
+	now := dutyAt(dutyDay, 10, 0)
+
+	// Nobody has checked in: the pool is every rider's, and so is the ring.
+	ring(now, "tok-mgr", "tok-ravi", "tok-suresh")
+
+	// Ravi checks in: Suresh can no longer see or claim offers, so he is not
+	// woken for one.
+	chainCheckIn(t, w, w.riderID.Hex(), dutyDay)
+	ring(now.Add(time.Minute), "tok-mgr", "tok-ravi")
+
+	// The manager puts Suresh on duty and Ravi off: the ring follows the marks.
+	if _, err := w.svc.setRiderDutyAt(ctx, w.mgr, w.storeID.Hex(), suresh.PartyID, true, "", now); err != nil {
+		t.Fatalf("mark Suresh on: %v", err)
+	}
+	if _, err := w.svc.setRiderDutyAt(ctx, w.mgr, w.storeID.Hex(), w.riderID.Hex(), false, "went home", now); err != nil {
+		t.Fatalf("mark Ravi off: %v", err)
+	}
+	ring(now.Add(2*time.Minute), "tok-mgr", "tok-suresh")
+
+	// The manager also rides for the store and is off duty: they still ring,
+	// once, as the manager.
+	mgrOID, err := primitive.ObjectIDFromHex(w.mgr.PartyID)
+	if err != nil {
+		t.Fatalf("manager id: %v", err)
+	}
+	if _, err := w.db.Collection("role_assignments").InsertOne(ctx, bson.D{
+		{Key: "party_id", Value: mgrOID}, {Key: "role_code", Value: "DELIVERY_RIDER"},
+		{Key: "status", Value: "ACTIVE"}, {Key: "org_unit_id", Value: w.storeID},
+	}); err != nil {
+		t.Fatalf("manager's rider role: %v", err)
+	}
+	ring(now.Add(3*time.Minute), "tok-mgr", "tok-suresh")
+
+	// The next IST day: no check-in and the marks have lapsed, so the pool
+	// falls back and every store rider rings again (the manager once).
+	ring(dutyAt(addDaysIST(dutyDay, 1), 10, 0), "tok-mgr", "tok-ravi", "tok-suresh")
 }

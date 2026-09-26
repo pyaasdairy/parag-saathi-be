@@ -22,9 +22,12 @@ import (
 // (internal/platform/push, deps.OperatorPush):
 //
 //   - STORE_INSTANT_ORDER, a new instant order broadcast as OFFERED: the
-//     store's managers and its riders (every ACTIVE STORE_MANAGER and
-//     DELIVERY_RIDER assignment on the store). An ORDER alert: rings in
-//     quiet hours too. Push only; the order itself is the record.
+//     store's managers (every ACTIVE STORE_MANAGER assignment on the store)
+//     and the riders whose offer pool shows it (duty_gate.go, founder
+//     decision 10): the store's on-duty riders, or every ACTIVE
+//     DELIVERY_RIDER of the store when none is on duty or the duty lookup
+//     fails, as the pool itself falls back. An ORDER alert: rings in quiet
+//     hours too. Push only; the order itself is the record.
 //   - STORE_INSTANT_CLOSING, 15 minutes before instant closes: the store's
 //     managers. A DELIVERY alert (the lane is running and the manager must act
 //     before it closes, extended closes run to 02:00): rings in quiet hours.
@@ -36,8 +39,9 @@ import (
 //
 // Every one of them except the new order also keeps its inbox row, so a held
 // alert only skips the ring; the Saathi bell shows it on the next open.
-// Recipient selection is deliberately simple (managers + the store's riders):
-// nothing here reads attendance yet.
+// Recipient selection is deliberately simple: managers, plus the riders who
+// can take the order now. A rider off duty while a colleague is on duty would
+// only be told about an order they can neither see nor claim.
 //
 // Inert until FCM_SERVICE_ACCOUNT_JSON is set: no recipient query, no
 // goroutine, byte-identical behaviour for every flow that raises an alert.
@@ -106,41 +110,105 @@ func recipientIDs(rs []adminRecipient) []primitive.ObjectID {
 	return out
 }
 
-// storeOpsRecipients is a store's ACTIVE STORE_MANAGER and DELIVERY_RIDER
-// holders, distinct: who hears a new instant order.
-func (r *repository) storeOpsRecipients(ctx context.Context, storeID string) ([]primitive.ObjectID, error) {
+// storeOperators is a store's ACTIVE STORE_MANAGER holders and its ACTIVE
+// DELIVERY_RIDER holders, each list distinct (a party may be in both).
+func (r *repository) storeOperators(ctx context.Context, storeID string) (managers, riders []primitive.ObjectID, err error) {
 	storeOID, err := primitive.ObjectIDFromHex(storeID)
 	if err != nil {
-		return nil, nil // not a STORE org unit id: nobody to tell
+		return nil, nil, nil // not a STORE org unit id: nobody to tell
 	}
 	cur, err := r.roleAssignments.Find(ctx, bson.D{
 		{Key: "org_unit_id", Value: storeOID},
 		{Key: "role_code", Value: bson.D{{Key: "$in", Value: bson.A{domain.RoleStoreManager, domain.RoleDeliveryRider}}}},
 		{Key: "status", Value: domain.RoleAssignmentActive},
-	}, options.Find().SetProjection(bson.D{{Key: "party_id", Value: 1}}).SetLimit(200))
+	}, options.Find().SetProjection(bson.D{{Key: "party_id", Value: 1}, {Key: "role_code", Value: 1}}).SetLimit(200))
 	if err != nil {
-		return nil, httpx.Internal(fmt.Errorf("find store operators: %w", err))
+		return nil, nil, httpx.Internal(fmt.Errorf("find store operators: %w", err))
 	}
 	var rows []struct {
-		PartyID primitive.ObjectID `bson:"party_id"`
+		PartyID  primitive.ObjectID `bson:"party_id"`
+		RoleCode string             `bson:"role_code"`
 	}
 	if err := cur.All(ctx, &rows); err != nil {
-		return nil, httpx.Internal(fmt.Errorf("decode store operators: %w", err))
+		return nil, nil, httpx.Internal(fmt.Errorf("decode store operators: %w", err))
 	}
-	seen := map[primitive.ObjectID]bool{}
-	out := make([]primitive.ObjectID, 0, len(rows))
+	seenM, seenR := map[primitive.ObjectID]bool{}, map[primitive.ObjectID]bool{}
 	for _, row := range rows {
-		if row.PartyID.IsZero() || seen[row.PartyID] {
+		if row.PartyID.IsZero() {
 			continue
 		}
-		seen[row.PartyID] = true
-		out = append(out, row.PartyID)
+		switch row.RoleCode {
+		case domain.RoleStoreManager:
+			if !seenM[row.PartyID] {
+				seenM[row.PartyID] = true
+				managers = append(managers, row.PartyID)
+			}
+		case domain.RoleDeliveryRider:
+			if !seenR[row.PartyID] {
+				seenR[row.PartyID] = true
+				riders = append(riders, row.PartyID)
+			}
+		}
+	}
+	return managers, riders, nil
+}
+
+// newOrderRecipients is who hears a new instant order at `now`: the store's
+// managers, and the store's riders whose offer pool shows it (ridersInOfferPool).
+// Distinct: a manager who also rides for the store rings once.
+func (s *service) newOrderRecipients(ctx context.Context, storeID string, now time.Time) ([]primitive.ObjectID, error) {
+	managers, riders, err := s.repo.storeOperators(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[primitive.ObjectID]bool{}
+	out := make([]primitive.ObjectID, 0, len(managers)+len(riders))
+	for _, group := range [][]primitive.ObjectID{managers, s.ridersInOfferPool(ctx, storeID, riders, now)} {
+		for _, id := range group {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
 	}
 	return out, nil
 }
 
-// pushNewInstantOrder rings the store's managers and riders for a task just
-// broadcast as OFFERED. Collapsed per task, so a re-send never stacks.
+// ridersInOfferPool narrows a store's riders to those who can see and claim
+// its unclaimed offers at `now`, by the pool's own rule (duty_gate.go
+// offerPoolStores): the riders on duty at this store today (its manager's mark,
+// else their attendance); every one of them when none is on duty (the pool's
+// fallback, so a missed check-in never leaves an order unheard) or when the
+// duty lookup fails (fail open, as the pool does).
+func (s *service) ridersInOfferPool(ctx context.Context, storeID string, riders []primitive.ObjectID, now time.Time) []primitive.ObjectID {
+	if len(riders) == 0 {
+		return riders
+	}
+	ids := make([]string, 0, len(riders))
+	for _, id := range riders {
+		ids = append(ids, id.Hex())
+	}
+	duty, err := s.repo.dutyForRiders(ctx, ids, storeID, istDay(now))
+	if err != nil {
+		s.log.WarnContext(ctx, "operator push: store duty lookup failed - every store rider hears the new order",
+			slog.String("store", storeID), slog.Any("err", err))
+		return riders
+	}
+	on := make([]primitive.ObjectID, 0, len(riders))
+	for _, id := range riders {
+		if duty[id.Hex()].OnDuty {
+			on = append(on, id)
+		}
+	}
+	if len(on) == 0 {
+		return riders
+	}
+	return on
+}
+
+// pushNewInstantOrder rings the store's managers and its riders who can take
+// it (newOrderRecipients) for a task just broadcast as OFFERED. Collapsed per
+// task, so a re-send never stacks.
 func (s *service) pushNewInstantOrder(ctx context.Context, now time.Time, d *delivery) {
 	items := 0
 	for _, it := range d.Items {
@@ -170,7 +238,7 @@ func (s *service) pushNewInstantOrder(ctx context.Context, now time.Time, d *del
 		Urgent:      true,
 		CollapseKey: "order-" + d.ID,
 	}, func(ctx context.Context) ([]primitive.ObjectID, error) {
-		return s.repo.storeOpsRecipients(ctx, storeID)
+		return s.newOrderRecipients(ctx, storeID, now)
 	})
 }
 

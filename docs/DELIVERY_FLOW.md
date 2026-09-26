@@ -128,6 +128,12 @@ What the gate never does:
 The store's rider roster (`GET /consumer/stores/{storeId}/riders`) carries the
 additive keys `onDuty` and `dutySource` (`attendance` | `manager` | `none`).
 
+The "New instant order" push to Saathi phones (`docs/OPERATOR-PUSH.md`) follows
+the same rule: the store's managers always ring, and of its riders only those
+whose pool shows the order (the on-duty riders, or every rider when nobody is
+on duty or the lookup fails). A rider who cannot see or claim the offer is not
+woken for it.
+
 ## Admin delivery CRM
 
 `/consumer/admin/*` — SUPER_ADMIN role token, or `X-Admin-Key: $ADMIN_API_KEY`

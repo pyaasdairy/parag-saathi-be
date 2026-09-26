@@ -11,14 +11,19 @@ works exactly as before with the in-app bell.
 
 | Alert | When | Who | Quiet hours 22:00-07:00 IST |
 |---|---|---|---|
-| `STORE_INSTANT_ORDER` "New instant order" | an instant order is broadcast as OFFERED | the store's ACTIVE store managers and riders | rings (order alert) |
+| `STORE_INSTANT_ORDER` "New instant order" | an instant order is broadcast as OFFERED | the store's ACTIVE store managers, and the store's riders who can take it: those on duty today, or all of them when none is | rings (order alert) |
 | `STORE_INSTANT_CLOSING` "Instant delivery closes at 10:00 PM" | 15 min before instant closes (again before an extended close) | the store's managers | rings (delivery alert: the lane is running and the manager must act before it closes; extended closes run to 02:00) |
 | `STORE_INSTANT_CLOSED` "Instant delivery is now closed" | at the close | the store's managers | held |
 | `STORE_LOW_STOCK` "Low stock at <store>" | the store's low set changes (the same set posted again stays silent) | platform admins (SUPER_ADMIN / PCDF_ADMIN), as the inbox row | held |
 
 "Held" means the phone does not ring; the inbox row is still written, so the Saathi bell
 shows it on the next open. Nothing is queued for the morning. Recipient selection is
-deliberately simple (store managers + the store's riders); it does not read attendance.
+deliberately simple: store managers, plus the riders whose offer pool shows the order. That
+follows the attendance gate of `docs/DELIVERY_FLOW.md` (founder decision 10): when any rider
+of the store is on duty today (their check-in, or the store manager's duty mark) only the
+on-duty riders ring; when nobody is on duty, or the duty lookup fails, every rider of the
+store rings, as the pool falls back to all of them. A manager who also rides for the store
+rings once, as the manager.
 
 Each push carries `data.type` (the alert kind), `data.store_id` and, for an order,
 `data.delivery_id` / `data.order_id`, so the app can route a tap. A newer alert of the same
@@ -70,7 +75,8 @@ Code: `internal/platform/push/fcm.go` (sender), `internal/platform/push/operator
    says what is missing.
 5. **Check.** Sign in on Saathi as a store manager, allow notifications, and
    `POST /push/register` answers `delivery: "fcm"`. Place an instant order in the store's
-   area: the manager's and the store's riders' phones ring "New instant order".
+   area: the manager's phone and the phones of the store's on-duty riders (every rider's,
+   when nobody has checked in) ring "New instant order".
 
 Keep the service-account file secret (it can send to every device of the project). Rotate
 it by generating a new key, updating `FCM_SERVICE_ACCOUNT_JSON` and deleting the old key in
